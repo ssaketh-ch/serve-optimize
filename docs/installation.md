@@ -88,13 +88,7 @@ The target directory must not already exist.
 
 Clean profile verification completed on 2026-06-16.
 
-The captured doctor output, package inventories, dependency checks, SGLang toolchain details, and wheel metadata are under:
-
-```text
-results/phase3-installation
-```
-
-The historical `serve-vllm-baseline` environment did not include the direct NVML binding. The reproducible vLLM profile includes it so telemetry availability does not depend on an ambient package.
+The reproducible vLLM profile includes the direct NVML binding so telemetry availability does not depend on an ambient package.
 
 ## Constraints
 

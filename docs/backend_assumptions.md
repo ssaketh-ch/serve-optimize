@@ -43,7 +43,7 @@ Detection failure does not imply optional flag support.
 
 SGLang supports the common managed fields plus capability detected memory fraction, request capacity, compatible AWQ or GPTQ quantization, chunked prefill size, radix cache disable, CUDA graph controls, served model naming, remote code trust, and piecewise CUDA graph disable.
 
-On the validated host:
+For local SGLang runtimes that need native compilation:
 
 * `source scripts/env_base_runtime.sh` is required
 * GCC Toolset `12.2.1` must lead compiler resolution

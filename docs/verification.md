@@ -125,7 +125,7 @@ Recorded on 2026-06-16:
 
 ### vLLM
 
-* environment: `serve-vllm-baseline`
+* profile: `requirements/profiles/vllm.txt`
 * vLLM: `0.10.0`
 * Torch: `2.7.1+cu126`
 * CUDA runtime: `12.6`
@@ -133,7 +133,7 @@ Recorded on 2026-06-16:
 
 ### SGLang
 
-* environment: `serve-sglang-latest`
+* profile: `requirements/profiles/sglang.txt`
 * SGLang: `0.5.10.post1`
 * Torch: `2.9.1+cu128`
 * CUDA runtime: `12.8`
@@ -197,7 +197,7 @@ Recorded on 2026-06-16:
 
 * Attach Mode dry run wrote `preflight.json`, `preflight.txt`, and candidate plan artifacts without endpoint access
 * Managed vLLM dry run wrote preflight, rendered launch, workload, launch group, and validation artifacts without launch
-* Managed SGLang dry run passed in `serve-sglang-latest`
+* Managed SGLang dry run passed in the validated SGLang profile
 * SGLang dry run rendered `--disable-piecewise-cuda-graph`
 * focused dry run tests passed
 * compilation passed

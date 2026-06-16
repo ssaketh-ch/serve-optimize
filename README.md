@@ -29,31 +29,15 @@ Verified capabilities include:
 * lifecycle diagnostics for availability, launch, health, benchmark, stop, and interruption failures
 * release readiness checks and research package artifacts
 
-The validated local backend environments are:
+Validated backend stacks:
 
-| Backend | Environment | Validated version | Status |
-|---|---|---|---|
-| vLLM | `serve-vllm-baseline` | vLLM `0.10.0` | First class Managed Mode |
-| SGLang | `serve-sglang-latest` | SGLang `0.5.10.post1` | First class for the supported detected surface |
-| TensorRT LLM | none | none | Not implemented |
+| Backend | Validated version | Status |
+|---|---|---|
+| vLLM | `0.10.0` | First class Managed Mode |
+| SGLang | `0.5.10.post1` | First class for the supported detected surface |
+| TensorRT LLM | none | Not implemented |
 
 See [Compatibility](docs/compatibility.md) for the exact support, evidence, artifact, installation, and exclusion contracts.
-
-## Portability Notes
-
-Serve Optimize is designed to move between NVIDIA servers by separating source code, runtime environments, local model weights, and measured artifacts.
-
-For a new RTX Pro 6000 server:
-
-1. Clone the repository.
-2. Create a fresh profile environment from `requirements/profiles/core.txt`.
-3. Run `serve-optimize detect`.
-4. Run `serve-optimize doctor --profile core`.
-5. Create separate vLLM and SGLang environments only if those backends are needed.
-6. Run Managed Mode with `--dry-run` first.
-7. Collect fresh runtime fingerprinted evidence on the new host.
-
-Do not copy `results/`, local model weights, or evidence databases as proof for a new server. They can be archived, but fresh evidence is required for exact reuse on new hardware.
 
 ## Install
 
@@ -130,7 +114,7 @@ Managed Mode owns process lifecycle through backend adapters.
 ### vLLM
 
 ```bash
-conda activate serve-vllm-baseline
+# Activate an environment installed from requirements/profiles/vllm.txt
 
 serve-optimize managed-evaluate \
   --backend vllm \
@@ -179,7 +163,7 @@ Managed recommendations also write optimizer quality artifacts. `optimizer_quali
 The validated SGLang runtime requires GCC Toolset 12 through the repository helper:
 
 ```bash
-conda activate serve-sglang-latest
+# Activate an environment installed from requirements/profiles/sglang.txt
 source scripts/env_base_runtime.sh
 
 serve-optimize managed-evaluate \
@@ -193,7 +177,7 @@ serve-optimize managed-evaluate \
   --out results/managed-sglang
 ```
 
-On the validated host, SGLang candidates preserve and fingerprint:
+SGLang candidates preserve and fingerprint:
 
 ```text
 --disable-piecewise-cuda-graph

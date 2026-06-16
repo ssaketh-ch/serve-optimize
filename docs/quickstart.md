@@ -46,7 +46,7 @@ Add `--dry-run` first to write a preflight plan without endpoint health checks o
 ## Managed vLLM
 
 ```bash
-conda activate serve-vllm-baseline
+# Activate an environment installed from requirements/profiles/vllm.txt
 
 serve-optimize managed-evaluate \
   --backend vllm \
@@ -62,7 +62,7 @@ serve-optimize managed-evaluate \
 ## Managed SGLang
 
 ```bash
-conda activate serve-sglang-latest
+# Activate an environment installed from requirements/profiles/sglang.txt
 source scripts/env_base_runtime.sh
 
 serve-optimize managed-evaluate \

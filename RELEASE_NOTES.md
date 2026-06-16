@@ -29,6 +29,6 @@ Known limits:
 * TensorRT LLM Managed Mode is not implemented.
 * Latest vLLM is not validated.
 * vLLM and SGLang require separate environments.
-* RTX Pro 6000 requires fresh runtime fingerprinted evidence before exact reuse.
+* New hardware requires fresh runtime fingerprinted evidence before exact reuse.
 * Prefill and decode energy attribution is not implemented.
 * Recommendations are scoped to best among evaluated candidates.

@@ -14,16 +14,11 @@ Recorded fields may include:
 
 Missing telemetry fields are capability limitations, not zero values.
 
-## Validated Host
+## Backend Runtime Requirements
 
-The current Managed Mode evidence baseline was produced on an NVIDIA H200 NVL host.
+Managed Mode requires a compatible NVIDIA GPU, a supported backend runtime, and an OpenAI compatible serving endpoint.
 
-Validated backend environments:
-
-* `serve-vllm-baseline`
-* `serve-sglang-latest`
-
-SGLang uses GCC Toolset `12.2.1` through `scripts/env_base_runtime.sh`.
+The validated backend stacks are listed in [Support Matrix](support_matrix.md). SGLang uses GCC Toolset `12.2.1` through `scripts/env_base_runtime.sh` when local compilation needs it.
 
 ## MIG
 
@@ -37,28 +32,20 @@ Schema, CLI, synthetic, and some functional tests can run without supported GPU 
 
 Managed backend measurements require a compatible installed runtime and hardware.
 
-## RTX Pro 6000 Migration
+## New Hardware Setup
 
-RTX Pro 6000 is a supported evaluation target when the server exposes NVIDIA telemetry and the selected backend runtime installs cleanly.
-
-Migration checklist:
+For any new NVIDIA host:
 
 1. Install the core profile in a fresh environment.
 2. Run `serve-optimize detect`.
 3. Run `serve-optimize telemetry-check --telemetry auto --duration 5`.
-4. Install the vLLM profile in its own environment if vLLM Managed Mode is needed.
-5. Install the SGLang profile in its own environment if SGLang Managed Mode is needed.
-6. Run `serve-optimize managed-evaluate --dry-run` before any measured run.
-7. Collect fresh runtime fingerprinted evidence on the RTX Pro 6000 host.
-8. Validate repeats with `serve-optimize validate-campaign`.
+4. Install backend profiles only for the backends you plan to run.
+5. Run `serve-optimize managed-evaluate --dry-run` before measured runs.
+6. Collect fresh runtime fingerprinted evidence on the new host.
+7. Validate repeatability with `serve-optimize validate-campaign`.
 
-Do not reuse H200 evidence as exact evidence on RTX Pro 6000. The hardware fingerprint must change.
+Evidence from another host can be archived and analyzed, but it cannot be reused as exact evidence when the hardware fingerprint changes.
 
 ## Broader Hardware Evaluation
-
-Additional evidence can be collected for:
-
-* H200 MIG profiles
-* additional NVIDIA architectures
 
 Each new system needs fresh runtime fingerprinted evidence before recommendation claims are made for that hardware.

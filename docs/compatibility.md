@@ -178,16 +178,16 @@ Current core development install:
 pip install -e ".[dev]"
 ```
 
-Validated backend measurements use isolated Conda environments:
+Validated backend measurements use isolated environments installed from:
 
-* `serve-vllm-baseline`
-* `serve-sglang-latest`
+* `requirements/profiles/vllm.txt`
+* `requirements/profiles/sglang.txt`
 
 Backend extras and requirement profiles are pinned to the validated vLLM and SGLang stacks. The backend profiles are mutually exclusive because their Torch and Transformers requirements conflict.
 
 See `docs/installation.md` for clean pip installation and profile verification commands.
 
-The `serve-vllm-latest` environment records an unsuccessful vLLM `0.23.0` installation caused by Cargo certificate trust while fetching from `static.crates.io`. SSL verification was not disabled and must remain enabled.
+Unvalidated backend versions are not part of the support contract. SSL verification must remain enabled for dependency installation.
 
 ## Explicit Exclusions
 
