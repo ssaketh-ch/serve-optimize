@@ -1,0 +1,18 @@
+name: synthetic-smoke
+description: Synthetic pipeline validation for CI and offline optimizer checks.
+hardware:
+  required_gpu: false
+models:
+  - tinyllama-1.1b
+  - mistral-7b
+goals:
+  - performance
+  - balanced
+  - efficient
+candidate_limit: 24
+runner: dry-run
+outputs:
+  directory: results/dry-run
+  formats:
+    - json
+    - jsonl

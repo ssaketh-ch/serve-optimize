@@ -1,0 +1,21 @@
+{
+  "config": {
+    "backend": "dry-run",
+    "dtype": "fp16",
+    "id": "cfg-example",
+    "kv_cache_policy": "paged",
+    "max_batch_size": 8,
+    "max_context_tokens": 4096,
+    "model_id": "mistral-7b",
+    "quantization": "awq-int4",
+    "scheduler": "continuous-batching"
+  },
+  "throughput_tok_s": 520.0,
+  "average_power_watts": 180.0,
+  "joules_per_token": 0.346154,
+  "tokens_per_watt": 2.888889,
+  "raw": {
+    "mode": "dry-run"
+  }
+}
+

@@ -1,0 +1,53 @@
+benchmark_clients:
+  internal_openai_client:
+    priority: 1
+    status: planned
+    metrics:
+      - requests_per_second
+      - output_tokens_per_second
+      - ttft_ms
+      - inter_token_latency_ms
+      - p50_latency_ms
+      - p95_latency_ms
+      - p99_latency_ms
+  genai_perf:
+    priority: 2
+    status: planned
+    endpoint_types:
+      - openai-chat
+      - openai-completions
+      - triton
+    metrics:
+      - ttft
+      - inter_token_latency
+      - request_throughput
+      - output_token_throughput
+  vllm_bench_serve:
+    priority: 3
+    status: planned
+    endpoint_types:
+      - vllm
+      - openai-compatible
+    metrics:
+      - throughput
+      - latency
+      - goodput
+  sglang_bench_serving:
+    priority: 4
+    status: planned
+    endpoint_types:
+      - sglang-native
+      - openai-compatible
+      - vllm
+      - lmdeploy
+      - trt
+    metrics:
+      - throughput
+      - ttft
+      - inter_token_latency
+      - end_to_end_latency
+  tokenpowerbench_import:
+    priority: 5
+    status: planned
+    purpose: import or compare phase-aligned power benchmark traces
+

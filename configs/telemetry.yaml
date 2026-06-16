@@ -1,0 +1,62 @@
+telemetry_providers:
+  nvml:
+    priority: 1
+    status: partially-implemented
+    metrics:
+      - power.draw
+      - power.limit
+      - memory.used
+      - memory.free
+      - clocks.sm
+      - clocks.mem
+      - utilization.gpu
+    notes:
+      - Preferred direct API path for NVIDIA systems.
+  nvidia_smi:
+    priority: 2
+    status: implemented
+    metrics:
+      - gpu identity
+      - memory
+      - power draw
+      - power limit when exposed
+      - clocks
+      - MIG mode
+    notes:
+      - Useful fallback and smoke-test path.
+  dcgm:
+    priority: 3
+    status: planned
+    metrics:
+      - DCGM_FI_DEV_POWER_USAGE
+      - DCGM_FI_DEV_GPU_UTIL
+      - DCGM_FI_DEV_FB_USED
+      - DCGM_FI_PROF_SM_ACTIVE
+      - DCGM_FI_PROF_DRAM_ACTIVE
+    notes:
+      - Production datacenter telemetry path.
+  dcgm_exporter:
+    priority: 4
+    status: planned
+    metrics:
+      - prometheus metrics
+      - fleet telemetry
+    notes:
+      - Useful for long-running production deployments.
+  external_meter:
+    priority: 5
+    status: planned
+    metrics:
+      - wall_power
+      - node_energy
+    notes:
+      - Use to validate GPU-only telemetry and node-level claims.
+  codecarbon:
+    priority: 6
+    status: optional
+    metrics:
+      - energy_kwh
+      - emissions_kg
+    notes:
+      - Useful for emissions reporting, not phase-level inference diagnosis.
+

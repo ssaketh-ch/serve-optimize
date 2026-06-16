@@ -1,0 +1,36 @@
+name: h200-mig-energy-frontier
+description: Primary MIG energy-performance experiment plan.
+hardware:
+  gpu: NVIDIA H200
+  mig_required: true
+  visible_memory_gb: 71
+models:
+  - mistral-7b
+  - qwen2.5-7b
+backends:
+  - vllm
+  - sglang
+quantization:
+  - none
+  - awq-int4
+  - gptq-int4
+context_tokens:
+  - 2048
+  - 4096
+  - 8192
+  - 16384
+concurrency:
+  - 1
+  - 4
+  - 8
+  - 16
+  - 32
+power_limit_fractions:
+  - 1.0
+  - 0.9
+  - 0.8
+  - 0.7
+trials: 5
+warmup_seconds: 60
+measurement_seconds: 180
+

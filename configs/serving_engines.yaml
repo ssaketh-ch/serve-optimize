@@ -1,0 +1,89 @@
+serving_engines:
+  vllm:
+    priority: 1
+    status: adapter-scaffolded
+    endpoint: openai-compatible
+    benchmark_tools:
+      - serve-optimize internal client
+      - vllm bench serve
+      - genai-perf
+    key_knobs:
+      - dtype
+      - quantization
+      - max_model_len
+      - gpu_memory_utilization
+      - max_num_seqs
+      - max_num_batched_tokens
+      - enable_chunked_prefill
+      - enable_prefix_caching
+      - tensor_parallel_size
+  sglang:
+    priority: 2
+    status: adapter-scaffolded
+    endpoint: openai-compatible
+    benchmark_tools:
+      - serve-optimize internal client
+      - sglang bench_serving
+      - genai-perf
+    key_knobs:
+      - dtype
+      - quantization
+      - context_length
+      - mem_fraction_static
+      - chunked_prefill_size
+      - schedule_policy
+      - tensor_parallel_size
+  tensorrt_llm:
+    priority: 3
+    status: planned
+    endpoint: openai-compatible through trtllm-serve
+    benchmark_tools:
+      - genai-perf
+      - trtllm-bench
+    key_knobs:
+      - engine_build_config
+      - kv_cache_type
+      - max_batch_size
+      - max_num_tokens
+      - fp8
+      - int8
+      - int4
+  tgi:
+    priority: 4
+    status: planned
+    endpoint: openai-compatible
+    benchmark_tools:
+      - genai-perf
+      - internal client
+    key_knobs:
+      - max_batch_prefill_tokens
+      - max_batch_total_tokens
+      - max_input_tokens
+      - quantize
+  lmdeploy:
+    priority: 5
+    status: planned
+    endpoint: openai-compatible
+    benchmark_tools:
+      - genai-perf
+      - sglang bench_serving
+    key_knobs:
+      - cache_max_entry_count
+      - session_len
+      - tp
+      - quant_policy
+  llama_cpp:
+    priority: 6
+    status: planned-baseline
+    endpoint: openai-compatible server mode
+    benchmark_tools:
+      - internal client
+      - llama-bench
+    key_knobs:
+      - n_gpu_layers
+      - ctx_size
+      - batch_size
+      - ubatch_size
+      - cache_type_k
+      - cache_type_v
+

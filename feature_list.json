@@ -1,0 +1,234 @@
+{
+  "wip_limit": 1,
+  "features": [
+    {
+      "id": "phase-one-evidence-validation",
+      "name": "Phase One evidence validation",
+      "status": "verified",
+      "priority": 1,
+      "behavior": "Prove fresh runtime fingerprinted vLLM and SGLang measurements, exact reuse on identical repeats, runtime drift rejection, and managed lifecycle failure cleanup.",
+      "verification": [
+        "fresh and repeat vLLM managed runs",
+        "fresh and repeat SGLang managed runs",
+        "four run validation campaign",
+        "runtime drift tests",
+        "persistent lifecycle tests",
+        "full repository verification"
+      ],
+      "done_when": [
+        "Each backend has fresh measured evidence.",
+        "Each identical repeat uses exact fresh evidence with zero launches and zero workload measurements.",
+        "Runtime and command drift block exact reuse.",
+        "Failure and interruption artifacts remain inspectable."
+      ]
+    },
+    {
+      "id": "phase-two-product-truth",
+      "name": "Phase Two product truth repair",
+      "status": "verified",
+      "priority": 1,
+      "behavior": "Reconcile user, architecture, compatibility, state, verification, feature, progress, and handoff documentation with the verified product surface.",
+      "verification": [
+        "documentation consistency search",
+        "python -m json.tool feature_list.json",
+        "python -m compileall -q src tests",
+        "pytest -q",
+        "ruff check .",
+        "required CLI help checks"
+      ],
+      "done_when": [
+        "Managed Mode is no longer described as future work.",
+        "SGLang is no longer described as only an experimental MVP.",
+        "One compatibility document defines support and exclusions.",
+        "README distinguishes implemented behavior from planned research.",
+        "Current state and next phase are consistent."
+      ]
+    },
+    {
+      "id": "attach-mode",
+      "name": "Attach Mode",
+      "status": "verified",
+      "priority": 2,
+      "behavior": "Benchmark an already running OpenAI compatible endpoint, collect optional telemetry, and recommend the best among evaluated operating points.",
+      "verification": [
+        "pytest -q"
+      ],
+      "done_when": [
+        "Measured and predicted values remain distinct.",
+        "Attach Mode does not claim the endpoint launch command.",
+        "Artifacts remain inspectable."
+      ]
+    },
+    {
+      "id": "managed-vllm",
+      "name": "vLLM Managed Mode",
+      "status": "verified",
+      "priority": 2,
+      "behavior": "Detect capabilities, validate candidates, render canonical commands, launch and stop vLLM, benchmark the endpoint, manage evidence, and write recommendations.",
+      "verification": [
+        "Phase One vLLM fresh and repeat artifacts",
+        "pytest -q"
+      ],
+      "done_when": [
+        "Lifecycle and evidence reuse are verified.",
+        "Capability and command drift block exact reuse.",
+        "Recommendations remain evaluated set scoped."
+      ]
+    },
+    {
+      "id": "managed-sglang",
+      "name": "SGLang Managed Mode",
+      "status": "verified",
+      "priority": 2,
+      "behavior": "Provide first class lifecycle and evidence parity for the capability detected SGLang surface while rejecting ambiguous vLLM only fields.",
+      "verification": [
+        "Phase One SGLang fresh and repeat artifacts",
+        "SGLang runtime drift tests",
+        "pytest -q"
+      ],
+      "done_when": [
+        "SGLang capabilities, rendering, lifecycle, evidence, and recommendations are verified.",
+        "--disable-piecewise-cuda-graph remains rendered and fingerprinted.",
+        "Unsupported fields are rejected or marked unavailable."
+      ]
+    },
+    {
+      "id": "phase-three-installation",
+      "name": "Phase Three reproducible installation",
+      "status": "verified",
+      "priority": 1,
+      "behavior": "Align package profiles with validated backend environments and prove clean installation paths.",
+      "verification": [
+        "clean core installation",
+        "clean telemetry installation",
+        "clean vLLM installation",
+        "clean SGLang installation",
+        "backend diagnostics",
+        "full repository verification"
+      ],
+      "done_when": [
+        "Package extras match documented profiles.",
+        "Validated pins and environment files exist.",
+        "Compiler and CUDA diagnostics are actionable.",
+        "No SSL verification bypass is used."
+      ]
+    },
+    {
+      "id": "phase-four-unified-user-experience",
+      "name": "Phase Four unified user experience",
+      "status": "verified",
+      "priority": 1,
+      "behavior": "Provide one coherent workflow across Attach and Managed modes with actionable preflight, evidence, budget, failure, repeat, and resume behavior.",
+      "verification": [
+        "command flow audit",
+        "preflight and dry run tests",
+        "evidence and failure message tests",
+        "repeat and resume tests",
+        "full repository verification"
+      ],
+      "done_when": [
+        "Users can identify the primary workflow without reading implementation details.",
+        "Preflight explains backend, workload, budget, evidence, and output behavior before launch.",
+        "Failures state the failed stage and retained artifacts.",
+        "Repeat and resume semantics are explicit and safe."
+      ]
+    },
+        {
+            "id": "phase-five-workloads-slos",
+            "name": "Phase Five realistic workloads and SLOs",
+            "status": "verified",
+            "priority": 1,
+            "behavior": "Add explicit workload manifests, token distribution identity, and SLO constraints for recommendation eligibility.",
+            "verification": [
+                "workload manifest tests",
+                "fingerprint compatibility tests",
+        "SLO filtering tests",
+        "full repository verification"
+      ],
+      "done_when": [
+        "Short, medium, long, decode heavy, repeated prefix, and mixed workload profiles are representable.",
+        "Workload identity participates in evidence compatibility.",
+        "TTFT, TPOT, latency, throughput, and failure constraints can mark candidates ineligible.",
+                "Recommendation artifacts explain workload and SLO constraints."
+            ]
+        },
+        {
+            "id": "phase-six-measurement-quality",
+            "name": "Phase Six measurement quality",
+            "status": "verified",
+            "priority": 1,
+            "behavior": "Add defensible measurement quality controls and aggregate statistics for endpoint and managed benchmarks.",
+            "verification": [
+                "idle subtraction tests",
+                "warmup and steady state tests",
+                "trial aggregation tests",
+                "managed aggregate evidence tests",
+                "full repository verification"
+            ],
+            "done_when": [
+                "Benchmarks can exclude warmup requests.",
+                "Benchmarks can report steady state windows.",
+                "Idle baseline power can produce idle subtracted active energy.",
+                "Managed multi trial runs aggregate before recommendation and evidence writes.",
+                "Aggregate summaries include confidence intervals and stability classification."
+            ]
+        },
+        {
+            "id": "phase-seven-optimizer-quality",
+            "name": "Phase Seven optimizer quality",
+            "status": "verified",
+            "priority": 1,
+            "behavior": "Add bounded evaluated candidate baselines, search regret, candidate policy coverage, and artifact backed failure cache records.",
+            "verification": [
+                "optimizer quality tests",
+                "managed artifact tests",
+                "full repository verification"
+            ],
+            "done_when": [
+                "Recommendations expose optimizer quality metadata.",
+                "Managed runs write optimizer quality artifacts.",
+                "Managed runs write failure cache artifacts.",
+                "Regret remains scoped to evaluated candidates.",
+                "Recommendation wording remains best among evaluated candidates."
+            ]
+        },
+        {
+            "id": "phase-eight-release-engineering",
+            "name": "Phase Eight release engineering",
+            "status": "verified",
+            "priority": 1,
+            "behavior": "Add local release readiness checks, CI workflow, release gates, release documentation, and support matrix.",
+            "verification": [
+                "release check tests",
+                "release check command",
+                "CLI help checks",
+                "full repository verification"
+            ],
+            "done_when": [
+                "Release readiness can be checked by CLI.",
+                "Fast and full verification scripts are present.",
+                "CI workflow runs the fast gate.",
+                "Release documentation is present.",
+                "Support matrix is present."
+            ]
+        },
+        {
+            "id": "phase-nine-research-package",
+            "name": "Phase Nine evaluation and research package",
+            "status": "verified",
+            "priority": 1,
+            "behavior": "Package existing managed run artifacts into reproducible research manifests, methodology, run tables, and coverage tables.",
+            "verification": [
+                "research package tests",
+                "research package CLI help check",
+                "full repository verification"
+            ],
+            "done_when": [
+                "Research packages use existing managed run artifacts only.",
+                "Research packages write manifest, methodology, run table, and coverage table artifacts.",
+                "Coverage is reported for backends, goals, workloads, models, dtypes, quantization, and telemetry quality.",
+                "Methodology keeps claims scoped to supplied evidence."
+            ]
+        }
+    ]
+}

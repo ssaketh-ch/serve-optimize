@@ -1,0 +1,111 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "serve-optimize"
+version = "0.1.0"
+description = "Energy-aware LLM inference configuration optimization for single-GPU and MIG deployments."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+  { name = "Serve Optimize Contributors" }
+]
+keywords = [
+  "llm",
+  "inference",
+  "energy",
+  "gpu",
+  "mig",
+  "vllm",
+  "mlsys",
+  "sustainability"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: System :: Benchmark"
+]
+dependencies = [
+  "rich>=13,<15"
+]
+
+[project.optional-dependencies]
+runtime = [
+  "torch==2.7.1",
+  "transformers==4.57.6",
+  "huggingface-hub==0.36.2"
+]
+telemetry = [
+  "nvidia-ml-py==13.610.43"
+]
+aiconfigurator = [
+  "aiconfigurator>=0.1"
+]
+vllm = [
+  "vllm==0.10.0",
+  "transformers==4.57.6",
+  "huggingface-hub==0.36.2",
+  "nvidia-ml-py==13.610.43"
+]
+sglang = [
+  "sglang==0.5.10.post1",
+  "sglang-kernel==0.4.1",
+  "torch==2.9.1",
+  "transformers==5.3.0",
+  "huggingface-hub==1.19.0",
+  "nvidia-ml-py==13.610.43"
+]
+plot = [
+  "matplotlib>=3.8",
+  "pandas>=2.2"
+]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+  "mypy>=1.10"
+]
+all = [
+  "torch==2.7.1",
+  "transformers==4.57.6",
+  "huggingface-hub==0.36.2",
+  "nvidia-ml-py==13.610.43",
+  "matplotlib>=3.8",
+  "pandas>=2.2"
+]
+
+[project.urls]
+Homepage = "https://github.com/serve-optimize/serve-optimize"
+Issues = "https://github.com/serve-optimize/serve-optimize/issues"
+Documentation = "https://github.com/serve-optimize/serve-optimize/tree/main/docs"
+
+[project.scripts]
+serve-optimize = "serve_optimize.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/serve_optimize"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+ignore_missing_imports = true

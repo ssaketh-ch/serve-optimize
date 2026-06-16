@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv*/
+venv/
+env/
+.env
+.env.*
+
+# Build outputs
+build/
+dist/
+wheelhouse/
+*.whl
+
+# Local artifacts and datasets
+results/
+models/
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Local notebooks
+.ipynb_checkpoints/
+
+# Local handoff and migration state
+AGENTS.md
+PROJECT_STATE.md
+progress.md
+session_handoff.md
+harness_migration_report.md
+.harness_migration_backup/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary probes
+llguidance

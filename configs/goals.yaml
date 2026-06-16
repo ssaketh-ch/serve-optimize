@@ -1,0 +1,14 @@
+goals:
+  performance:
+    primary_objective: maximize_throughput_tok_s
+    tie_breaker: minimize_joules_per_token
+    intended_user: maximum throughput serving
+  balanced:
+    primary_objective: pareto_knee
+    tie_breaker: maximize_tokens_per_watt
+    intended_user: practical default for small deployments
+  efficient:
+    primary_objective: minimize_joules_per_token
+    tie_breaker: maximize_throughput_tok_s
+    intended_user: power constrained or sustainability focused serving
+

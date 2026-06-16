@@ -1,0 +1,31 @@
+models:
+  tiny-random-gpt2:
+    hf_id: hf-internal-testing/tiny-random-gpt2
+    parameter_count_b: 0.0001
+    context_tokens: 1024
+    purpose: smallest functional CLI and backend smoke test
+  tiny-random-llama:
+    hf_id: hf-internal-testing/tiny-random-LlamaForCausalLM
+    parameter_count_b: 0.0001
+    context_tokens: 1024
+    purpose: smallest Llama-family functional CLI and backend smoke test
+  tinyllama-1.1b:
+    hf_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+    parameter_count_b: 1.1
+    context_tokens: 2048
+    purpose: smoke tests and pipeline validation
+  mistral-7b:
+    hf_id: mistralai/Mistral-7B-Instruct-v0.3
+    parameter_count_b: 7.3
+    context_tokens: 32768
+    purpose: primary single-GPU target
+  qwen2.5-7b:
+    hf_id: Qwen/Qwen2.5-7B-Instruct
+    parameter_count_b: 7.6
+    context_tokens: 32768
+    purpose: second 7B-class model family
+  llama-3.1-8b:
+    hf_id: meta-llama/Llama-3.1-8B-Instruct
+    parameter_count_b: 8.0
+    context_tokens: 131072
+    purpose: common open-weight baseline where license access is available

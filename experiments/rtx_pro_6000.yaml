@@ -1,0 +1,35 @@
+name: rtx-pro-6000-energy-frontier
+description: Workstation-class single GPU comparison experiment plan.
+hardware:
+  gpu: NVIDIA RTX Pro 6000
+  mig_required: false
+models:
+  - tinyllama-1.1b
+  - mistral-7b
+  - qwen2.5-7b
+backends:
+  - vllm
+  - sglang
+quantization:
+  - none
+  - awq-int4
+  - gptq-int4
+  - bnb-int8
+context_tokens:
+  - 2048
+  - 4096
+  - 8192
+concurrency:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+power_limit_fractions:
+  - 1.0
+  - 0.9
+  - 0.8
+trials: 5
+warmup_seconds: 60
+measurement_seconds: 180
+

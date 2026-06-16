@@ -1,0 +1,384 @@
+# Serve Optimize
+
+Serve Optimize measures LLM serving behavior and recommends the best configuration among evaluated candidates for a selected goal.
+
+It supports two product paths:
+
+* Attach Mode benchmarks an already running OpenAI compatible endpoint.
+* Managed Mode generates candidates, validates them, launches supported backends, benchmarks their OpenAI compatible endpoints, collects optional telemetry, stops the launched process group, and writes recommendation artifacts.
+
+Measured runtime evidence is the source of truth. AIConfigurator predictions may propose or prioritize candidates, but they never replace measured results or exact fresh measured evidence.
+
+## Current Status
+
+Serve Optimize is a first public release for measured LLM serving configuration optimization.
+
+Verified capabilities include:
+
+* NVIDIA GPU and MIG hardware detection
+* synthetic and local functional benchmark paths
+* OpenAI compatible endpoint benchmarking
+* optional NVML and `nvidia-smi` telemetry
+* throughput, latency, power, energy, and efficiency metrics
+* Attach Mode recommendations
+* first class Managed Mode support for vLLM and SGLang
+* capability aware candidate generation and prelaunch validation
+* canonical rendered launch configurations
+* runtime fingerprinted evidence and exact reuse
+* measured recommendation, Pareto, repeatability, and campaign artifacts
+* lifecycle diagnostics for availability, launch, health, benchmark, stop, and interruption failures
+* release readiness checks and research package artifacts
+
+The validated local backend environments are:
+
+| Backend | Environment | Validated version | Status |
+|---|---|---|---|
+| vLLM | `serve-vllm-baseline` | vLLM `0.10.0` | First class Managed Mode |
+| SGLang | `serve-sglang-latest` | SGLang `0.5.10.post1` | First class for the supported detected surface |
+| TensorRT LLM | none | none | Not implemented |
+
+See [Compatibility](docs/compatibility.md) for the exact support, evidence, artifact, installation, and exclusion contracts.
+
+## Portability Notes
+
+Serve Optimize is designed to move between NVIDIA servers by separating source code, runtime environments, local model weights, and measured artifacts.
+
+For a new RTX Pro 6000 server:
+
+1. Clone the repository.
+2. Create a fresh profile environment from `requirements/profiles/core.txt`.
+3. Run `serve-optimize detect`.
+4. Run `serve-optimize doctor --profile core`.
+5. Create separate vLLM and SGLang environments only if those backends are needed.
+6. Run Managed Mode with `--dry-run` first.
+7. Collect fresh runtime fingerprinted evidence on the new host.
+
+Do not copy `results/`, local model weights, or evidence databases as proof for a new server. They can be archived, but fresh evidence is required for exact reuse on new hardware.
+
+## Install
+
+Core development installation:
+
+```bash
+pip install -e ".[dev]"
+```
+
+The backend profiles are pinned to the validated split stacks and must be installed in separate environments.
+
+Do not disable SSL verification to install backend dependencies.
+
+Reproducible pip profiles are documented in [Installation](docs/installation.md).
+
+## Basic Checks
+
+```bash
+serve-optimize detect
+serve-optimize doctor
+serve-optimize telemetry-check --telemetry auto --duration 5 --out results/telemetry-check
+```
+
+`telemetry-check` samples telemetry without running inference. It writes raw samples, a summary, capability metadata, and a report.
+
+## Attach Mode
+
+Attach Mode measures the endpoint that is already running:
+
+```bash
+serve-optimize recommend \
+  --base-url http://127.0.0.1:8080/v1 \
+  --model /path/to/model \
+  --backend vllm \
+  --system local_gpu \
+  --total-gpus 1 \
+  --isl 512 \
+  --osl 128 \
+  --goal balanced
+```
+
+Preview the same Attach Mode work without touching the endpoint:
+
+```bash
+serve-optimize recommend \
+  --dry-run \
+  --base-url http://127.0.0.1:8080/v1 \
+  --model /path/to/model \
+  --backend vllm \
+  --system local_gpu \
+  --total-gpus 1 \
+  --isl 512 \
+  --osl 128 \
+  --goal balanced
+```
+
+Attach Mode can compare candidate metadata and load shapes, but it cannot prove that the running endpoint was started with a proposed serve command.
+
+Important artifacts include:
+
+* `recommendation.json`
+* `scores.jsonl`
+* `pareto_frontier.json`
+* `pareto_frontier.csv`
+* `summary.json`
+* `metadata.json`
+* `report.txt`
+* per candidate benchmark and telemetry artifacts
+
+## Managed Mode
+
+Managed Mode owns process lifecycle through backend adapters.
+
+### vLLM
+
+```bash
+conda activate serve-vllm-baseline
+
+serve-optimize managed-evaluate \
+  --backend vllm \
+  --model /path/to/model \
+  --goal balanced \
+  --limit 4 \
+  --trials 1 \
+  --telemetry auto \
+  --evidence-db results/serve_optimize_evidence.sqlite \
+  --out results/managed-vllm
+```
+
+Add `--dry-run` to write `preflight.json`, `preflight.txt`, rendered launch configs, workload configs, launch groups, and validation failures without launching servers or writing measured evidence.
+
+Managed Mode also accepts workload identity and SLO guards:
+
+```bash
+serve-optimize managed-evaluate \
+  --backend vllm \
+  --model /path/to/model \
+  --workload-profile mixed \
+  --slo-p95-latency-ms 900 \
+  --slo-min-throughput-tokens-per-sec 100 \
+  --dry-run
+```
+
+Use `--workload-manifest path/to/workload.json` for a JSON workload manifest. Workload fingerprints include the profile name, token distribution, and SLO constraints.
+
+Measurement quality controls can be added to endpoint or managed benchmarks:
+
+```bash
+serve-optimize managed-evaluate \
+  --backend vllm \
+  --model /path/to/model \
+  --warmup-requests 8 \
+  --steady-state-seconds 30 \
+  --idle-baseline-seconds 5
+```
+
+Summaries include gross energy and idle subtracted active energy when an idle baseline is available.
+
+Managed recommendations also write optimizer quality artifacts. `optimizer_quality.json` reports bounded evaluated candidate baselines, search regret, metric regret, and candidate policy coverage. `optimizer_failure_cache.json` records artifact backed failure cache entries for failed managed candidates. These artifacts remain scoped to evaluated candidates.
+
+### SGLang
+
+The validated SGLang runtime requires GCC Toolset 12 through the repository helper:
+
+```bash
+conda activate serve-sglang-latest
+source scripts/env_base_runtime.sh
+
+serve-optimize managed-evaluate \
+  --backend sglang \
+  --model /path/to/model \
+  --goal balanced \
+  --limit 4 \
+  --trials 1 \
+  --telemetry auto \
+  --evidence-db results/serve_optimize_evidence.sqlite \
+  --out results/managed-sglang
+```
+
+On the validated host, SGLang candidates preserve and fingerprint:
+
+```text
+--disable-piecewise-cuda-graph
+```
+
+Do not remove that option from validated SGLang launches.
+
+## Managed Lifecycle
+
+A managed evaluation performs:
+
+1. Hardware, model, backend, and capability detection.
+2. Candidate generation and prelaunch validation.
+3. Canonical command rendering.
+4. Runtime fingerprint and evidence compatibility checks.
+5. Exact fresh evidence reuse where allowed.
+6. Server launch for remaining workloads.
+7. OpenAI compatible health checks and benchmarks.
+8. Optional telemetry collection.
+9. Evidence writes for measured workloads.
+10. Process group shutdown and lifecycle recording.
+11. Recommendation and Pareto artifact generation.
+
+Unsupported backend options are rejected or marked unavailable before launch. They are not silently translated.
+
+## Evidence
+
+Managed evidence is stored in SQLite and remains backend separated.
+
+Exact reuse requires a match across:
+
+* hardware identity
+* backend name and version
+* Torch, CUDA runtime, and Python versions
+* compiler toolchain identity
+* backend capability metadata
+* rendered launch command
+* canonical launch configuration
+* model identity
+* workload identity
+* telemetry compatibility
+* freshness policy
+
+Only exact fresh measured evidence may skip a measurement. Stale, near compatible, legacy, or runtime drifted evidence may be advisory but cannot be used as exact truth.
+
+Inspect recent evidence:
+
+```bash
+serve-optimize evidence list \
+  --db results/serve_optimize_evidence.sqlite \
+  --limit 20
+```
+
+## Managed Artifacts
+
+Every managed run writes inspectable artifacts, including:
+
+* `managed_run.json`
+* `runtime_environment.json`
+* `vllm_argument_capabilities.json` or `sglang_argument_capabilities.json`
+* `rendered_launch_configs.jsonl`
+* `launch_specs.jsonl`
+* `launch_groups.json`
+* `workload_configs.jsonl`
+* `server_lifecycle.jsonl`
+* `candidate_failures.jsonl`
+* `evidence_decisions.jsonl`
+* `candidate_synthesis.json`
+* `prior_candidates.json`
+* `prior_summary.json`
+* `evaluation_rungs.json`
+* `promotion_decisions.jsonl`
+* `managed_recommendation.json`
+* `managed_pareto_frontier.json`
+* `managed_pareto_frontier.csv`
+* `managed_report.txt`
+* `recommendation_summary.json`
+* `recommendation_summary.txt`
+* backend stdout and stderr logs for launched servers
+
+`recommendation_summary.txt` is the primary human facing deployment answer. `managed_recommendation.json` is the detailed automation and audit artifact.
+
+## Recommendation Scope
+
+Recommendations are always scoped to the evaluated set.
+
+The product may state:
+
+```text
+best among evaluated candidates
+```
+
+It must not claim exhaustive coverage unless a separate exhaustive experiment proves that claim.
+
+## Repeatability And Campaign Validation
+
+Compare existing managed runs:
+
+```bash
+serve-optimize repeatability RUN_DIR_1 RUN_DIR_2
+```
+
+Validate a collection of existing managed artifacts:
+
+```bash
+serve-optimize validate-campaign \
+  RUN_DIR_1 RUN_DIR_2 \
+  --out results/validation-campaign
+```
+
+Campaign validation reads existing artifacts. It does not launch servers or create new measured evidence.
+
+## Release And Research Artifacts
+
+Check release readiness:
+
+```bash
+serve-optimize release-check --out results/release-check
+```
+
+Package existing managed run artifacts for research analysis:
+
+```bash
+serve-optimize research-package \
+  RUN_DIR_1 RUN_DIR_2 \
+  --out results/research-package
+```
+
+Research packages write a manifest, methodology, run table, coverage table, and validation campaign summary. They do not launch servers or create new measured evidence.
+
+## Telemetry
+
+Telemetry providers are optional and emit generic capability fields. Missing counters are represented as unavailable, not as zero.
+
+Current measured fields may include:
+
+* power
+* temperature
+* memory usage
+* GPU and memory utilization
+* clocks
+* power limit
+* throttle reasons
+
+Current energy values include gross active window estimates and idle subtracted active energy when an idle baseline is available. Prefill and decode phase attribution is not implemented.
+
+## Verification
+
+```bash
+python -m compileall -q src tests
+pytest -q
+ruff check .
+python -m json.tool feature_list.json
+serve-optimize --help
+serve-optimize managed-evaluate --help
+serve-optimize validate-campaign --help
+serve-optimize release-check --help
+serve-optimize research-package --help
+```
+
+The latest recorded result is maintained in [Verification](docs/verification.md).
+
+## Current Limitations
+
+* Managed candidate policies are bounded rather than exhaustive.
+* Workload profiles are not yet complete production trace manifests.
+* Prefill and decode phase attribution is not implemented.
+* Thermal stability checks are summary level, not long duration soak tests.
+* TensorRT LLM, Kubernetes, power limit control, and parallel candidate execution are not implemented.
+* Latest vLLM is not validated in this checkout.
+
+## Documentation
+
+* [System design](docs/design.md)
+* [Compatibility contract](docs/compatibility.md)
+* [Installation profiles](docs/installation.md)
+* [Architecture rules](docs/architecture_rules.md)
+* [Quickstart](docs/quickstart.md)
+* [Verification](docs/verification.md)
+* [Release engineering](docs/release.md)
+* [Support matrix](docs/support_matrix.md)
+* [Research package](docs/research_package.md)
+* [Planned experimental methodology](docs/experiments.md)
+* [Literature and landscape](docs/literature-and-landscape.md)
+
+## License
+
+Apache 2.0

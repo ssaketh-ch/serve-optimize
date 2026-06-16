@@ -1,0 +1,46 @@
+backends:
+  dry-run:
+    status: implemented
+    purpose: synthetic benchmarking for CI and offline optimizer validation
+    openai_compatible: false
+  vllm:
+    status: planned
+    priority: 1
+    openai_compatible: true
+    launch_binary: vllm
+    key_flags:
+      - --model
+      - --dtype
+      - --quantization
+      - --max-model-len
+      - --gpu-memory-utilization
+      - --max-num-seqs
+      - --enable-chunked-prefill
+  sglang:
+    status: planned
+    priority: 2
+    openai_compatible: true
+    key_flags:
+      - --model-path
+      - --dtype
+      - --quantization
+      - --context-length
+  trt-llm:
+    status: planned
+    priority: 3
+    openai_compatible: depends_on_server
+    notes:
+      - Requires engine build step.
+      - Useful for upper-bound performance experiments.
+  tgi:
+    status: planned
+    priority: 4
+    openai_compatible: true
+    notes:
+      - Useful production baseline against vLLM and SGLang.
+  lmdeploy:
+    status: planned
+    priority: 5
+    openai_compatible: true
+    notes:
+      - Useful as a secondary backend baseline.
