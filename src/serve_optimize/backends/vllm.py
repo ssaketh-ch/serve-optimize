@@ -339,7 +339,7 @@ def validate_port_available(host: str, port: int) -> None:
             raise ValueError(f"port {port} is not available on {host}: {exc}") from exc
 
 
-def detect_vllm_argument_capabilities(*, executable: str | None = None, timeout_s: float = 5.0) -> VLLMArgumentCapabilities:
+def detect_vllm_argument_capabilities(*, executable: str | None = None, timeout_s: float = 30.0) -> VLLMArgumentCapabilities:
     resolved = executable or shutil.which("vllm")
     cache_key = resolved or "vllm"
     return _detect_vllm_argument_capabilities_cached(cache_key, timeout_s)

@@ -109,6 +109,38 @@ def test_sglang_capability_detection_unavailable_nonfatal(monkeypatch) -> None:
     assert "help_text" not in capabilities.to_artifact()
 
 
+def test_sglang_capability_detection_supports_serve_subcommand(monkeypatch) -> None:
+    class Completed:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_which(name):
+        return "/bin/sglang" if name == "sglang" else None
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if command == ["python", "-m", "sglang.launch_server", "--help"]:
+            return Completed(1, stderr="No module named sglang")
+        if command == ["/bin/sglang", "version"]:
+            return Completed(0, stdout="0.5.13.post1\n")
+        if command == ["/bin/sglang", "serve", "--help"]:
+            return Completed(0, stdout=_sglang_help_text())
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("serve_optimize.backends.sglang.sys.executable", "python")
+    monkeypatch.setattr("serve_optimize.backends.sglang.shutil.which", fake_which)
+    monkeypatch.setattr("serve_optimize.backends.sglang.subprocess.run", fake_run)
+
+    capabilities = detect_sglang_argument_capabilities(timeout_s=0.01)
+
+    assert capabilities.detection_status == "success"
+    assert capabilities.launch_command == ("/bin/sglang", "serve")
+    assert capabilities.version == "0.5.13.post1"
+    assert capabilities.supports("--model-path")
+
+
 def test_managed_backend_factory_rejects_unknown_backend() -> None:
     with pytest.raises(UnsupportedManagedBackendError) as exc:
         create_managed_backend_adapter("unknown")

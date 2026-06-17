@@ -55,7 +55,10 @@ PROFILE_DISTRIBUTIONS = {
 
 
 def check_backend_status() -> list[BackendStatus]:
-    statuses = [_module_status(name, module) for name, module in BACKEND_MODULES.items()]
+    statuses = [
+        _dependency_status(name, module)
+        for name, module in BACKEND_MODULES.items()
+    ]
     statuses.extend(
         [
             _command_status("nvidia-smi"),
@@ -121,6 +124,81 @@ def _module_status(name: str, module_name: str) -> BackendStatus:
     except Exception as exc:
         return BackendStatus(name=name, available=False, reason=f"{exc.__class__.__name__}: {exc}")
     return BackendStatus(name=name, available=True, version=getattr(module, "__version__", None))
+
+
+def _dependency_status(name: str, module_name: str) -> BackendStatus:
+    if name == "sglang":
+        return _sglang_status()
+    if name == "aiconfigurator":
+        return _module_or_cli_status(name, module_name, [name, "--help"])
+    return _module_status(name, module_name)
+
+
+def _module_or_cli_status(name: str, module_name: str, command: list[str]) -> BackendStatus:
+    module_status = _module_status(name, module_name)
+    if module_status.available:
+        return module_status
+    executable = shutil.which(command[0])
+    if not executable:
+        return module_status
+    try:
+        completed = subprocess.run(
+            [executable, *command[1:]],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        return BackendStatus(
+            name=name,
+            available=False,
+            command=executable,
+            reason=f"{module_status.reason}; CLI check failed: {exc.__class__.__name__}: {exc}",
+        )
+    if completed.returncode == 0:
+        return BackendStatus(name=name, available=True, command=executable)
+    reason = _last_nonempty_line(completed.stderr) or _last_nonempty_line(completed.stdout) or "CLI check failed"
+    return BackendStatus(
+        name=name,
+        available=False,
+        command=executable,
+        reason=f"{module_status.reason}; {reason}",
+    )
+
+
+def _sglang_status() -> BackendStatus:
+    module_status = _module_status("sglang", "sglang")
+    if module_status.available:
+        return module_status
+    command = shutil.which("sglang")
+    if not command:
+        return module_status
+    try:
+        completed = subprocess.run(
+            [command, "version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        return BackendStatus(
+            name="sglang",
+            available=False,
+            command=command,
+            reason=f"{module_status.reason}; CLI check failed: {exc.__class__.__name__}: {exc}",
+        )
+    if completed.returncode == 0:
+        version = _sglang_version_from_output(f"{completed.stdout}\n{completed.stderr}")
+        return BackendStatus(name="sglang", available=True, command=command, version=version)
+    reason = _last_nonempty_line(completed.stderr) or _last_nonempty_line(completed.stdout) or "CLI check failed"
+    return BackendStatus(
+        name="sglang",
+        available=False,
+        command=command,
+        reason=f"{module_status.reason}; {reason}",
+    )
 
 
 def _command_status(command: str) -> BackendStatus:
@@ -196,17 +274,44 @@ def _sglang_runtime_status() -> BackendStatus:
         nvrtc = Path(sys.executable).parents[1] / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "nvidia" / "cuda_nvrtc" / "lib"
         if nvrtc.exists():
             env["LD_LIBRARY_PATH"] = f"{nvrtc}:{env.get('LD_LIBRARY_PATH', '')}"
-        completed = subprocess.run(
-            [sys.executable, "-m", "sglang.launch_server", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            env=env,
-            check=False,
-        )
+        commands = [
+            ([sys.executable, "-m", "sglang.launch_server", "--help"], f"{sys.executable} -m sglang.launch_server"),
+        ]
+        sglang = shutil.which("sglang")
+        if sglang:
+            commands.extend(
+                [
+                    ([sglang, "serve", "--help"], f"{sglang} serve"),
+                    ([sglang, "launch_server", "--help"], f"{sglang} launch_server"),
+                ]
+            )
+        errors = []
+        for command, display in commands:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+                check=False,
+            )
+            if completed.returncode == 0 and "--model-path" in f"{completed.stdout}\n{completed.stderr}":
+                return BackendStatus(name="sglang-runtime", available=True, command=display)
+            reason = _last_nonempty_line(completed.stderr) or _last_nonempty_line(completed.stdout) or "runtime check failed"
+            errors.append(f"{' '.join(command)}: {reason}")
     except Exception as exc:
         return BackendStatus(name="sglang-runtime", available=False, reason=f"{exc.__class__.__name__}: {exc}")
-    if completed.returncode == 0:
-        return BackendStatus(name="sglang-runtime", available=True, command=f"{sys.executable} -m sglang.launch_server")
-    reason = (completed.stderr or completed.stdout).strip().splitlines()[-1] if (completed.stderr or completed.stdout).strip() else "runtime check failed"
-    return BackendStatus(name="sglang-runtime", available=False, reason=reason)
+    return BackendStatus(name="sglang-runtime", available=False, reason="; ".join(errors))
+
+
+def _last_nonempty_line(text: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def _sglang_version_from_output(text: str) -> str | None:
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("sglang version:"):
+            return line.partition(":")[2].strip() or None
+    return _last_nonempty_line(text)

@@ -391,7 +391,7 @@ def validate_port_available(host: str, port: int) -> None:
             raise ValueError(f"port {port} is not available on {host}: {exc}") from exc
 
 
-def detect_sglang_argument_capabilities(*, timeout_s: float = 5.0) -> SGLangArgumentCapabilities:
+def detect_sglang_argument_capabilities(*, timeout_s: float = 30.0) -> SGLangArgumentCapabilities:
     return _detect_sglang_argument_capabilities_cached(sys.executable, shutil.which("sglang.launch_server") or "", shutil.which("sglang") or "", timeout_s)
 
 
@@ -402,7 +402,7 @@ def _detect_sglang_argument_capabilities_cached(
     sglang_executable: str,
     timeout_s: float,
 ) -> SGLangArgumentCapabilities:
-    version = _installed_version("sglang")
+    version = _installed_version("sglang") or _sglang_cli_version(sglang_executable, timeout_s=timeout_s)
     candidates: list[tuple[list[str], tuple[str, ...]]] = [
         (
             [python_executable, "-m", "sglang.launch_server", "--help"],
@@ -412,6 +412,7 @@ def _detect_sglang_argument_capabilities_cached(
     if launch_server_executable:
         candidates.append(([launch_server_executable, "--help"], (launch_server_executable,)))
     if sglang_executable:
+        candidates.append(([sglang_executable, "serve", "--help"], (sglang_executable, "serve")))
         candidates.append(([sglang_executable, "launch_server", "--help"], (sglang_executable, "launch_server")))
         candidates.append(([sglang_executable, "--help"], (sglang_executable, "launch_server")))
 
@@ -436,6 +437,9 @@ def _detect_sglang_argument_capabilities_cached(
         help_text = _select_sglang_help_text(completed.stdout, completed.stderr)
         if completed.returncode != 0:
             errors.append(f"{' '.join(command)} exited {completed.returncode}")
+            continue
+        if "--model-path" not in help_text:
+            errors.append(f"{' '.join(command)} did not expose --model-path")
             continue
         return parse_sglang_argument_capabilities(
             help_text,
@@ -489,6 +493,30 @@ def _select_sglang_help_text(stdout: str, stderr: str) -> str:
         if "usage:" in stream.lower() and "--model-path" in stream:
             return stream
     return f"{stdout}\n{stderr}"
+
+
+def _sglang_cli_version(sglang_executable: str, *, timeout_s: float) -> str | None:
+    if not sglang_executable:
+        return None
+    try:
+        completed = subprocess.run(
+            [sglang_executable, "version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    text = f"{completed.stdout}\n{completed.stderr}"
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("sglang version:"):
+            return line.partition(":")[2].strip() or None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else None
 
 
 def _sglang_capability_hash(
