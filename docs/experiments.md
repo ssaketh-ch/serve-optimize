@@ -40,13 +40,12 @@ Workload manifests and token distributions must participate in evidence fingerpr
 
 ## Planned Metrics
 
-* TTFT
-* TPOT or inter token latency
 * prefill and decode energy
-* thermal stability
 * larger cross hardware regret studies
 
 These metrics must not appear as implemented until measurement boundaries and tests exist.
+
+TTFT, stream chunk TPOT, and thermal trend reporting are implemented for endpoint benchmarks when the required measurement boundaries exist. Non streaming endpoint responses do not expose TTFT or TPOT. Short thermal windows are reported as limited evidence rather than stable soak results.
 
 ## Planned Controls
 
@@ -67,6 +66,25 @@ These metrics must not appear as implemented until measurement boundaries and te
 * concurrency and context length
 * full GPU versus MIG where telemetry scope is defensible
 * bounded exhaustive versus guided search
+
+## Campaign Planning
+
+Use `serve-optimize campaign-plan` to generate an explicit matrix of managed run commands before collecting evidence.
+
+The planner records:
+
+* models
+* managed backends
+* recommendation goals
+* workload profiles
+* repeat count
+* candidate limits
+* measurement quality controls
+* validation and research package follow up commands
+
+The planner does not run benchmarks, launch servers, or write measured evidence. Claims remain scoped to managed run artifacts that are later collected and validated.
+
+Campaign artifacts include executable per backend runners because the validated vLLM and SGLang environments are mutually exclusive. The dispatcher selects one backend runner at a time. After all runners complete, `campaign_postprocess.sh` discovers the nested timestamped managed run directories for validation and research packaging.
 
 ## Reporting Rules
 

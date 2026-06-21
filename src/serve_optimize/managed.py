@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -119,6 +119,8 @@ WORKLOAD_EXTRA_KEYS = {
     "warmup_requests",
     "idle_baseline_duration_s",
     "idle_power_watts",
+    "soak_duration_s",
+    "stream",
     "workload_concurrency",
     "workload_extra",
     "workload_id",
@@ -150,6 +152,7 @@ class _ManagedExecutionState:
         self.failures: list[CandidateFailureRecord] = []
         self.completed = 0
         self.evidence_hits = 0
+        self.resume_skips = 0
         self.cold_launch_count = 0
         self.workload_measurement_count = 0
         self.launch_group_rows: list[dict[str, object]] = []
@@ -176,6 +179,23 @@ class _ManagedRecommendationArtifacts:
     recommendation_summary_json_path: str | None = None
     recommendation_quality_audit: dict[str, Any] | None = None
     optimizer_quality: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _ResumeCandidateRecord:
+    candidate_result: ManagedCandidateResult
+    rung_result: RungResult
+    summary_path: str
+    launch_config_hash: str
+    workload_config_hash: str
+
+
+@dataclass(frozen=True)
+class _ManagedResumeState:
+    source_run_dir: Path
+    source_run_id: str | None
+    records: dict[tuple[str, str, str, str], _ResumeCandidateRecord]
+    warnings: list[str]
 
 
 def run_managed_evaluation(
@@ -209,6 +229,9 @@ def run_managed_evaluation(
     steady_state_duration_s: float | None = None,
     idle_baseline_duration_s: float = 0.0,
     idle_power_watts: float | None = None,
+    soak_duration_s: float | None = None,
+    stream: bool = False,
+    resume_from: Path | None = None,
 ) -> ManagedRunSummary:
     backend = normalize_managed_backend_name(backend)
     _validate_run_inputs(backend, limit, trials, startup_timeout_s, cooldown_s)
@@ -216,6 +239,12 @@ def run_managed_evaluation(
     run_id = make_run_id(prefix="managed")
     run_dir = out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    resume_state = _load_managed_resume_state(
+        resume_from,
+        backend=backend,
+        model=model,
+        goal=goal,
+    )
 
     launch_specs_path = run_dir / "launch_specs.jsonl"
     launch_groups_path = run_dir / "launch_groups.json"
@@ -331,6 +360,8 @@ def run_managed_evaluation(
             steady_state_duration_s=steady_state_duration_s,
             idle_baseline_duration_s=idle_baseline_duration_s,
             idle_power_watts=idle_power_watts,
+            soak_duration_s=soak_duration_s,
+            stream=stream,
         )
         candidate_pool = candidate_pool[:limit]
         candidate_generation = _provided_candidate_generation(candidate_pool)
@@ -354,6 +385,8 @@ def run_managed_evaluation(
             steady_state_duration_s=steady_state_duration_s,
             idle_baseline_duration_s=idle_baseline_duration_s,
             idle_power_watts=idle_power_watts,
+            soak_duration_s=soak_duration_s,
+            stream=stream,
         )
     valid_candidates, validation_rejections = _validate_managed_candidate_pool(
         candidate_pool,
@@ -563,6 +596,7 @@ def run_managed_evaluation(
                 lifecycle_path=lifecycle_path,
                 failures_path=failures_path,
                 launch_specs_path=launch_specs_path,
+                resume_state=resume_state,
             )
             next_rung = active_rungs[index + 1] if index + 1 < len(active_rungs) else None
             if next_rung is None:
@@ -630,6 +664,7 @@ def run_managed_evaluation(
             lifecycle_path=lifecycle_path,
             failures_path=failures_path,
             launch_specs_path=launch_specs_path,
+            resume_state=resume_state,
         )
 
     promotion_summary = summarize_promotions(
@@ -673,7 +708,7 @@ def run_managed_evaluation(
     if evidence_store is not None:
         evidence_store.close()
 
-    completed_candidate_count = _unique_result_count(state.candidate_results, statuses={"completed", "evidence_hit"})
+    completed_candidate_count = _unique_result_count(state.candidate_results, statuses={"completed", "evidence_hit", "resumed"})
     status = _run_status(completed_candidate_count, len(state.failures))
     artifacts = {
         "run_dir": str(run_dir),
@@ -776,6 +811,11 @@ def run_managed_evaluation(
             "failure_cache": optimizer_failure_cache.get("summary", {}),
         },
         synthesis_summary=synthesis_summary,
+        resume_from_run_dir=str(resume_state.source_run_dir) if resume_state is not None else None,
+        resume_source_run_id=resume_state.source_run_id if resume_state is not None else None,
+        resume_loaded_candidate_count=len(resume_state.records) if resume_state is not None else 0,
+        resume_skipped_candidate_count=state.resume_skips,
+        resume_warnings=resume_state.warnings if resume_state is not None else [],
     )
     write_json(run_dir / "managed_run.json", summary)
     return summary
@@ -806,6 +846,9 @@ def build_managed_preflight(
     steady_state_duration_s: float | None = None,
     idle_baseline_duration_s: float = 0.0,
     idle_power_watts: float | None = None,
+    soak_duration_s: float | None = None,
+    stream: bool = False,
+    resume_from: Path | None = None,
 ) -> PreflightRun:
     backend = normalize_managed_backend_name(backend)
     _validate_run_inputs(backend, limit, trials, startup_timeout_s, cooldown_s)
@@ -832,6 +875,8 @@ def build_managed_preflight(
             steady_state_duration_s=steady_state_duration_s,
             idle_baseline_duration_s=idle_baseline_duration_s,
             idle_power_watts=idle_power_watts,
+            soak_duration_s=soak_duration_s,
+            stream=stream,
         )
         candidate_generation = _provided_candidate_generation(candidate_pool)
     else:
@@ -854,6 +899,8 @@ def build_managed_preflight(
             steady_state_duration_s=steady_state_duration_s,
             idle_baseline_duration_s=idle_baseline_duration_s,
             idle_power_watts=idle_power_watts,
+            soak_duration_s=soak_duration_s,
+            stream=stream,
         )
     valid_candidates, validation_rejections = _validate_managed_candidate_pool(
         candidate_pool,
@@ -957,6 +1004,7 @@ def build_managed_preflight(
             "write_enabled": evidence_write and evidence_db_path is not None,
             "freshness_hours": evidence_freshness_hours,
             "exact_reuse": "planned for execution; dry run does not read or write measured evidence",
+            "resume_from": str(resume_from) if resume_from is not None else None,
         },
         "safety": {
             "will_call_endpoint": False,
@@ -972,7 +1020,7 @@ def build_managed_preflight(
         "guidance": {
             "execute": "Run the same command without --dry-run to launch managed servers, health check, benchmark, and write measured evidence.",
             "repeat": "Run the same measured command again with the same evidence database to allow exact fresh evidence reuse.",
-            "resume": "Managed resume is not implemented. Safe repeat relies on exact runtime fingerprinted evidence reuse.",
+            "resume": "Pass --resume-from with a previous managed run directory to reuse completed workloads whose launch and workload identities still match.",
         },
         "warnings": [],
         "notes": [
@@ -1035,6 +1083,202 @@ def _configs_for_rung(
     return rung_configs
 
 
+def _load_managed_resume_state(
+    resume_from: Path | None,
+    *,
+    backend: str,
+    model: str,
+    goal: Goal,
+) -> _ManagedResumeState | None:
+    if resume_from is None:
+        return None
+    source_run_dir = resume_from.resolve()
+    managed_run_path = source_run_dir / "managed_run.json"
+    if not managed_run_path.is_file():
+        raise ValueError(f"resume run directory is missing managed_run.json: {source_run_dir}")
+    payload = _read_json_object(managed_run_path)
+    if str(payload.get("backend") or "") != backend:
+        raise ValueError("resume run backend does not match current managed evaluation.")
+    if str(payload.get("model") or "") != model:
+        raise ValueError("resume run model does not match current managed evaluation.")
+    if str(payload.get("goal") or "") != goal.value:
+        raise ValueError("resume run goal does not match current managed evaluation.")
+
+    warnings: list[str] = []
+    workload_hashes = _resume_workload_hashes(source_run_dir, warnings)
+    launch_hashes = _resume_launch_hashes(source_run_dir, warnings)
+    records: dict[tuple[str, str, str, str], _ResumeCandidateRecord] = {}
+    for row in payload.get("candidates", []):
+        if not isinstance(row, dict) or row.get("status") != "completed":
+            continue
+        candidate = _dataclass_from_dict(ManagedCandidateResult, row)
+        if candidate is None:
+            warnings.append("Skipped a resume candidate with an unreadable result row.")
+            continue
+        summary_path = _resume_summary_path(candidate.summary_paths, source_run_dir)
+        if summary_path is None:
+            warnings.append(f"Skipped resume candidate {candidate.config_id}: no readable summary path.")
+            continue
+        summary = _load_endpoint_summary(summary_path)
+        if summary is None:
+            warnings.append(f"Skipped resume candidate {candidate.config_id}: summary could not be loaded.")
+            continue
+        workload_id = summary.run_id
+        workload_key = (candidate.config_id, workload_id)
+        launch_hash = launch_hashes.get(workload_key)
+        workload_hash = workload_hashes.get(workload_key)
+        if not launch_hash or not workload_hash:
+            warnings.append(f"Skipped resume candidate {candidate.config_id}: missing launch or workload identity.")
+            continue
+        resumed_candidate = replace(
+            candidate,
+            status="resumed",
+            measured_or_evidence_source="resume",
+        )
+        rung_result = RungResult(
+            candidate_id=candidate.config_id,
+            workload_id=workload_id,
+            rung=candidate.rung or "measure",
+            rung_index=_rung_index_for_name(candidate.rung),
+            status="resumed",
+            measured_or_evidence_source="resume",
+            evidence_key=candidate.evidence_key,
+            evidence_measurement_id=candidate.evidence_measurement_id,
+            metrics=_summary_metrics(summary),
+        )
+        records[(candidate.config_id, workload_id, launch_hash, workload_hash)] = _ResumeCandidateRecord(
+            candidate_result=resumed_candidate,
+            rung_result=rung_result,
+            summary_path=str(summary_path),
+            launch_config_hash=launch_hash,
+            workload_config_hash=workload_hash,
+        )
+    return _ManagedResumeState(
+        source_run_dir=source_run_dir,
+        source_run_id=_optional_str(payload.get("run_id")),
+        records=records,
+        warnings=warnings,
+    )
+
+
+def _resume_record_for_workload(
+    resume_state: _ManagedResumeState | None,
+    *,
+    workload: WorkloadConfig,
+    launch_config_hash: str,
+) -> _ResumeCandidateRecord | None:
+    if resume_state is None:
+        return None
+    key = (
+        workload.candidate_id,
+        workload.workload_id,
+        launch_config_hash,
+        workload_config_hash(workload),
+    )
+    return resume_state.records.get(key)
+
+
+def _resume_workload_hashes(source_run_dir: Path, warnings: list[str]) -> dict[tuple[str, str], str]:
+    hashes: dict[tuple[str, str], str] = {}
+    for row in _read_jsonl_objects(source_run_dir / "workload_configs.jsonl", warnings):
+        candidate_id = _optional_str(row.get("candidate_id"))
+        workload_id = _optional_str(row.get("workload_id"))
+        if candidate_id and workload_id:
+            hashes[(candidate_id, workload_id)] = workload_config_hash(row)
+    return hashes
+
+
+def _resume_launch_hashes(source_run_dir: Path, warnings: list[str]) -> dict[tuple[str, str], str]:
+    hashes: dict[tuple[str, str], str] = {}
+    payload = _read_json_value(source_run_dir / "launch_groups.json", warnings)
+    if not isinstance(payload, list):
+        return hashes
+    for group in payload:
+        if not isinstance(group, dict):
+            continue
+        launch_hash = _optional_str(group.get("launch_config_hash"))
+        if not launch_hash:
+            continue
+        workloads = group.get("workload_configs")
+        if not isinstance(workloads, list):
+            continue
+        for workload in workloads:
+            if not isinstance(workload, dict):
+                continue
+            candidate_id = _optional_str(workload.get("candidate_id"))
+            workload_id = _optional_str(workload.get("workload_id"))
+            if candidate_id and workload_id:
+                hashes[(candidate_id, workload_id)] = launch_hash
+    return hashes
+
+
+def _resume_summary_path(paths: list[str], source_run_dir: Path) -> Path | None:
+    for raw_path in reversed(paths):
+        path = Path(raw_path)
+        candidates = [path] if path.is_absolute() else [path, source_run_dir / path]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _load_endpoint_summary(path: Path) -> EndpointBenchmarkSummary | None:
+    try:
+        row = _read_json_object(path)
+        return EndpointBenchmarkSummary(**{field.name: row[field.name] for field in fields(EndpointBenchmarkSummary) if field.name in row})
+    except (OSError, TypeError, ValueError, KeyError):
+        return None
+
+
+def _rung_index_for_name(name: str | None) -> int:
+    return {"probe": 0, "measure": 1, "validate": 2}.get(str(name or "measure"), 0)
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}.")
+    return payload
+
+
+def _read_json_value(path: Path, warnings: list[str]) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        warnings.append(f"Could not read resume artifact {path.name}: {exc.__class__.__name__}: {exc}")
+    except json.JSONDecodeError as exc:
+        warnings.append(f"Could not parse resume artifact {path.name}: {exc.msg}")
+    return None
+
+
+def _read_jsonl_objects(path: Path, warnings: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        warnings.append(f"Could not read resume artifact {path.name}: {exc.__class__.__name__}: {exc}")
+        return rows
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            warnings.append(f"Could not parse {path.name} line {line_number}: {exc.msg}")
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _dataclass_from_dict(cls: type[Any], row: dict[str, Any]) -> Any | None:
+    names = {field.name for field in fields(cls)}
+    try:
+        return cls(**{key: value for key, value in row.items() if key in names})
+    except TypeError:
+        return None
+
+
 def _rung_launch_group(group: LaunchGroup, rung: EvaluationRung) -> LaunchGroup:
     return replace(group, group_id=f"{group.group_id}-{rung.name}")
 
@@ -1069,16 +1313,56 @@ def _evaluate_launch_groups(
     lifecycle_path: Path,
     failures_path: Path,
     launch_specs_path: Path,
+    resume_state: _ManagedResumeState | None = None,
 ) -> None:
     del telemetry
     for group in launch_groups:
         group_metadata: list[dict[str, object]] = []
         pending_workloads: list[tuple[ServingConfig, WorkloadConfig, object]] = []
         handle: ServerHandle | None = None
+        resumed_workload_count = 0
         representative_config = configs_by_id[group.original_config_ids[0]]
         try:
             for workload in group.workload_configs:
                 config = configs_by_id[workload.candidate_id]
+                resume_record = _resume_record_for_workload(
+                    resume_state,
+                    workload=workload,
+                    launch_config_hash=group.launch_config_hash,
+                )
+                if resume_record is not None:
+                    resumed_workload_count += 1
+                    state.resume_skips += 1
+                    state.completed += 1
+                    state.rung_results.append(resume_record.rung_result)
+                    state.candidate_results.append(resume_record.candidate_result)
+                    metadata = {
+                        "candidate_id": workload.candidate_id,
+                        "workload_id": workload.workload_id,
+                        "rung": workload.rung,
+                        "source_run_id": resume_state.source_run_id if resume_state is not None else None,
+                        "source_run_dir": str(resume_state.source_run_dir) if resume_state is not None else None,
+                        "summary_path": resume_record.summary_path,
+                        "launch_config_hash": resume_record.launch_config_hash,
+                        "workload_config_hash": resume_record.workload_config_hash,
+                        "used_as_resume": True,
+                    }
+                    group_metadata.append(metadata)
+                    _append_jsonl(
+                        lifecycle_path,
+                        [
+                            _lifecycle(
+                                run_id,
+                                workload.candidate_id,
+                                backend,
+                                "resume_skip",
+                                "completed",
+                                message="Previous completed measured workload matched current launch and workload identity.",
+                                details={**metadata, "group_id": group.group_id},
+                            )
+                        ],
+                    )
+                    continue
                 evidence_context = build_evidence_request_context(
                     hardware=hardware,
                     backend=backend,
@@ -1180,6 +1464,12 @@ def _evaluate_launch_groups(
                 pending_workloads.append((config, workload, evidence_context))
 
             if not pending_workloads:
+                if resumed_workload_count:
+                    status = "resume_completed"
+                    message = "All remaining workloads in launch group were completed in the resumed run."
+                else:
+                    status = "evidence_hit"
+                    message = "All workloads in launch group had exact fresh measured evidence."
                 _append_jsonl(
                     lifecycle_path,
                     [
@@ -1188,8 +1478,8 @@ def _evaluate_launch_groups(
                             group.group_id,
                             backend,
                             "launch_skipped",
-                            "evidence_hit",
-                            message="All workloads in launch group had exact fresh measured evidence.",
+                            status,
+                            message=message,
                             details={"group_id": group.group_id, "workload_count": len(group.workload_configs), "rung": _group_rung(group)},
                         )
                     ],
@@ -1404,6 +1694,7 @@ def _evaluate_launch_groups(
                     "rung": _group_rung(group),
                     "evidence_lookup_metadata": group_metadata,
                     "pending_workload_count": len(pending_workloads),
+                    "resumed_workload_count": resumed_workload_count,
                 }
             )
             if handle is not None:
@@ -1623,7 +1914,12 @@ def _managed_recommendation_inputs(
         config = configs_by_id.get(result.candidate_id)
         if config is None:
             continue
-        source = "managed_evidence_hit" if result.measured_or_evidence_source == "evidence" else "managed_measured"
+        if result.measured_or_evidence_source == "evidence":
+            source = "managed_evidence_hit"
+        elif result.measured_or_evidence_source == "resume":
+            source = "managed_resume"
+        else:
+            source = "managed_measured"
         workload = serving_config_to_workload_config(config, trials=1, request_timeout_s=120.0, telemetry="none")
         candidate = _managed_serve_candidate(
             config,
@@ -1679,9 +1975,9 @@ def _managed_recommendation_inputs(
 def _latest_recommendable_rung_results(rung_results: list[RungResult]) -> list[RungResult]:
     by_candidate: dict[str, RungResult] = {}
     for result in rung_results:
-        if result.status not in {"completed", "evidence_hit"}:
+        if result.status not in {"completed", "evidence_hit", "resumed"}:
             continue
-        if result.measured_or_evidence_source not in {"measured", "evidence"}:
+        if result.measured_or_evidence_source not in {"measured", "evidence", "resume"}:
             continue
         previous = by_candidate.get(result.candidate_id)
         if previous is None or result.rung_index >= previous.rung_index:
@@ -1789,6 +2085,19 @@ def _managed_measured_metrics(metrics: dict[str, Any]) -> dict[str, float | int 
         "p50_latency_s": _seconds_from_ms(metrics.get("p50_latency_ms")),
         "p95_latency_s": _seconds_from_ms(metrics.get("p95_latency_ms")),
         "p99_latency_s": _seconds_from_ms(metrics.get("p99_latency_ms")),
+        "ttft_ms": _optional_float(metrics.get("p95_ttft_ms")),
+        "time_to_first_token_ms": _optional_float(metrics.get("p95_ttft_ms")),
+        "avg_ttft_ms": _optional_float(metrics.get("avg_ttft_ms")),
+        "p50_ttft_ms": _optional_float(metrics.get("p50_ttft_ms")),
+        "p95_ttft_ms": _optional_float(metrics.get("p95_ttft_ms")),
+        "tpot_ms": _optional_float(metrics.get("p95_tpot_ms")),
+        "time_per_output_token_ms": _optional_float(metrics.get("p95_tpot_ms")),
+        "avg_tpot_ms": _optional_float(metrics.get("avg_tpot_ms")),
+        "p50_tpot_ms": _optional_float(metrics.get("p50_tpot_ms")),
+        "p95_tpot_ms": _optional_float(metrics.get("p95_tpot_ms")),
+        "ttft_sample_count": _optional_int(metrics.get("ttft_sample_count")) or 0,
+        "tpot_sample_count": _optional_int(metrics.get("tpot_sample_count")) or 0,
+        "timing_source": _optional_str(metrics.get("timing_source")),
         "total_requests": _optional_int(metrics.get("total_requests")),
         "successful_requests": _optional_int(metrics.get("successful_requests")),
         "failed_requests": _optional_int(metrics.get("failed_requests")) or 0,
@@ -1800,6 +2109,9 @@ def _managed_telemetry_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "average_power_watts": _optional_float(metrics.get("average_power_w")),
         "joules_per_token": _optional_float(metrics.get("active_joules_per_token")) or _optional_float(metrics.get("joules_per_token")),
         "tokens_per_second_per_watt": _optional_float(metrics.get("tokens_per_watt")),
+        "temperature_rise_c": _optional_float(metrics.get("temperature_rise_c")),
+        "temperature_slope_c_per_min": _optional_float(metrics.get("temperature_slope_c_per_min")),
+        "thermal_stability_classification": _optional_str(metrics.get("thermal_stability_classification")),
         "telemetry_quality": "good" if metrics.get("average_power_w") is not None else "unavailable",
     }
 
@@ -1962,10 +2274,22 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
         "p50_latency_ms": _optional_float(measurement.get("p50_latency_ms")),
         "p95_latency_ms": _optional_float(measurement.get("p95_latency_ms")),
         "p99_latency_ms": _optional_float(measurement.get("p99_latency_ms")),
+        "avg_ttft_ms": _optional_float(raw_summary.get("avg_ttft_ms")),
+        "p50_ttft_ms": _optional_float(raw_summary.get("p50_ttft_ms")),
+        "p95_ttft_ms": _optional_float(raw_summary.get("p95_ttft_ms")),
+        "avg_tpot_ms": _optional_float(raw_summary.get("avg_tpot_ms")),
+        "p50_tpot_ms": _optional_float(raw_summary.get("p50_tpot_ms")),
+        "p95_tpot_ms": _optional_float(raw_summary.get("p95_tpot_ms")),
+        "ttft_sample_count": _optional_int(raw_summary.get("ttft_sample_count")),
+        "tpot_sample_count": _optional_int(raw_summary.get("tpot_sample_count")),
+        "timing_source": _optional_str(raw_summary.get("timing_source")),
         "average_power_w": _optional_float(measurement.get("average_power_w")),
         "joules_per_token": _optional_float(measurement.get("joules_per_token")),
         "active_joules_per_token": _optional_float(raw_summary.get("active_joules_per_token")),
         "stability_classification": _optional_str(raw_summary.get("stability_classification")),
+        "temperature_rise_c": _optional_float(raw_summary.get("temperature_rise_c")),
+        "temperature_slope_c_per_min": _optional_float(raw_summary.get("temperature_slope_c_per_min")),
+        "thermal_stability_classification": _optional_str(raw_summary.get("thermal_stability_classification")),
         "tokens_per_watt": _optional_float(measurement.get("tokens_per_watt")),
         "total_requests": _optional_int(raw_summary.get("total_requests")),
         "successful_requests": _optional_int(raw_summary.get("successful_requests")),
@@ -2121,6 +2445,8 @@ def serving_config_to_workload_config(
         warmup_requests=_positive_int(extra.get("warmup_requests"), default=0),
         idle_baseline_duration_s=_positive_float(extra.get("idle_baseline_duration_s"), default=0.0),
         idle_power_watts=_optional_float(extra.get("idle_power_watts")),
+        soak_duration_s=_optional_float(extra.get("soak_duration_s")),
+        stream=_optional_bool(extra.get("stream"), default=False),
         telemetry=telemetry,
         prior_source=_optional_str(extra.get("prior_source")),
         prior_confidence=_optional_float(extra.get("prior_confidence")),
@@ -2555,7 +2881,7 @@ def _apply_synthesis_execution_status(
         result = result_by_id.get(candidate_id)
         updated = dict(record)
         if status == "selected_for_evaluation" and result is not None:
-            if result.status == "completed":
+            if result.status in {"completed", "resumed"}:
                 updated["status"] = "measured"
             elif result.status == "evidence_hit":
                 updated["status"] = "evidence_hit"
@@ -2945,6 +3271,8 @@ def _benchmark_config_from_workload(
         steady_state_duration_s=workload.benchmark_duration_s,
         idle_baseline_duration_s=workload.idle_baseline_duration_s,
         idle_power_watts=workload.idle_power_watts,
+        soak_duration_s=workload.soak_duration_s,
+        stream=workload.stream,
     )
 
 
@@ -2955,8 +3283,17 @@ def _with_measurement_quality_options(
     steady_state_duration_s: float | None,
     idle_baseline_duration_s: float,
     idle_power_watts: float | None,
+    soak_duration_s: float | None,
+    stream: bool,
 ) -> list[ServingConfig]:
-    if warmup_requests <= 0 and steady_state_duration_s is None and idle_baseline_duration_s <= 0 and idle_power_watts is None:
+    if (
+        warmup_requests <= 0
+        and steady_state_duration_s is None
+        and idle_baseline_duration_s <= 0
+        and idle_power_watts is None
+        and soak_duration_s is None
+        and not stream
+    ):
         return candidates
     updated = []
     for config in candidates:
@@ -2969,6 +3306,10 @@ def _with_measurement_quality_options(
             extra["idle_baseline_duration_s"] = idle_baseline_duration_s
         if idle_power_watts is not None:
             extra["idle_power_watts"] = idle_power_watts
+        if soak_duration_s is not None:
+            extra["soak_duration_s"] = soak_duration_s
+        if stream:
+            extra["stream"] = True
         updated.append(replace(config, extra=extra))
     return updated
 
@@ -3001,6 +3342,19 @@ def _optional_float(value: object) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: object, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _optional_str(value: object) -> str | None:

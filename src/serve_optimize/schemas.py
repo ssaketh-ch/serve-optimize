@@ -185,6 +185,8 @@ class WorkloadConfig:
     warmup_requests: int = 0
     idle_baseline_duration_s: float = 0.0
     idle_power_watts: float | None = None
+    soak_duration_s: float | None = None
+    stream: bool = False
     endpoint: str = "/v1/chat/completions"
     telemetry: str = "none"
     prior_source: str | None = None
@@ -462,6 +464,11 @@ class ManagedRunSummary:
     recommendation_summary_json_path: str | None = None
     recommendation_quality_audit: dict[str, Any] = field(default_factory=dict)
     optimizer_quality: dict[str, Any] = field(default_factory=dict)
+    resume_from_run_dir: str | None = None
+    resume_source_run_id: str | None = None
+    resume_loaded_candidate_count: int = 0
+    resume_skipped_candidate_count: int = 0
+    resume_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -509,6 +516,8 @@ class EndpointBenchmarkConfig:
     steady_state_duration_s: float | None = None
     idle_power_watts: float | None = None
     idle_baseline_duration_s: float = 0.0
+    soak_duration_s: float | None = None
+    stream: bool = False
     schema_version: str = "endpoint-benchmark/v1"
 
 
@@ -523,6 +532,9 @@ class RequestRecord:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    ttft_s: float | None = None
+    tpot_s: float | None = None
+    timing_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -602,6 +614,9 @@ class TelemetrySummary:
     max_memory_util_percent: float | None = None
     average_temperature_c: float | None = None
     max_temperature_c: float | None = None
+    temperature_rise_c: float | None = None
+    temperature_slope_c_per_min: float | None = None
+    thermal_stability_classification: str | None = None
     average_sm_clock_mhz: float | None = None
     average_memory_clock_mhz: float | None = None
     average_memory_used_mb: float | None = None
@@ -631,6 +646,15 @@ class EndpointBenchmarkSummary:
     p50_latency_s: float | None
     p95_latency_s: float | None
     p99_latency_s: float | None
+    avg_ttft_ms: float | None = None
+    p50_ttft_ms: float | None = None
+    p95_ttft_ms: float | None = None
+    avg_tpot_ms: float | None = None
+    p50_tpot_ms: float | None = None
+    p95_tpot_ms: float | None = None
+    ttft_sample_count: int = 0
+    tpot_sample_count: int = 0
+    timing_source: str | None = None
     power_sample_count: int = 0
     average_power_watts: float | None = None
     min_power_watts: float | None = None
@@ -663,6 +687,9 @@ class EndpointBenchmarkSummary:
     max_memory_util_percent: float | None = None
     average_temperature_c: float | None = None
     max_temperature_c: float | None = None
+    temperature_rise_c: float | None = None
+    temperature_slope_c_per_min: float | None = None
+    thermal_stability_classification: str | None = None
     average_sm_clock_mhz: float | None = None
     average_memory_clock_mhz: float | None = None
     telemetry_provider: str | None = None

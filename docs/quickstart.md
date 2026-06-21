@@ -102,9 +102,13 @@ serve-optimize managed-evaluate \
   --model /path/to/model \
   --warmup-requests 8 \
   --steady-state-seconds 30 \
+  --soak-seconds 120 \
+  --stream \
   --idle-baseline-seconds 5 \
   --dry-run
 ```
+
+Use `--stream` only when the endpoint supports OpenAI compatible streaming. TTFT and TPOT are then derived from observed stream chunks. Without streaming chunks, those timing metrics remain unavailable rather than estimated.
 
 ## Evidence Reuse
 
@@ -117,6 +121,17 @@ evidence hits: 1
 ```
 
 Runtime or command drift blocks exact reuse.
+
+Resume a managed run from completed matching workload artifacts:
+
+```bash
+serve-optimize managed-evaluate \
+  --backend vllm \
+  --model /path/to/model \
+  --resume-from results/managed-vllm/managed-run-id
+```
+
+Resume reuses only completed workloads whose candidate, launch, and workload identities still match. Drifted or incomplete workloads are measured normally.
 
 ## Inspect Results
 
@@ -131,6 +146,22 @@ Start with:
 * `candidate_failures.jsonl`
 
 Recommendations mean best among evaluated candidates.
+
+## Campaign Planning
+
+Write a broader managed campaign plan without launching servers:
+
+```bash
+serve-optimize campaign-plan \
+  --model /path/to/model \
+  --backend vllm \
+  --backend sglang \
+  --workload-profile short \
+  --workload-profile mixed \
+  --out results/campaign-plan
+```
+
+The plan contains `campaign_plan.json`, `campaign_matrix.csv`, `campaign_commands.sh`, one executable script per backend, `campaign_postprocess.sh`, and a readable summary. Run `campaign_commands.sh vllm` in the vLLM environment and `campaign_commands.sh sglang` in the SGLang environment. Each backend runner continues through failed matrix cells. After all backend scripts finish, run `campaign_postprocess.sh` to analyze the timestamped managed run directories.
 
 ## Verify The Repository
 

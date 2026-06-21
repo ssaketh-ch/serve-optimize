@@ -6,6 +6,7 @@ from serve_optimize.aiconfigurator_bridge import AIConfiguratorRun
 from serve_optimize.cli import _parse_concurrency_sweep, main
 from serve_optimize.recommendation import (
     ATTACH_MODE_LIMITATION,
+    GROSS_ENERGY_LIMITATION,
     RecommendationRun,
     audit_recommendation_quality,
     build_attach_preflight,
@@ -28,6 +29,11 @@ from serve_optimize.schemas import (
     ServeCandidate,
     VllmServePlan,
 )
+
+
+def test_attach_energy_limitation_matches_current_measurement_boundary() -> None:
+    assert "does not collect an idle baseline" in GROSS_ENERGY_LIMITATION
+    assert "not implemented" not in GROSS_ENERGY_LIMITATION
 
 
 def test_throughput_goal_prefers_highest_measured_tokens() -> None:

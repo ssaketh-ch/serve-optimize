@@ -45,4 +45,6 @@ Serve Optimize recommends LLM serving configurations from measured runtime behav
 - Do not weaken tests or delete artifact outputs to simplify implementation.
 - Do not claim idle-subtracted or phase-attributed energy unless implemented and verified.
 - Do not add TensorRT-LLM, Kubernetes, power limits, or parallel candidate execution to Managed Mode unless explicitly scoped.
+- A TensorRT LLM adapter requires an accepted engine build lifecycle design before implementation.
+- TGI, LMDeploy, llama.cpp, and NIM remain Attach Mode only unless Managed Mode lifecycle ownership is explicitly scoped.
 - Treat SGLang as first class only for the capability detected Managed Mode surface. Do not imply universal option parity or exact evidence reuse without current runtime fingerprints.

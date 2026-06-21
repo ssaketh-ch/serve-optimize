@@ -1,5 +1,8 @@
 import json
 
+import pytest
+
+from serve_optimize.cli import main
 from serve_optimize.schemas import PowerSampleRecord
 from serve_optimize.telemetry import TelemetryCapture
 from serve_optimize.telemetry_check import run_telemetry_check
@@ -39,24 +42,12 @@ def test_telemetry_check_writes_artifacts(tmp_path) -> None:
     assert "Telemetry Capabilities" in (run.run_dir / "report.txt").read_text(encoding="utf-8")
 
 
-def test_telemetry_check_records_nvidia_smi_loop_note(tmp_path) -> None:
-    run = run_telemetry_check(
-        telemetry="nvml",
-        duration_s=0.01,
-        interval_s=0.2,
-        out_dir=tmp_path,
-        with_nvidia_smi_loop=True,
-        telemetry_collector_factory=lambda telemetry, device_index, interval_s: _FakeCollector(
-            TelemetryCapture(
-                provider=telemetry,
-                samples=[PowerSampleRecord(0.0, "measured", 100.0, telemetry, provider=telemetry)],
-                warnings=[],
-            )
-        ),
-    )
+def test_telemetry_check_help_has_no_unimplemented_provider_comparison(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["telemetry-check", "--help"])
 
-    summary = json.loads((run.run_dir / "telemetry_summary.json").read_text(encoding="utf-8"))
-    assert any("nvidia-smi loop comparison" in note for note in summary["notes"])
+    assert exc.value.code == 0
+    assert "with-nvidia-smi-loop" not in capsys.readouterr().out
 
 
 class _FakeCollector:

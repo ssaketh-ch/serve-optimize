@@ -192,11 +192,13 @@ SLO constraints are recommendation eligibility guards. TTFT, TPOT, p95 latency, 
 
 ## Measurement Quality
 
-Endpoint benchmarks support warmup request exclusion, steady state windows, sampled idle baselines, and supplied idle power baselines.
+Endpoint benchmarks support warmup request exclusion, steady state windows, soak duration targets, sampled idle baselines, supplied idle power baselines, and streaming response timing.
 
 Benchmark summaries record both gross energy and idle subtracted active energy when an idle baseline is available. Managed multi trial runs aggregate trial summaries before recommendation and evidence writes, and aggregate summaries include confidence intervals plus a stability classification.
 
-Evidence rows preserve idle subtracted power measurement type and stability metadata. Changing measurement quality policy changes workload identity for exact evidence reuse.
+TTFT and TPOT are recorded only when streaming responses expose timed output chunks. TPOT is a stream chunk cadence metric unless the endpoint provides stronger token timing semantics. Evidence rows preserve idle subtracted power measurement type, timing source, and stability metadata through raw summaries. Changing measurement quality policy changes workload identity for exact evidence reuse.
+
+Prefill and decode energy attribution is unavailable in the current measurement path because host telemetry and OpenAI compatible responses do not expose defensible phase boundary markers.
 
 ## Optimizer Quality
 
@@ -223,6 +225,8 @@ Managed Mode records:
 * operator interruption
 
 If a server handle exists, cleanup runs through the stop path even after health, benchmark, or interruption failures.
+
+Managed Mode can resume from a previous run directory with `--resume-from`. Resume reuses only completed measured workloads when candidate id, workload id, launch configuration hash, and workload configuration hash still match the current plan. Reused workloads are recorded as `resume_skip` lifecycle events and enter recommendations as measured resume results. Failed, unavailable, incomplete, or drifted workloads are not reused.
 
 ## Preflight UX
 
@@ -253,7 +257,8 @@ These artifacts explain planned backend, workload, budget, evidence, output, rep
 * Candidate generation is bounded rather than exhaustive.
 * Workload profiles are not yet complete production trace manifests.
 * Prefill and decode energy attribution is not implemented.
-* TensorRT LLM Managed Mode is not implemented.
+* TensorRT LLM is planned only and is not in the current Managed Mode scope.
+* TGI, LMDeploy, llama.cpp, and NIM remain external Attach Mode targets unless lifecycle ownership is separately scoped.
 * Managed candidates are evaluated sequentially.
 
 See [Compatibility](compatibility.md) for the precise current contract.

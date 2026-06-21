@@ -1,7 +1,7 @@
 serving_engines:
   vllm:
     priority: 1
-    status: adapter-scaffolded
+    status: first_class_managed
     endpoint: openai-compatible
     benchmark_tools:
       - serve-optimize internal client
@@ -19,7 +19,7 @@ serving_engines:
       - tensor_parallel_size
   sglang:
     priority: 2
-    status: adapter-scaffolded
+    status: first_class_managed
     endpoint: openai-compatible
     benchmark_tools:
       - serve-optimize internal client
@@ -35,7 +35,7 @@ serving_engines:
       - tensor_parallel_size
   tensorrt_llm:
     priority: 3
-    status: planned
+    status: planned_only
     endpoint: openai-compatible through trtllm-serve
     benchmark_tools:
       - genai-perf
@@ -48,9 +48,12 @@ serving_engines:
       - fp8
       - int8
       - int4
+    notes:
+      - Not in the current Managed Mode scope.
+      - Engine conversion, build identity, cache policy, compatibility, and cleanup must be designed before an adapter.
   tgi:
     priority: 4
-    status: planned
+    status: attach_only_external
     endpoint: openai-compatible
     benchmark_tools:
       - genai-perf
@@ -62,7 +65,7 @@ serving_engines:
       - quantize
   lmdeploy:
     priority: 5
-    status: planned
+    status: attach_only_external
     endpoint: openai-compatible
     benchmark_tools:
       - genai-perf
@@ -74,7 +77,7 @@ serving_engines:
       - quant_policy
   llama_cpp:
     priority: 6
-    status: planned-baseline
+    status: attach_only_external
     endpoint: openai-compatible server mode
     benchmark_tools:
       - internal client

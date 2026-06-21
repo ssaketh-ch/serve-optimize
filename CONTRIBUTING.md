@@ -1,9 +1,10 @@
 # Contributing
 
-Serve Optimize is meant to be useful to researchers and practitioners. Contributions are welcome in four areas:
+Serve Optimize is meant to be useful to researchers and practitioners. Contributions are welcome in five areas:
 
 - Hardware profiles and measurement notes.
-- Backend adapters for vLLM, SGLang, TensorRT-LLM, and llama.cpp.
+- Backend improvements for the supported vLLM and SGLang Managed Mode surfaces.
+- Attach Mode compatibility notes for external OpenAI compatible endpoints.
 - Reproducible benchmark runs with raw telemetry.
 - Optimizer, modeling, and plotting improvements.
 
@@ -38,3 +39,4 @@ Do not submit benchmark results that mix unrelated workloads in the same run art
 - Keep synthetic smoke-test mode working on CPU-only machines.
 - Add tests for optimizer logic and parsers.
 - Be explicit when a metric is measured, estimated, or synthetic.
+- Do not add a Managed Mode backend without explicit lifecycle ownership and an accepted design.

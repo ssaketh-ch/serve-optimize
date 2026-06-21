@@ -51,3 +51,5 @@ To broaden the research package, collect fresh runtime fingerprinted evidence fo
 * SLO constraints
 
 Then rerun `serve-optimize research-package` over the expanded run set.
+
+Use `serve-optimize campaign-plan` to create a reproducible command matrix before collecting those runs.

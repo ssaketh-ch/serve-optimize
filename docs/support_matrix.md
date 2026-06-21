@@ -16,7 +16,7 @@
 |---|---|---|---|
 | vLLM | First class | `0.10.0` | Supported. |
 | SGLang | First class for detected surface | `0.5.10.post1` | Supported with runtime helper. |
-| TensorRT LLM | Not implemented | none | Not supported. |
+| TensorRT LLM | Planned only | none | Managed Mode is not in current scope; Attach Mode may measure an external compatible endpoint. |
 | TGI | Attach only | none | Not supported. |
 | LMDeploy | Attach only | none | Not supported. |
 | llama.cpp | Attach only | none | Not supported. |

@@ -31,6 +31,9 @@ TELEMETRY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 MAJOR_TELEMETRY_FIELDS = ("power_watts", "gpu_util_percent")
 FLAT_POWER_STDDEV_THRESHOLD_W = 2.0
 FLAT_POWER_COV_THRESHOLD = 0.01
+THERMAL_SOAK_MIN_DURATION_S = 60.0
+THERMAL_STABLE_MAX_RISE_C = 5.0
+THERMAL_STABLE_MAX_SLOPE_C_PER_MIN = 1.0
 CAPABILITY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "power": ("power_watts", "watts"),
     "temperature": ("temperature_c", "gpu_temperature_c"),
@@ -206,6 +209,9 @@ def summarize_power_samples(samples: list[PowerSampleRecord], wall_time_s: float
         "max_memory_util_percent": summary.max_memory_util_percent,
         "average_temperature_c": summary.average_temperature_c,
         "max_temperature_c": summary.max_temperature_c,
+        "temperature_rise_c": summary.temperature_rise_c,
+        "temperature_slope_c_per_min": summary.temperature_slope_c_per_min,
+        "thermal_stability_classification": summary.thermal_stability_classification,
         "average_sm_clock_mhz": summary.average_sm_clock_mhz,
         "average_memory_clock_mhz": summary.average_memory_clock_mhz,
         "observed_memory_mb": summary.max_memory_used_mb,
@@ -241,8 +247,14 @@ def summarize_telemetry(
     gpu_utils = [value for value in gpu_utils if value is not None]
     memory_utils = [_first_float(sample.memory_util_percent) for sample in samples]
     memory_utils = [value for value in memory_utils if value is not None]
-    temperatures = [_first_float(sample.temperature_c, sample.gpu_temperature_c) for sample in samples]
-    temperatures = [value for value in temperatures if value is not None]
+    temperature_points = [
+        (sample.timestamp_s, value)
+        for sample in samples
+        for value in [_first_float(sample.temperature_c, sample.gpu_temperature_c)]
+        if value is not None
+    ]
+    temperature_points = sorted(temperature_points)
+    temperatures = [value for _, value in temperature_points]
     sm_clocks = [_optional_float(sample.sm_clock_mhz) for sample in samples]
     sm_clocks = [value for value in sm_clocks if value is not None]
     memory_clocks = [_optional_float(sample.memory_clock_mhz) for sample in samples]
@@ -282,6 +294,16 @@ def summarize_telemetry(
         telemetry_warnings.append("GPU utilization was unavailable, so power interpretation is limited.")
     if _mig_active(mig_mode, mig_profile, device_name):
         notes.append("MIG power readings may be device-level, slice-level, or limited depending on platform support.")
+    temperature_duration = _temperature_duration_s(temperature_points)
+    temperature_rise = _temperature_rise_c(temperature_points)
+    temperature_slope = _temperature_slope_c_per_min(temperature_points)
+    thermal_classification = _thermal_stability_classification(
+        temperature_duration_s=temperature_duration,
+        temperature_rise_c=temperature_rise,
+        temperature_slope_c_per_min=temperature_slope,
+    )
+    if thermal_classification == "limited_window":
+        notes.append("Thermal stability is based on a short active window. Use a longer soak duration for stronger evidence.")
 
     quality = _classify_quality(
         provider=provider,
@@ -313,6 +335,10 @@ def summarize_telemetry(
     thermal_stats = {
         "avg_temperature_c": _round_or_none(_average(temperatures)),
         "max_temperature_c": _round_or_none(max(temperatures) if temperatures else None),
+        "temperature_rise_c": _round_or_none(temperature_rise),
+        "temperature_slope_c_per_min": _round_or_none(temperature_slope),
+        "observation_duration_s": _round_or_none(temperature_duration),
+        "stability_classification": thermal_classification,
     }
     clock_stats = {
         "avg_graphics_clock_mhz": _round_or_none(_average(graphics_clocks)),
@@ -371,6 +397,9 @@ def summarize_telemetry(
         max_memory_util_percent=utilization_stats["max_memory_util_percent"],
         average_temperature_c=thermal_stats["avg_temperature_c"],
         max_temperature_c=thermal_stats["max_temperature_c"],
+        temperature_rise_c=thermal_stats["temperature_rise_c"],
+        temperature_slope_c_per_min=thermal_stats["temperature_slope_c_per_min"],
+        thermal_stability_classification=thermal_classification,
         average_sm_clock_mhz=clock_stats["avg_sm_clock_mhz"],
         average_memory_clock_mhz=clock_stats["avg_memory_clock_mhz"],
         average_memory_used_mb=_round_or_none(_average(memory_used)),
@@ -656,6 +685,42 @@ def _round_or_none(value: float | int | None) -> float | None:
     if value is None:
         return None
     return round(float(value), 6)
+
+
+def _temperature_duration_s(points: list[tuple[float, float]]) -> float | None:
+    if len(points) < 2:
+        return None
+    duration = points[-1][0] - points[0][0]
+    return duration if duration > 0 else None
+
+
+def _temperature_rise_c(points: list[tuple[float, float]]) -> float | None:
+    if len(points) < 2:
+        return None
+    return points[-1][1] - points[0][1]
+
+
+def _temperature_slope_c_per_min(points: list[tuple[float, float]]) -> float | None:
+    duration = _temperature_duration_s(points)
+    rise = _temperature_rise_c(points)
+    if duration is None or rise is None:
+        return None
+    return rise / duration * 60.0
+
+
+def _thermal_stability_classification(
+    *,
+    temperature_duration_s: float | None,
+    temperature_rise_c: float | None,
+    temperature_slope_c_per_min: float | None,
+) -> str:
+    if temperature_duration_s is None or temperature_rise_c is None or temperature_slope_c_per_min is None:
+        return "unavailable"
+    if temperature_duration_s < THERMAL_SOAK_MIN_DURATION_S:
+        return "limited_window"
+    if abs(temperature_rise_c) <= THERMAL_STABLE_MAX_RISE_C and abs(temperature_slope_c_per_min) <= THERMAL_STABLE_MAX_SLOPE_C_PER_MIN:
+        return "stable"
+    return "warming"
 
 
 def _missing_fields(samples: list[PowerSampleRecord]) -> list[str]:

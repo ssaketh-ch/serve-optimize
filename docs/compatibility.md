@@ -24,8 +24,8 @@ This document defines the current supported product surface. It is the authority
 |---|---|---|---|
 | vLLM | First class | vLLM `0.10.0`, Torch `2.7.1+cu126`, CUDA `12.6`, Python `3.10.20` | Installed capability detection, canonical rendering, lifecycle, evidence, and recommendation paths are validated. |
 | SGLang | First class for the detected supported surface | SGLang `0.5.10.post1`, Torch `2.9.1+cu128`, CUDA `12.8`, Python `3.10.20`, GCC Toolset `12.2.1` | Requires `source scripts/env_base_runtime.sh` on the validation host. The validated command preserves `--disable-piecewise-cuda-graph`. |
-| TensorRT LLM | Planned | none | No adapter, lifecycle, candidate, evidence, or recommendation support exists. |
-| TGI, LMDeploy, llama.cpp, NIM | Planned | none | They may be used manually through Attach Mode only when they expose a compatible endpoint. They are not Managed Mode backends. |
+| TensorRT LLM | Planned only | none | Not in current Managed Mode scope. No adapter, engine build lifecycle, evidence, or recommendation support exists. |
+| TGI, LMDeploy, llama.cpp, NIM | Attach only | none | They may be measured through Attach Mode when they expose a compatible endpoint. Serve Optimize does not own their Managed Mode lifecycle. |
 
 First class SGLang support does not mean universal parity with every SGLang option. It means parity for the capability detected Managed Mode surface.
 
@@ -84,7 +84,7 @@ Measured evidence records include:
 * canonical launch configuration hash
 * workload configuration hash
 * runtime fingerprint
-* measured throughput, latency, power, energy, and efficiency fields when available
+* measured throughput, latency, stream timing, power, energy, thermal, and efficiency fields when available
 
 The runtime fingerprint includes:
 
@@ -119,6 +119,21 @@ The following cannot be exact hits:
 
 Runtime drift is recorded explicitly in `evidence_decisions.jsonl`.
 
+TTFT and TPOT evidence is available only when the benchmark uses streaming and observes response chunks. Non streaming responses do not provide these metrics. Current energy evidence covers gross and idle subtracted active windows only. Prefill and decode energy attribution is unavailable without backend phase markers or equivalent request trace events.
+
+## Managed Resume
+
+Managed Mode supports `--resume-from RUN_DIR` for prior managed run directories.
+
+Resume may reuse only completed measured workload artifacts when all of these match the current plan:
+
+* candidate id
+* workload id
+* canonical launch configuration hash
+* workload configuration hash
+
+Resume does not reuse failed, unavailable, incomplete, stale, or drifted workloads. Reused workloads are recorded in `server_lifecycle.jsonl` with `resume_skip` events and are counted separately in `managed_run.json`.
+
 ## Artifact Contract
 
 Machine readable JSON and JSONL artifacts are the source of truth.
@@ -148,6 +163,7 @@ Unavailable or failed runs preserve diagnostics. They must not create a misleadi
 Final Managed Mode recommendations use:
 
 * measured results
+* resumed completed measured workload results
 * exact fresh measured evidence hits
 
 Predictions, stale evidence, and near compatible evidence may influence pruning or promotion but cannot become final measured truth.

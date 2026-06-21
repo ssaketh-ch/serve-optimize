@@ -4,7 +4,7 @@ Pinned requirement profiles for reproducible installs.
 
 Profiles:
 
-* `profiles/core.txt`: CLI, schemas, tests, docs, and artifact tooling.
+* `profiles/core.txt`: CLI, schemas, synthetic paths, endpoint client, and artifact tooling.
 * `profiles/telemetry.txt`: core plus NVIDIA telemetry bindings.
 * `profiles/vllm.txt`: validated vLLM Managed Mode runtime.
 * `profiles/sglang.txt`: validated SGLang Managed Mode runtime.
