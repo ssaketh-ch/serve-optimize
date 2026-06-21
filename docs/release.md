@@ -4,7 +4,7 @@
 
 Phase Eight defines the local release gate for Serve Optimize.
 
-The release gate is intentionally local because this checkout is not a Git repository. The CI workflow file is present for hosted use, but local verification remains the source of truth for this workspace.
+The release gate is intentionally local for this workspace. The CI workflow file is present for hosted use, but local verification remains the source of truth.
 
 ## Local Release Gate
 
@@ -19,6 +19,8 @@ The full gate checks:
 * Python compilation for `src` and `tests`
 * full test suite
 * Ruff lint
+* source distribution and wheel builds
+* packaged wheel import and CLI version smoke
 * feature list JSON validity
 * required CLI help surfaces
 * release readiness artifacts
@@ -43,6 +45,8 @@ Artifacts:
 * `release_check.txt`
 
 The release check inspects packaging metadata, verification scripts, support documents, schema markers, and required files. It does not run backend measurements.
+
+Hosted CI runs the fast gate on Python 3.10, 3.11, and 3.12. A separate package job builds the source distribution and wheel, installs the wheel, and checks the installed CLI version.
 
 ## Build And Installation Policy
 

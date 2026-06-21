@@ -2,11 +2,14 @@ import json
 
 import pytest
 
+import serve_optimize.endpoint_benchmark as endpoint_benchmark
 from serve_optimize.aiconfig_parser import parse_aiconfig_prediction_csv
 from serve_optimize.endpoint_benchmark import (
+    _run_requests,
     aggregate_benchmark_summaries,
     compare_prediction,
     run_endpoint_benchmark,
+    send_chat_completion_request,
     summarize_requests,
 )
 from serve_optimize.schemas import AICPrediction, EndpointBenchmarkConfig, PowerSampleRecord, RequestRecord
@@ -64,6 +67,48 @@ def test_summary_metric_calculation_and_failure_accounting() -> None:
     assert summary.p50_latency_s == pytest.approx(2.0)
     assert summary.p95_latency_s == pytest.approx(2.9)
     assert summary.p99_latency_s == pytest.approx(2.98)
+
+
+def test_summary_includes_stream_timing_metrics() -> None:
+    records = [
+        RequestRecord(
+            0,
+            0.0,
+            1.0,
+            1.0,
+            "ok",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            ttft_s=0.1,
+            tpot_s=0.02,
+            timing_source="openai_stream_chunks",
+        ),
+        RequestRecord(
+            1,
+            0.0,
+            1.2,
+            1.2,
+            "ok",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            ttft_s=0.2,
+            tpot_s=0.04,
+            timing_source="openai_stream_chunks",
+        ),
+    ]
+
+    summary = summarize_requests("run-timing", records, wall_time_s=2.0)
+
+    assert summary.avg_ttft_ms == pytest.approx(150.0)
+    assert summary.p95_ttft_ms == pytest.approx(195.0)
+    assert summary.avg_tpot_ms == pytest.approx(30.0)
+    assert summary.p95_tpot_ms == pytest.approx(39.0)
+    assert summary.ttft_sample_count == 2
+    assert summary.tpot_sample_count == 2
+    assert summary.timing_source == "openai_stream_chunks"
+    assert summary.measurement_quality["phase_energy_attribution"] == "unavailable_without_phase_markers"
 
 
 def test_summary_metric_calculation_with_power_fields() -> None:
@@ -214,6 +259,29 @@ def test_telemetry_summary_with_full_fields_is_good() -> None:
     assert summary.utilization_stats["avg_gpu_util_percent"] == pytest.approx(62.0)
     assert summary.thermal_stats["avg_temperature_c"] == pytest.approx(67.0)
     assert summary.clock_stats["avg_sm_clock_mhz"] == pytest.approx(1502.0)
+    assert summary.thermal_stats["temperature_rise_c"] == pytest.approx(4.0)
+    assert summary.thermal_stats["stability_classification"] == "limited_window"
+
+
+def test_telemetry_summary_reports_longer_thermal_soak_stability() -> None:
+    samples = [
+        PowerSampleRecord(
+            timestamp_s=float(index * 30),
+            phase="measured",
+            watts=120.0,
+            source="nvml",
+            provider="nvml",
+            gpu_util_percent=70.0,
+            temperature_c=60.0 + index * 0.25,
+        )
+        for index in range(5)
+    ]
+
+    summary = summarize_telemetry(samples, wall_time_s=120.0, total_tokens=1000, provider="nvml")
+
+    assert summary.temperature_rise_c == pytest.approx(1.0)
+    assert summary.temperature_slope_c_per_min == pytest.approx(0.5)
+    assert summary.thermal_stability_classification == "stable"
 
 
 def test_telemetry_summary_with_missing_optional_fields_is_limited() -> None:
@@ -372,6 +440,72 @@ def test_prediction_comparison_calculation() -> None:
     assert comparison.metrics["request_latency_avg_s"]["predicted"] == pytest.approx(1.0)
     assert comparison.metrics["request_latency_avg_s"]["measured"] == pytest.approx(2.0)
     assert comparison.metrics["concurrency"]["absolute_delta"] == pytest.approx(-2.0)
+
+
+def test_streaming_request_records_ttft_and_tpot(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n'
+            yield b'data: {"choices":[{"delta":{"content":"b"}}]}\n'
+            yield b'data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},"choices":[]}\n'
+            yield b"data: [DONE]\n"
+
+    times = iter([0.0, 0.2, 0.5, 0.6])
+    monkeypatch.setattr(endpoint_benchmark.time, "time", lambda: next(times))
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", lambda request, timeout: FakeResponse())
+    config = EndpointBenchmarkConfig(
+        run_id="run-stream",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        stream=True,
+    )
+
+    record = send_chat_completion_request(config, request_id=0)
+
+    assert record.status == "ok"
+    assert record.ttft_s == pytest.approx(0.2)
+    assert record.tpot_s == pytest.approx(0.3)
+    assert record.timing_source == "openai_stream_chunks"
+    assert record.prompt_tokens == 3
+    assert record.completion_tokens == 2
+    assert record.total_tokens == 5
+
+
+def test_soak_duration_runs_additional_request_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="run-soak",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        soak_duration_s=2.0,
+    )
+
+    perf_times = iter([0.0, 1.0, 2.5])
+    monkeypatch.setattr(endpoint_benchmark.time, "perf_counter", lambda: next(perf_times))
+
+    def fake_request(_config: EndpointBenchmarkConfig, request_id: int) -> RequestRecord:
+        return RequestRecord(request_id, float(request_id), float(request_id) + 0.1, 0.1, "ok")
+
+    records = _run_requests(config, fake_request)
+
+    assert [record.request_id for record in sorted(records, key=lambda item: item.request_id)] == [0, 1]
 
 
 def test_mocked_endpoint_benchmark_writes_artifacts_and_request_jsonl(tmp_path) -> None:

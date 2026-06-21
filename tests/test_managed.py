@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 import pytest
 
 from serve_optimize.backends.factory import (
+    ATTACH_ONLY_BACKENDS,
     MANAGED_BACKEND_CHOICES,
+    PLANNED_MANAGED_BACKENDS,
     SUPPORTED_MANAGED_BACKENDS,
     UnsupportedManagedBackendError,
     create_managed_backend_adapter,
@@ -146,6 +148,26 @@ def test_managed_backend_factory_rejects_unknown_backend() -> None:
         create_managed_backend_adapter("unknown")
 
     assert "Unsupported managed backend 'unknown'. Currently supported: vllm, sglang." == str(exc.value)
+
+
+@pytest.mark.parametrize("backend", ["trt-llm", "tensorrt-llm", "tensorrt_llm"])
+def test_managed_backend_factory_rejects_planned_tensorrt_llm(backend) -> None:
+    with pytest.raises(UnsupportedManagedBackendError) as exc:
+        create_managed_backend_adapter(backend)
+
+    assert "planned only" in str(exc.value)
+    assert "engine build lifecycle" in str(exc.value)
+    assert backend in PLANNED_MANAGED_BACKENDS
+
+
+@pytest.mark.parametrize("backend", ["tgi", "lmdeploy", "llama.cpp", "llama-cpp", "llama_cpp", "nim"])
+def test_managed_backend_factory_keeps_external_engines_attach_only(backend) -> None:
+    with pytest.raises(UnsupportedManagedBackendError) as exc:
+        create_managed_backend_adapter(backend)
+
+    assert "Attach Mode only" in str(exc.value)
+    assert backend in ATTACH_ONLY_BACKENDS
+
 
 
 def test_sglang_help_parser_detects_flags_and_hash() -> None:
@@ -2469,6 +2491,114 @@ def test_managed_lifecycle_launches_once_for_group_with_multiple_workloads(tmp_p
     assert managed_run["evidence_hits"] == summary.evidence_hit_candidate_count
     assert len(launch_groups) == 1
     assert len(workloads) == 2
+
+
+def test_managed_resume_skips_completed_exact_matching_workload(tmp_path) -> None:
+    first = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "first",
+        telemetry="none",
+        adapter=_SuccessAdapter(),
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(extra={"workload_concurrency": 1})],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+    )
+    source_run_dir = tmp_path / "first" / first.run_id
+
+    second = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "second",
+        telemetry="none",
+        adapter=_ShouldNotLaunchAdapter(),
+        candidate_provider=lambda: [_config(extra={"workload_concurrency": 1})],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+        resume_from=source_run_dir,
+    )
+
+    run_dir = tmp_path / "second" / second.run_id
+    managed_run = json.loads((run_dir / "managed_run.json").read_text(encoding="utf-8"))
+    lifecycle = [
+        json.loads(line)
+        for line in (run_dir / "server_lifecycle.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    recommendation = json.loads((run_dir / "managed_recommendation.json").read_text(encoding="utf-8"))
+
+    assert second.status == "success"
+    assert second.cold_launch_count == 0
+    assert second.workload_measurement_count == 0
+    assert second.resume_skipped_candidate_count == 1
+    assert second.completed_candidate_count == 1
+    assert managed_run["resume_from_run_dir"] == str(source_run_dir.resolve())
+    assert managed_run["resume_source_run_id"] == first.run_id
+    assert managed_run["resume_loaded_candidate_count"] == 1
+    assert any(row["event"] == "resume_skip" and row["status"] == "completed" for row in lifecycle)
+    assert any(row["event"] == "launch_skipped" and row["status"] == "resume_completed" for row in lifecycle)
+    assert recommendation["selected_source"] == "managed_resume"
+
+
+def test_managed_resume_remeasures_when_workload_identity_changes(tmp_path) -> None:
+    first = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "first",
+        telemetry="none",
+        adapter=_SuccessAdapter(),
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(extra={"num_requests": 128})],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+    )
+    adapter = _CountingSuccessAdapter()
+
+    second = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "second",
+        telemetry="none",
+        adapter=adapter,
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(extra={"num_requests": 256})],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+        resume_from=tmp_path / "first" / first.run_id,
+    )
+
+    assert adapter.launch_count == 1
+    assert second.resume_skipped_candidate_count == 0
+    assert second.workload_measurement_count == 1
 
 
 def test_managed_evaluation_skips_launch_on_exact_fresh_evidence(tmp_path) -> None:

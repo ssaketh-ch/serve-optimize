@@ -35,7 +35,9 @@ Validated backend stacks:
 |---|---|---|
 | vLLM | `0.10.0` | First class Managed Mode |
 | SGLang | `0.5.10.post1` | First class for the supported detected surface |
-| TensorRT LLM | none | Not implemented |
+| TensorRT LLM | none | Planned only; Managed Mode is not in current scope |
+
+External TGI, LMDeploy, llama.cpp, NIM, and TensorRT LLM endpoints may be measured through Attach Mode when they expose an OpenAI compatible API. Serve Optimize does not own their lifecycle.
 
 See [Compatibility](docs/compatibility.md) for the exact support, evidence, artifact, installation, and exclusion contracts.
 
@@ -151,12 +153,27 @@ serve-optimize managed-evaluate \
   --model /path/to/model \
   --warmup-requests 8 \
   --steady-state-seconds 30 \
+  --soak-seconds 120 \
+  --stream \
   --idle-baseline-seconds 5
 ```
 
-Summaries include gross energy and idle subtracted active energy when an idle baseline is available.
+Summaries include gross energy and idle subtracted active energy when an idle baseline is available. Streaming runs also report TTFT and stream chunk TPOT when the endpoint emits timed response chunks. Soak runs extend the active request window and thermal summaries report observed temperature rise, slope, and whether the window is long enough to support a stability claim.
 
 Managed recommendations also write optimizer quality artifacts. `optimizer_quality.json` reports bounded evaluated candidate baselines, search regret, metric regret, and candidate policy coverage. `optimizer_failure_cache.json` records artifact backed failure cache entries for failed managed candidates. These artifacts remain scoped to evaluated candidates.
+
+Resume an interrupted or partial managed campaign from completed matching workloads:
+
+```bash
+serve-optimize managed-evaluate \
+  --backend vllm \
+  --model /path/to/model \
+  --goal balanced \
+  --resume-from results/managed-vllm/managed-run-id \
+  --out results/managed-vllm-resumed
+```
+
+Resume reuses only prior completed measured workloads whose candidate id, workload id, rendered launch identity, and workload identity still match. Drifted, failed, unavailable, or incomplete workloads are measured normally.
 
 ### SGLang
 
@@ -194,12 +211,13 @@ A managed evaluation performs:
 3. Canonical command rendering.
 4. Runtime fingerprint and evidence compatibility checks.
 5. Exact fresh evidence reuse where allowed.
-6. Server launch for remaining workloads.
-7. OpenAI compatible health checks and benchmarks.
-8. Optional telemetry collection.
-9. Evidence writes for measured workloads.
-10. Process group shutdown and lifecycle recording.
-11. Recommendation and Pareto artifact generation.
+6. Completed workload resume where `--resume-from` matches exact launch and workload identity.
+7. Server launch for remaining workloads.
+8. OpenAI compatible health checks and benchmarks.
+9. Optional telemetry collection.
+10. Evidence writes for measured workloads.
+11. Process group shutdown and lifecycle recording.
+12. Recommendation and Pareto artifact generation.
 
 Unsupported backend options are rejected or marked unavailable before launch. They are not silently translated.
 
@@ -290,6 +308,22 @@ serve-optimize validate-campaign \
 
 Campaign validation reads existing artifacts. It does not launch servers or create new measured evidence.
 
+Plan a broader managed validation campaign before collecting evidence:
+
+```bash
+serve-optimize campaign-plan \
+  --model /path/to/model-a \
+  --model /path/to/model-b \
+  --backend vllm \
+  --backend sglang \
+  --workload-profile short \
+  --workload-profile mixed \
+  --repeats 2 \
+  --out results/campaign-plan
+```
+
+Campaign plans write a managed run matrix, executable per backend command scripts, a backend dispatcher, and a postprocessing script. Run each backend script in its matching isolated environment. The runners continue after individual failures so later matrix cells still execute. Campaign planning itself does not launch servers or create measured evidence.
+
 ## Release And Research Artifacts
 
 Check release readiness:
@@ -324,6 +358,8 @@ Current measured fields may include:
 
 Current energy values include gross active window estimates and idle subtracted active energy when an idle baseline is available. Prefill and decode phase attribution is not implemented.
 
+Prefill and decode energy attribution is not claimed because the current endpoint and telemetry path does not observe phase boundary markers. The raw power window is real, but assigning that energy to prefill versus decode would require backend phase events or a request trace with defensible phase timestamps.
+
 ## Verification
 
 ```bash
@@ -345,8 +381,8 @@ The latest recorded result is maintained in [Verification](docs/verification.md)
 * Managed candidate policies are bounded rather than exhaustive.
 * Workload profiles are not yet complete production trace manifests.
 * Prefill and decode phase attribution is not implemented.
-* Thermal stability checks are summary level, not long duration soak tests.
-* TensorRT LLM, Kubernetes, power limit control, and parallel candidate execution are not implemented.
+* Thermal stability claims require a sufficiently long active window. Short runs are reported as limited thermal evidence.
+* TensorRT LLM is planned only and outside current Managed Mode scope. Kubernetes, power limit control, and parallel candidate execution are not implemented.
 * Latest vLLM is not validated in this checkout.
 
 ## Documentation
@@ -358,6 +394,9 @@ The latest recorded result is maintained in [Verification](docs/verification.md)
 * [Quickstart](docs/quickstart.md)
 * [Verification](docs/verification.md)
 * [Release engineering](docs/release.md)
+* [Product readiness](docs/product_readiness.md)
+* [Contributing](CONTRIBUTING.md)
+* [Security policy](SECURITY.md)
 * [Support matrix](docs/support_matrix.md)
 * [Research package](docs/research_package.md)
 * [Planned experimental methodology](docs/experiments.md)

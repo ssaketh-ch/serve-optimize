@@ -8,6 +8,8 @@ from serve_optimize.backends.vllm import VllmAdapter
 
 SUPPORTED_MANAGED_BACKENDS = ("vllm", "sglang")
 SCAFFOLDED_MANAGED_BACKENDS: tuple[str, ...] = ()
+PLANNED_MANAGED_BACKENDS = ("trt-llm", "tensorrt-llm", "tensorrt_llm")
+ATTACH_ONLY_BACKENDS = ("tgi", "lmdeploy", "llama.cpp", "llama-cpp", "llama_cpp", "nim")
 MANAGED_BACKEND_CHOICES = SUPPORTED_MANAGED_BACKENDS
 
 
@@ -29,6 +31,15 @@ def validate_managed_backend_supported(backend: str | None) -> str:
     if name in SCAFFOLDED_MANAGED_BACKENDS:
         raise UnsupportedManagedBackendError(
             f"Managed backend '{name}' is registered but not enabled. Currently supported: {_supported_text()}."
+        )
+    if name in PLANNED_MANAGED_BACKENDS:
+        raise UnsupportedManagedBackendError(
+            "TensorRT LLM is planned only and is not in the current Managed Mode scope. "
+            "An engine build lifecycle must be designed and approved before an adapter is added."
+        )
+    if name in ATTACH_ONLY_BACKENDS:
+        raise UnsupportedManagedBackendError(
+            f"Backend '{name}' is Attach Mode only. Serve Optimize does not own its Managed Mode lifecycle."
         )
     raise UnsupportedManagedBackendError(_unsupported_message(name))
 

@@ -6,6 +6,7 @@ Current first class measured workflows are driven through the CLI:
 
 ```bash
 serve-optimize managed-evaluate --help
+serve-optimize campaign-plan --help
 serve-optimize validate-campaign --help
 serve-optimize research-package --help
 ```

@@ -96,6 +96,7 @@ def run_endpoint_benchmark(
         telemetry,
         warmup_requests=config.warmup_requests,
         steady_state_duration_s=config.steady_state_duration_s,
+        soak_duration_s=config.soak_duration_s,
         idle_power_watts=idle_power_watts,
         idle_sample_count=len(idle_samples),
     )
@@ -123,24 +124,36 @@ def run_endpoint_benchmark(
 def _run_requests(config: EndpointBenchmarkConfig, request_fn: RequestFn) -> list[RequestRecord]:
     workers = max(1, config.concurrency)
     records: list[RequestRecord] = []
+    next_request_id = 0
+    soak_started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(request_fn, config, request_id): request_id for request_id in range(config.num_requests)}
-        for future in as_completed(futures):
-            request_id = futures[future]
-            try:
-                records.append(future.result())
-            except Exception as exc:
-                now = time.time()
-                records.append(
-                    RequestRecord(
-                        request_id=request_id,
-                        start_time=now,
-                        end_time=now,
-                        latency_s=0.0,
-                        status="error",
-                        error=f"{exc.__class__.__name__}: {exc}",
+        while True:
+            request_count = config.num_requests if next_request_id == 0 else workers
+            futures = {
+                executor.submit(request_fn, config, request_id): request_id
+                for request_id in range(next_request_id, next_request_id + request_count)
+            }
+            next_request_id += request_count
+            for future in as_completed(futures):
+                request_id = futures[future]
+                try:
+                    records.append(future.result())
+                except Exception as exc:
+                    now = time.time()
+                    records.append(
+                        RequestRecord(
+                            request_id=request_id,
+                            start_time=now,
+                            end_time=now,
+                            latency_s=0.0,
+                            status="error",
+                            error=f"{exc.__class__.__name__}: {exc}",
+                        )
                     )
-                )
+            if config.soak_duration_s is None or config.soak_duration_s <= 0:
+                break
+            if time.perf_counter() - soak_started >= config.soak_duration_s:
+                break
     return records
 
 
@@ -152,6 +165,8 @@ def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: in
         "max_tokens": config.max_tokens,
         "temperature": 0,
     }
+    if config.stream:
+        payload["stream"] = True
     data = json.dumps(payload).encode("utf-8")
     http_request = request.Request(
         _endpoint_url(config.base_url, config.endpoint),
@@ -161,6 +176,8 @@ def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: in
     )
     try:
         with request.urlopen(http_request, timeout=config.timeout_s) as response:
+            if config.stream:
+                return _streaming_request_record(response, request_id=request_id, start=start)
             body = response.read().decode("utf-8")
             status_code = response.status
         parsed = json.loads(body) if body else {}
@@ -198,6 +215,74 @@ def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: in
         )
 
 
+def _streaming_request_record(response: object, *, request_id: int, start: float) -> RequestRecord:
+    status_code = getattr(response, "status", 200)
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    chunk_count = 0
+    first_chunk_time: float | None = None
+    last_chunk_time: float | None = None
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").strip() if isinstance(raw_line, bytes) else str(raw_line).strip()
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line.removeprefix("data:").strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        usage = parsed.get("usage") if isinstance(parsed, dict) else None
+        if isinstance(usage, dict):
+            prompt_tokens = _int_value(usage.get("prompt_tokens")) or prompt_tokens
+            completion_tokens = _int_value(usage.get("completion_tokens")) or completion_tokens
+            total_tokens = _int_value(usage.get("total_tokens")) or total_tokens
+        choices = parsed.get("choices") if isinstance(parsed, dict) else None
+        if not isinstance(choices, list):
+            continue
+        if not any(_choice_has_stream_content(choice) for choice in choices if isinstance(choice, dict)):
+            continue
+        chunk_time = time.time()
+        if first_chunk_time is None:
+            first_chunk_time = chunk_time
+        last_chunk_time = chunk_time
+        chunk_count += 1
+    end = time.time()
+    if completion_tokens <= 0:
+        completion_tokens = chunk_count
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    ttft_s = first_chunk_time - start if first_chunk_time is not None else None
+    tpot_s = (
+        (last_chunk_time - first_chunk_time) / (chunk_count - 1)
+        if first_chunk_time is not None and last_chunk_time is not None and chunk_count > 1
+        else None
+    )
+    return RequestRecord(
+        request_id=request_id,
+        start_time=start,
+        end_time=end,
+        latency_s=end - start,
+        status="ok" if 200 <= status_code < 300 else f"http_{status_code}",
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        ttft_s=ttft_s,
+        tpot_s=tpot_s,
+        timing_source="openai_stream_chunks" if first_chunk_time is not None else None,
+    )
+
+
+def _choice_has_stream_content(choice: dict[str, object]) -> bool:
+    delta = choice.get("delta")
+    if isinstance(delta, dict) and delta.get("content"):
+        return True
+    message = choice.get("message")
+    return isinstance(message, dict) and bool(message.get("content"))
+
+
 def summarize_requests(
     run_id: str,
     records: list[RequestRecord],
@@ -206,6 +291,7 @@ def summarize_requests(
     telemetry: TelemetryCapture | None = None,
     warmup_requests: int = 0,
     steady_state_duration_s: float | None = None,
+    soak_duration_s: float | None = None,
     idle_power_watts: float | None = None,
     idle_sample_count: int = 0,
 ) -> EndpointBenchmarkSummary:
@@ -214,6 +300,8 @@ def summarize_requests(
     successful = [record for record in records if record.status == "ok"]
     measured_successful = _steady_state_records(successful, warmup_requests=warmup_requests, steady_state_duration_s=steady_state_duration_s)
     latencies = [record.latency_s for record in measured_successful]
+    ttfts_ms = [record.ttft_s * 1000.0 for record in measured_successful if record.ttft_s is not None]
+    tpots_ms = [record.tpot_s * 1000.0 for record in measured_successful if record.tpot_s is not None]
     prompt_tokens = sum(record.prompt_tokens for record in measured_successful)
     completion_tokens = sum(record.completion_tokens for record in measured_successful)
     total_tokens = sum(record.total_tokens for record in measured_successful)
@@ -236,7 +324,13 @@ def summarize_requests(
         "steady_state_duration_s": _round_or_none(steady_state_duration),
         "idle_power_watts": _round_or_none(idle_power_watts),
         "idle_sample_count": idle_sample_count,
+        "soak_requested_duration_s": soak_duration_s,
+        "soak_effective_duration_s": _round_or_none(wall_time_s),
+        "ttft_sample_count": len(ttfts_ms),
+        "tpot_sample_count": len(tpots_ms),
+        "timing_source": _timing_source(measured_successful),
         "energy_accounting": "idle_subtracted" if active_energy is not None else "gross",
+        "phase_energy_attribution": "unavailable_without_phase_markers",
         "stability_classification": "single_trial",
     }
     return EndpointBenchmarkSummary(
@@ -255,6 +349,15 @@ def summarize_requests(
         p50_latency_s=_percentile(latencies, 50),
         p95_latency_s=_percentile(latencies, 95),
         p99_latency_s=_percentile(latencies, 99),
+        avg_ttft_ms=_round_or_none(_mean(ttfts_ms)),
+        p50_ttft_ms=_round_or_none(_percentile(ttfts_ms, 50)),
+        p95_ttft_ms=_round_or_none(_percentile(ttfts_ms, 95)),
+        avg_tpot_ms=_round_or_none(_mean(tpots_ms)),
+        p50_tpot_ms=_round_or_none(_percentile(tpots_ms, 50)),
+        p95_tpot_ms=_round_or_none(_percentile(tpots_ms, 95)),
+        ttft_sample_count=len(ttfts_ms),
+        tpot_sample_count=len(tpots_ms),
+        timing_source=_timing_source(measured_successful),
         power_sample_count=telemetry_summary.power_sample_count,
         average_power_watts=telemetry_summary.average_power_watts,
         min_power_watts=telemetry_summary.min_power_watts,
@@ -285,6 +388,9 @@ def summarize_requests(
         max_memory_util_percent=telemetry_summary.max_memory_util_percent,
         average_temperature_c=telemetry_summary.average_temperature_c,
         max_temperature_c=telemetry_summary.max_temperature_c,
+        temperature_rise_c=telemetry_summary.temperature_rise_c,
+        temperature_slope_c_per_min=telemetry_summary.temperature_slope_c_per_min,
+        thermal_stability_classification=telemetry_summary.thermal_stability_classification,
         average_sm_clock_mhz=telemetry_summary.average_sm_clock_mhz,
         average_memory_clock_mhz=telemetry_summary.average_memory_clock_mhz,
         telemetry_provider=telemetry_summary.telemetry_provider,
@@ -313,6 +419,8 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         "total_tokens_s": [_float(summary.total_tokens_s) for summary in summaries],
         "request_rate_req_s": [_float(summary.request_rate_req_s) for summary in summaries],
         "p95_latency_s": [_float(summary.p95_latency_s) for summary in summaries],
+        "p95_ttft_ms": [_float(summary.p95_ttft_ms) for summary in summaries],
+        "p95_tpot_ms": [_float(summary.p95_tpot_ms) for summary in summaries],
         "joules_per_token": [_float(summary.joules_per_token) for summary in summaries],
         "active_joules_per_token": [_float(summary.active_joules_per_token) for summary in summaries],
     }
@@ -359,6 +467,15 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         p50_latency_s=_mean([_float(summary.p50_latency_s) for summary in summaries if _float(summary.p50_latency_s) is not None]),
         p95_latency_s=_mean(metric_values["p95_latency_s"]),
         p99_latency_s=_mean([_float(summary.p99_latency_s) for summary in summaries if _float(summary.p99_latency_s) is not None]),
+        avg_ttft_ms=_mean([_float(summary.avg_ttft_ms) for summary in summaries if _float(summary.avg_ttft_ms) is not None]),
+        p50_ttft_ms=_mean([_float(summary.p50_ttft_ms) for summary in summaries if _float(summary.p50_ttft_ms) is not None]),
+        p95_ttft_ms=_mean(metric_values["p95_ttft_ms"]),
+        avg_tpot_ms=_mean([_float(summary.avg_tpot_ms) for summary in summaries if _float(summary.avg_tpot_ms) is not None]),
+        p50_tpot_ms=_mean([_float(summary.p50_tpot_ms) for summary in summaries if _float(summary.p50_tpot_ms) is not None]),
+        p95_tpot_ms=_mean(metric_values["p95_tpot_ms"]),
+        ttft_sample_count=sum(summary.ttft_sample_count for summary in summaries),
+        tpot_sample_count=sum(summary.tpot_sample_count for summary in summaries),
+        timing_source=_aggregate_timing_source(summaries),
         power_sample_count=sum(summary.power_sample_count for summary in summaries),
         average_power_watts=_mean([_float(summary.average_power_watts) for summary in summaries if _float(summary.average_power_watts) is not None]),
         peak_power_watts=max([summary.peak_power_watts for summary in summaries if summary.peak_power_watts is not None], default=None),
@@ -367,6 +484,9 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         active_energy_joules=sum([summary.active_energy_joules for summary in summaries if summary.active_energy_joules is not None]) or None,
         active_joules_per_token=_mean(metric_values["active_joules_per_token"]),
         tokens_per_second_per_watt=_mean([_float(summary.tokens_per_second_per_watt) for summary in summaries if _float(summary.tokens_per_second_per_watt) is not None]),
+        temperature_rise_c=_mean([_float(summary.temperature_rise_c) for summary in summaries if _float(summary.temperature_rise_c) is not None]),
+        temperature_slope_c_per_min=_mean([_float(summary.temperature_slope_c_per_min) for summary in summaries if _float(summary.temperature_slope_c_per_min) is not None]),
+        thermal_stability_classification=_aggregate_thermal_classification(summaries),
         steady_state_requests=sum(summary.steady_state_requests or 0 for summary in summaries),
         steady_state_duration_s=sum(summary.steady_state_duration_s or 0.0 for summary in summaries) or None,
         steady_state_total_tokens=sum(summary.steady_state_total_tokens or 0 for summary in summaries),
@@ -393,6 +513,8 @@ def compare_prediction(
     _add_metric(metrics, "request_latency_avg_s", predicted_latency_s, summary.avg_latency_s)
     _add_metric(metrics, "request_latency_p50_s", predicted_latency_s, summary.p50_latency_s)
     _add_metric(metrics, "request_latency_p95_s", predicted_latency_s, summary.p95_latency_s)
+    _add_metric(metrics, "ttft_ms", prediction.ttft, summary.p95_ttft_ms)
+    _add_metric(metrics, "tpot_ms", prediction.tpot, summary.p95_tpot_ms)
     _add_metric(
         metrics,
         "concurrency",
@@ -489,6 +611,33 @@ def _average_power(samples: list[PowerSampleRecord]) -> float | None:
 
 def _power_value(sample: PowerSampleRecord) -> float | None:
     return _float(sample.power_watts) if sample.power_watts is not None else _float(sample.watts)
+
+
+def _timing_source(records: list[RequestRecord]) -> str | None:
+    sources = sorted({record.timing_source for record in records if record.timing_source})
+    if not sources:
+        return None
+    return sources[0] if len(sources) == 1 else "mixed"
+
+
+def _aggregate_timing_source(summaries: list[EndpointBenchmarkSummary]) -> str | None:
+    sources = sorted({summary.timing_source for summary in summaries if summary.timing_source})
+    if not sources:
+        return None
+    return sources[0] if len(sources) == 1 else "mixed"
+
+
+def _aggregate_thermal_classification(summaries: list[EndpointBenchmarkSummary]) -> str | None:
+    priority = {
+        "warming": 4,
+        "limited_window": 3,
+        "stable": 2,
+        "unavailable": 1,
+    }
+    classes = [summary.thermal_stability_classification for summary in summaries if summary.thermal_stability_classification]
+    if not classes:
+        return None
+    return max(classes, key=lambda item: priority.get(item, 0))
 
 
 def _metric_stats(values: list[float]) -> dict[str, float | int | None]:

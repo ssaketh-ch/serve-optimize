@@ -4,7 +4,7 @@ backends:
     purpose: synthetic benchmarking for CI and offline optimizer validation
     openai_compatible: false
   vllm:
-    status: planned
+    status: first_class_managed
     priority: 1
     openai_compatible: true
     launch_binary: vllm
@@ -17,7 +17,7 @@ backends:
       - --max-num-seqs
       - --enable-chunked-prefill
   sglang:
-    status: planned
+    status: first_class_managed
     priority: 2
     openai_compatible: true
     key_flags:
@@ -26,21 +26,31 @@ backends:
       - --quantization
       - --context-length
   trt-llm:
-    status: planned
+    status: planned_only
     priority: 3
     openai_compatible: depends_on_server
     notes:
-      - Requires engine build step.
-      - Useful for upper-bound performance experiments.
+      - Not in the current Managed Mode scope.
+      - An engine build lifecycle design is required before any adapter.
+      - External OpenAI compatible deployments may be benchmarked through Attach Mode.
   tgi:
-    status: planned
+    status: attach_only_external
     priority: 4
     openai_compatible: true
     notes:
-      - Useful production baseline against vLLM and SGLang.
+      - Serve Optimize does not own its process lifecycle.
+      - Existing OpenAI compatible deployments may be benchmarked through Attach Mode.
   lmdeploy:
-    status: planned
+    status: attach_only_external
     priority: 5
     openai_compatible: true
     notes:
-      - Useful as a secondary backend baseline.
+      - Serve Optimize does not own its process lifecycle.
+      - Existing OpenAI compatible deployments may be benchmarked through Attach Mode.
+  llama-cpp:
+    status: attach_only_external
+    priority: 6
+    openai_compatible: through_server_mode
+    notes:
+      - Serve Optimize does not own its process lifecycle.
+      - Existing OpenAI compatible deployments may be benchmarked through Attach Mode.

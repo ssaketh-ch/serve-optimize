@@ -88,8 +88,8 @@ ATTACH_MODE_LIMITATION = (
     "generated serve command for a candidate."
 )
 GROSS_ENERGY_LIMITATION = (
-    "Energy metrics currently use gross active energy from average measured power over wall time. "
-    "Idle subtraction is not implemented yet."
+    "Attach Mode recommendations use gross active energy because this workflow does not collect an idle baseline. "
+    "Use endpoint-bench or Managed Mode with an idle baseline for idle-subtracted energy."
 )
 
 
@@ -1494,6 +1494,19 @@ def _measured_metrics(summary: EndpointBenchmarkSummary) -> dict[str, float | in
         "p50_latency_s": summary.p50_latency_s,
         "p95_latency_s": summary.p95_latency_s,
         "p99_latency_s": summary.p99_latency_s,
+        "ttft_ms": summary.p95_ttft_ms,
+        "time_to_first_token_ms": summary.p95_ttft_ms,
+        "avg_ttft_ms": summary.avg_ttft_ms,
+        "p50_ttft_ms": summary.p50_ttft_ms,
+        "p95_ttft_ms": summary.p95_ttft_ms,
+        "tpot_ms": summary.p95_tpot_ms,
+        "time_per_output_token_ms": summary.p95_tpot_ms,
+        "avg_tpot_ms": summary.avg_tpot_ms,
+        "p50_tpot_ms": summary.p50_tpot_ms,
+        "p95_tpot_ms": summary.p95_tpot_ms,
+        "ttft_sample_count": summary.ttft_sample_count,
+        "tpot_sample_count": summary.tpot_sample_count,
+        "timing_source": summary.timing_source,
     }
 
 
@@ -1518,6 +1531,9 @@ def _telemetry_metrics(summary: EndpointBenchmarkSummary) -> dict[str, Any]:
         "max_memory_util_percent": summary.max_memory_util_percent,
         "average_temperature_c": summary.average_temperature_c,
         "max_temperature_c": summary.max_temperature_c,
+        "temperature_rise_c": summary.temperature_rise_c,
+        "temperature_slope_c_per_min": summary.temperature_slope_c_per_min,
+        "thermal_stability_classification": summary.thermal_stability_classification,
         "average_sm_clock_mhz": summary.average_sm_clock_mhz,
         "average_memory_clock_mhz": summary.average_memory_clock_mhz,
         "power_limit_watts": telemetry_summary.get("power_limit_watts"),

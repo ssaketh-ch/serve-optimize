@@ -20,6 +20,7 @@ from .aiconfigurator_bridge import run_aiconfigurator
 from .backend_status import INSTALLATION_PROFILES, check_backend_status, check_installation_profile
 from .backends.factory import MANAGED_BACKEND_CHOICES
 from .benchmark import run_dry_benchmark
+from .campaign_plan import CampaignPlanRequest, write_campaign_plan_artifacts
 from .candidates import generate_candidates
 from .endpoint_benchmark import DEFAULT_ENDPOINT_PROMPT, make_run_id, run_endpoint_benchmark
 from .evaluation import run_evaluation_plan_dir
@@ -236,6 +237,7 @@ def _build_parser() -> argparse.ArgumentParser:
     managed.add_argument("--no-evidence-write", action="store_true", help="Do not create or write the evidence database.")
     managed.add_argument("--evidence-freshness-hours", type=float, default=168.0, help="Freshness window for exact measured evidence hits.")
     managed.add_argument("--dry-run", action="store_true", help="Write a preflight plan without launching servers, health checks, benchmarks, or evidence writes.")
+    managed.add_argument("--resume-from", type=Path, default=None, help="Reuse completed matching managed workload artifacts from an earlier run directory.")
     _add_workload_args(managed)
     _add_measurement_quality_args(managed)
     managed.add_argument("--out", type=Path, default=Path("results/managed"), help="Managed evaluation output root directory.")
@@ -257,6 +259,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output directory. Defaults to results/validation-campaign/<timestamp>.",
     )
     validate_campaign.set_defaults(func=_cmd_validate_campaign)
+
+    campaign_plan = subparsers.add_parser(
+        "campaign-plan",
+        help="Write a managed validation campaign plan without launching servers.",
+    )
+    campaign_plan.add_argument("--model", action="append", required=True, dest="models", help="Model name or path. Can be passed multiple times.")
+    campaign_plan.add_argument("--backend", action="append", choices=MANAGED_BACKEND_CHOICES, dest="backends", help="Managed backend. Defaults to vLLM and SGLang.")
+    campaign_plan.add_argument("--goal", action="append", choices=[goal.value for goal in Goal], dest="goals", help="Recommendation goal. Defaults to balanced.")
+    campaign_plan.add_argument("--workload-profile", action="append", choices=workload_profile_choices(), dest="workload_profiles", help="Workload profile. Defaults to broader built in profiles.")
+    campaign_plan.add_argument("--repeats", type=int, default=1, help="Repeated run count per matrix cell.")
+    campaign_plan.add_argument("--limit", type=int, default=4, help="Candidate limit for each managed run.")
+    campaign_plan.add_argument("--trials", type=int, default=1, help="Benchmark trials for each managed run.")
+    campaign_plan.add_argument(
+        "--telemetry",
+        choices=["none", "nvml", "nvidia-smi", "auto"],
+        default="auto",
+        help="Telemetry provider for planned managed runs.",
+    )
+    campaign_plan.add_argument("--evidence-db", type=Path, default=DEFAULT_EVIDENCE_DB_PATH, help="Evidence database path for planned managed runs.")
+    campaign_plan.add_argument("--output-root", type=Path, default=Path("results/managed-campaign"), help="Root directory for planned managed run outputs.")
+    campaign_plan.add_argument("--startup-timeout", type=float, default=300.0, help="Startup timeout for planned managed runs.")
+    campaign_plan.add_argument("--cooldown-seconds", type=float, default=5.0, help="Cooldown seconds for planned managed runs.")
+    _add_measurement_quality_args(campaign_plan)
+    campaign_plan.add_argument("--out", type=Path, default=Path("results/campaign-plan"), help="Campaign plan artifact directory.")
+    campaign_plan.add_argument("--json", action="store_true", help="Emit JSON.")
+    campaign_plan.set_defaults(func=_cmd_campaign_plan)
 
     release_check = subparsers.add_parser("release-check", help="Run local release readiness checks.")
     release_check.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root to inspect.")
@@ -312,11 +340,6 @@ def _build_parser() -> argparse.ArgumentParser:
     telemetry_check.add_argument("--duration", type=float, default=15.0, help="Sampling duration in seconds.")
     telemetry_check.add_argument("--interval", type=float, default=0.2, help="Sampling interval in seconds.")
     telemetry_check.add_argument("--device-index", type=int, default=0, help="Device index for provider queries.")
-    telemetry_check.add_argument(
-        "--with-nvidia-smi-loop",
-        action="store_true",
-        help="Record a TODO note for future provider comparison diagnostics.",
-    )
     telemetry_check.add_argument("--out", type=Path, default=Path("results/telemetry_checks"), help="Telemetry check output root directory.")
     telemetry_check.set_defaults(func=_cmd_telemetry_check)
 
@@ -376,6 +399,8 @@ def _add_measurement_quality_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--steady-state-seconds", type=float, default=None, help="Measured steady state window duration in seconds.")
     parser.add_argument("--idle-baseline-seconds", type=float, default=0.0, help="Seconds to sample idle power before active requests.")
     parser.add_argument("--idle-power-watts", type=float, default=None, help="Known idle power baseline in watts for idle subtracted energy.")
+    parser.add_argument("--soak-seconds", type=float, default=None, help="Minimum active request window for longer soak style runs.")
+    parser.add_argument("--stream", action="store_true", help="Use streaming chat completions to measure TTFT and stream chunk TPOT.")
 
 
 def _cmd_detect(args: argparse.Namespace) -> None:
@@ -506,6 +531,8 @@ def _cmd_endpoint_bench(args: argparse.Namespace) -> None:
         steady_state_duration_s=args.steady_state_seconds,
         idle_baseline_duration_s=args.idle_baseline_seconds,
         idle_power_watts=args.idle_power_watts,
+        soak_duration_s=args.soak_seconds,
+        stream=args.stream,
     )
     hardware = detect_hardware()
     run = run_endpoint_benchmark(config=config, out_dir=args.out, prediction=prediction, hardware=hardware)
@@ -523,7 +550,6 @@ def _cmd_telemetry_check(args: argparse.Namespace) -> None:
         interval_s=args.interval,
         out_dir=args.out,
         device_index=args.device_index,
-        with_nvidia_smi_loop=args.with_nvidia_smi_loop,
     )
     console = Console()
     RichTelemetryCheckReporter(console=console).render(
@@ -723,6 +749,9 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
                 steady_state_duration_s=args.steady_state_seconds,
                 idle_baseline_duration_s=args.idle_baseline_seconds,
                 idle_power_watts=args.idle_power_watts,
+                soak_duration_s=args.soak_seconds,
+                stream=args.stream,
+                resume_from=args.resume_from,
             )
             _print_preflight(run.payload)
             return
@@ -747,6 +776,9 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
             steady_state_duration_s=args.steady_state_seconds,
             idle_baseline_duration_s=args.idle_baseline_seconds,
             idle_power_watts=args.idle_power_watts,
+            soak_duration_s=args.soak_seconds,
+            stream=args.stream,
+            resume_from=args.resume_from,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -759,6 +791,9 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
     print(f"  cold launches: {summary.cold_launch_count}")
     print(f"  workload measurements: {summary.workload_measurement_count}")
     print(f"  evidence hits: {summary.evidence_hit_candidate_count}")
+    if summary.resume_from_run_dir:
+        print(f"  resumed from: {summary.resume_from_run_dir}")
+        print(f"  resume skips: {summary.resume_skipped_candidate_count}")
     if summary.evidence_db_path:
         print(f"  evidence db: {summary.evidence_db_path}")
     for warning in summary.evidence_warnings:
@@ -778,6 +813,8 @@ def _validate_measurement_quality_args(args: argparse.Namespace) -> None:
         raise SystemExit("--idle-baseline-seconds must be at least 0.")
     if args.idle_power_watts is not None and args.idle_power_watts < 0:
         raise SystemExit("--idle-power-watts must be at least 0 when provided.")
+    if args.soak_seconds is not None and args.soak_seconds <= 0:
+        raise SystemExit("--soak-seconds must be greater than 0 when provided.")
 
 
 def _resolve_workload_profile(args: argparse.Namespace):
@@ -847,6 +884,47 @@ def _cmd_validate_campaign(args: argparse.Namespace) -> None:
     print(f"  csv: {artifacts.get('validation_campaign_runs_csv')}")
     for warning in payload.get("warnings", []):
         print(f"  warning: {warning}")
+
+
+def _cmd_campaign_plan(args: argparse.Namespace) -> None:
+    _validate_measurement_quality_args(args)
+    try:
+        payload = write_campaign_plan_artifacts(
+            CampaignPlanRequest(
+                models=args.models,
+                backends=args.backends or ["vllm", "sglang"],
+                goals=args.goals or [Goal.BALANCED.value],
+                workload_profiles=args.workload_profiles or ["short", "medium", "long", "decode-heavy", "repeated-prefix", "mixed"],
+                repeats=args.repeats,
+                limit=args.limit,
+                trials=args.trials,
+                telemetry=args.telemetry,
+                evidence_db=str(args.evidence_db) if args.evidence_db is not None else None,
+                output_root=str(args.output_root),
+                startup_timeout_s=args.startup_timeout,
+                cooldown_s=args.cooldown_seconds,
+                warmup_requests=args.warmup_requests,
+                steady_state_seconds=args.steady_state_seconds,
+                idle_baseline_seconds=args.idle_baseline_seconds,
+                idle_power_watts=args.idle_power_watts,
+                soak_seconds=args.soak_seconds,
+                stream=args.stream,
+            ),
+            output_dir=args.out,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        print(json.dumps(to_dict(payload), indent=2, sort_keys=True))
+        return
+    artifacts = payload.get("artifacts", {}) if isinstance(payload.get("artifacts"), dict) else {}
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    print("Campaign plan")
+    print(f"  planned runs: {summary.get('planned_run_count')}")
+    print(f"  json: {artifacts.get('campaign_plan_json')}")
+    print(f"  text: {artifacts.get('campaign_plan_txt')}")
+    print(f"  csv: {artifacts.get('campaign_matrix_csv')}")
+    print(f"  commands: {artifacts.get('campaign_commands_sh')}")
 
 
 def _cmd_release_check(args: argparse.Namespace) -> None:

@@ -88,7 +88,7 @@ Sources:
 
 ### TensorRT-LLM
 
-High performance NVIDIA inference stack and a possible future backend. TensorRT LLM is not implemented in Serve Optimize.
+High performance NVIDIA inference stack. TensorRT LLM is planned only and is not in the current Serve Optimize Managed Mode scope.
 
 Sources:
 
@@ -97,7 +97,7 @@ Sources:
 
 ### Hugging Face Text Generation Inference
 
-Important production serving baseline and possible future Managed Mode backend. It may currently be measured only through Attach Mode when an OpenAI compatible endpoint is available.
+Important production serving baseline and external Attach Mode baseline. It may be measured through Attach Mode when an OpenAI compatible endpoint is available.
 
 Source: https://github.com/huggingface/text-generation-inference
 
@@ -200,4 +200,4 @@ Source: https://arxiv.org/abs/2207.11428
 5. Continue distinguishing measured, estimated, synthetic, and imported values.
 6. Add phase aware metrics only after defensible measurement boundaries exist.
 7. Keep MIG power attribution limits explicit.
-8. Consider TensorRT LLM, TGI, LMDeploy, and llama.cpp only as future scoped backend work.
+8. Keep TensorRT LLM planned only. Measure external TGI, LMDeploy, and llama.cpp endpoints through Attach Mode unless lifecycle ownership is separately scoped.
