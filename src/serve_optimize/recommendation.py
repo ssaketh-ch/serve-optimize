@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -138,6 +139,7 @@ def build_attach_preflight(
     allow_efficiency_fallback: bool = False,
     aiconfigurator_runner: AIConfiguratorRunner = run_aiconfigurator,
     workload_profile: WorkloadProfile | None = None,
+    api_key_env: str | None = None,
 ) -> PreflightRun:
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
@@ -192,6 +194,7 @@ def build_attach_preflight(
         "goal": goal.value,
         "telemetry": telemetry,
         "endpoint": base_url,
+        "api_key_env": api_key_env,
         "candidate_source": candidate_generation.resolved_source,
         "workload_profile": workload_profile_to_payload(workload_profile),
         "created_hardware_snapshot": hardware,
@@ -261,6 +264,7 @@ def recommend_attach_mode(
     telemetry_collector_factory: TelemetryCollectorFactory | None = None,
     aiconfigurator_runner: AIConfiguratorRunner = run_aiconfigurator,
     workload_profile: WorkloadProfile | None = None,
+    api_key_env: str | None = None,
 ) -> RecommendationRun:
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
@@ -268,7 +272,13 @@ def recommend_attach_mode(
     hardware = detect_hardware()
     request_fn = request_fn or send_chat_completion_request
     checks: list[CheckRecord] = []
-    _check_endpoint_health(base_url=base_url, model=model, timeout_s=timeout_s, request_fn=request_fn)
+    _check_endpoint_health(
+        base_url=base_url,
+        model=model,
+        timeout_s=timeout_s,
+        request_fn=request_fn,
+        api_key_env=api_key_env,
+    )
     checks.append(CheckRecord(name="endpoint_health", status="ok", message="Endpoint health check passed."))
 
     run_id = make_run_id(prefix="recommend")
@@ -318,6 +328,7 @@ def recommend_attach_mode(
         override_num_requests=override_num_requests,
         timeout_s=timeout_s,
         telemetry=telemetry,
+        api_key_env=api_key_env,
         request_fn=request_fn,
         telemetry_collector_factory=telemetry_collector_factory,
     )
@@ -1443,6 +1454,7 @@ def _check_endpoint_health(
     model: str,
     timeout_s: float,
     request_fn: RequestFn,
+    api_key_env: str | None,
 ) -> None:
     config = EndpointBenchmarkConfig(
         run_id="health-check",
@@ -1453,6 +1465,7 @@ def _check_endpoint_health(
         max_tokens=1,
         prompt="health check",
         timeout_s=timeout_s,
+        api_key_env=api_key_env,
     )
     record = request_fn(config, 0)
     if record.status != "ok":
@@ -1480,10 +1493,15 @@ def _predicted_metrics(candidate: ServeCandidate) -> dict[str, float | int | str
 
 def _measured_metrics(summary: EndpointBenchmarkSummary) -> dict[str, float | int | str | None]:
     return {
-        "total_requests": summary.total_requests,
-        "successful_requests": summary.successful_requests,
-        "failed_requests": summary.failed_requests,
+        "total_requests": summary.measured_requests if summary.measured_requests is not None else summary.total_requests,
+        "successful_requests": (
+            summary.measured_successful_requests
+            if summary.measured_successful_requests is not None
+            else summary.successful_requests
+        ),
+        "failed_requests": summary.measured_failed_requests if summary.measured_failed_requests is not None else summary.failed_requests,
         "wall_time_s": summary.wall_time_s,
+        "measurement_duration_s": summary.measurement_duration_s,
         "request_rate_req_s": summary.request_rate_req_s,
         "prompt_tokens": summary.prompt_tokens,
         "completion_tokens": summary.completion_tokens,
@@ -1507,6 +1525,7 @@ def _measured_metrics(summary: EndpointBenchmarkSummary) -> dict[str, float | in
         "ttft_sample_count": summary.ttft_sample_count,
         "tpot_sample_count": summary.tpot_sample_count,
         "timing_source": summary.timing_source,
+        "token_count_source": summary.token_count_source,
     }
 
 
@@ -1561,7 +1580,12 @@ def _disqualifiers(item: RecommendationInput, goal: RecommendationGoal, has_any_
     total = _optional_int(item.measured_metrics.get("total_requests")) or 0
     if total <= 0 or successful <= 0:
         disqualifiers.append("no_successful_requests")
+    throughput = _optional_float(item.measured_metrics.get("total_tokens_s"))
+    if goal in {RecommendationGoal.THROUGHPUT, RecommendationGoal.BALANCED} and (throughput is None or throughput <= 0):
+        disqualifiers.append("missing_throughput_metric")
     if goal == RecommendationGoal.LATENCY and _latency_value(item) is None:
+        disqualifiers.append("missing_latency_metric")
+    if goal == RecommendationGoal.BALANCED and _latency_value(item) is None:
         disqualifiers.append("missing_latency_metric")
     if goal == RecommendationGoal.EFFICIENCY and not _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt")):
         disqualifiers.append("missing_power_telemetry")
@@ -1636,6 +1660,11 @@ def _normalize_lower(
     if high == low:
         return {candidate_id: 1.0 if value is not None else None for candidate_id, value in values.items()}
     if low >= 0:
+        if low == 0:
+            return {
+                candidate_id: ((high - value) / high) if value is not None and high > 0 else (1.0 if value == 0 else None)
+                for candidate_id, value in values.items()
+            }
         return {
             candidate_id: ((low / value) if value not in {None, 0} else None)
             for candidate_id, value in values.items()
@@ -1647,18 +1676,22 @@ def _normalize_lower(
 
 
 def _latency_value(item: RecommendationInput) -> float | None:
-    return _optional_float(item.measured_metrics.get("p95_latency_s")) or _optional_float(item.measured_metrics.get("avg_latency_s"))
+    p95 = _optional_float(item.measured_metrics.get("p95_latency_s"))
+    return p95 if p95 is not None else _optional_float(item.measured_metrics.get("avg_latency_s"))
 
 
 def _weighted_sum(parts: tuple[tuple[float | None, float], ...]) -> float | None:
     total = 0.0
     weight_sum = 0.0
+    has_value = False
     for value, weight in parts:
-        if value is None or weight == 0:
+        if weight == 0:
             continue
-        total += value * weight
         weight_sum += weight
-    if weight_sum == 0:
+        if value is not None:
+            total += value * weight
+            has_value = True
+    if weight_sum == 0 or not has_value:
         return None
     return total / weight_sum
 
@@ -2245,12 +2278,13 @@ def _format_seconds(value: float) -> str:
 
 
 def _optional_float(value: object) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _optional_int(value: object) -> int | None:

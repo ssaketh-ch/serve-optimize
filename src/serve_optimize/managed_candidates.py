@@ -593,5 +593,5 @@ def _optional_bool(value: object) -> bool | None:
 
 def _config_id(*parts: object) -> str:
     payload = "|".join(str(part) for part in parts)
-    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     return f"cfg-managed-{digest}"

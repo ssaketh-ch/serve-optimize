@@ -41,3 +41,8 @@ def test_goal_selection() -> None:
     assert select_recommendation(rows, Goal.PERFORMANCE).config.id == "fast"
     assert select_recommendation(rows, Goal.EFFICIENT).config.id == "efficient"
 
+
+def test_balanced_selection_does_not_collapse_two_tradeoff_points_to_a_tie() -> None:
+    rows = [result("fast", 100, 2.0), result("efficient", 80, 1.0)]
+
+    assert select_recommendation(rows, Goal.BALANCED).config.id == "efficient"

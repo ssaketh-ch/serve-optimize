@@ -47,5 +47,6 @@ def _balanced_score(result: BenchmarkResult, frontier: list[BenchmarkResult]) ->
 def _normalize(value: float, low: float, high: float) -> float:
     if high <= low:
         return 1.0
+    if low >= 0 and high > 0:
+        return value / high
     return (value - low) / (high - low)
-

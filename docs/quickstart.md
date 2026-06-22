@@ -108,7 +108,9 @@ serve-optimize managed-evaluate \
   --dry-run
 ```
 
-Use `--stream` only when the endpoint supports OpenAI compatible streaming. TTFT and TPOT are then derived from observed stream chunks. Without streaming chunks, those timing metrics remain unavailable rather than estimated.
+Use `--stream` only when the endpoint supports OpenAI compatible streaming. TTFT and TPOT are then derived from observed stream chunks. Serve Optimize requests response usage for token counts and does not treat chunk counts as token counts. Without streaming chunks or response usage, the affected timing or token metrics remain unavailable rather than estimated.
+
+Authenticated endpoints use `--api-key-env NAME`. Serve Optimize records the environment variable name and reads its value only while sending requests, so the API key is not serialized into run artifacts.
 
 ## Evidence Reuse
 

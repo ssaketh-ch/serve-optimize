@@ -17,3 +17,5 @@ Security fixes target the latest release and the current `main` branch.
 ## Scope Notes
 
 Serve Optimize can launch local backend processes and write benchmark artifacts. Treat model paths, launch arguments, endpoint URLs, evidence databases, and output directories as trusted operator inputs. Review generated campaign command files before running them.
+
+Endpoint requests accept only HTTP and HTTPS base URLs. For authenticated endpoints, pass the environment variable name with `--api-key-env`; the secret value is read when requests are sent and is not written to run artifacts. Pin remote model inputs with `--model-revision` when reproducible supply chain identity is required.
