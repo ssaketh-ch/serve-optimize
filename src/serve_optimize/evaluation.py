@@ -34,6 +34,7 @@ def run_evaluation_plan_dir(
     override_num_requests: int | None = None,
     timeout_s: float = 120.0,
     telemetry: str = "none",
+    api_key_env: str | None = None,
     request_fn: RequestFn | None = None,
     telemetry_collector_factory: TelemetryCollectorFactory | None = None,
 ) -> EvaluationResult:
@@ -73,6 +74,7 @@ def run_evaluation_plan_dir(
             prompt=make_synthetic_prompt(benchmark_plan.expected_input_tokens),
             timeout_s=timeout_s,
             telemetry=telemetry,
+            api_key_env=api_key_env,
         )
         run = run_endpoint_benchmark(
             config=config,

@@ -81,6 +81,18 @@ serve-optimize recommend \
   --goal balanced
 ```
 
+For an authenticated endpoint, keep the secret out of artifacts and pass only its environment variable name:
+
+```bash
+export SERVE_OPTIMIZE_API_KEY="..."
+serve-optimize endpoint-bench \
+  --base-url https://example.com/v1 \
+  --model served-model \
+  --api-key-env SERVE_OPTIMIZE_API_KEY
+```
+
+The environment variable name is recorded for reproducibility. Its value is read only when requests are sent and is not written to benchmark artifacts.
+
 Preview the same Attach Mode work without touching the endpoint:
 
 ```bash

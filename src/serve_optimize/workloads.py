@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -219,8 +220,17 @@ def _clean_slo_constraints(payload: dict[str, Any]) -> dict[str, Any]:
     for key, value in payload.items():
         if key not in SLO_CONSTRAINT_FIELDS:
             raise ValueError(f"Unsupported SLO constraint: {key}")
-        if value is not None:
-            constraints[key] = value
+        if value is None:
+            continue
+        number = _optional_float(value)
+        if number is None or not math.isfinite(number):
+            raise ValueError(f"SLO constraint {key} must be a finite number.")
+        if key == "max_failed_request_rate":
+            if not 0.0 <= number <= 1.0:
+                raise ValueError("SLO constraint max_failed_request_rate must be between 0 and 1.")
+        elif number < 0:
+            raise ValueError(f"SLO constraint {key} must be nonnegative.")
+        constraints[key] = number
     return constraints
 
 

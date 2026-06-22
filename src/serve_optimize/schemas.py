@@ -518,6 +518,7 @@ class EndpointBenchmarkConfig:
     idle_baseline_duration_s: float = 0.0
     soak_duration_s: float | None = None
     stream: bool = False
+    api_key_env: str | None = None
     schema_version: str = "endpoint-benchmark/v1"
 
 
@@ -535,6 +536,7 @@ class RequestRecord:
     ttft_s: float | None = None
     tpot_s: float | None = None
     timing_source: str | None = None
+    token_count_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -698,6 +700,11 @@ class EndpointBenchmarkSummary:
     telemetry_notes: list[str] = field(default_factory=list)
     telemetry_summary: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    measurement_duration_s: float | None = None
+    measured_requests: int | None = None
+    measured_successful_requests: int | None = None
+    measured_failed_requests: int | None = None
+    token_count_source: str | None = None
 
 
 @dataclass(frozen=True)

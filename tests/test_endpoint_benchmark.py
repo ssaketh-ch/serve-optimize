@@ -5,6 +5,7 @@ import pytest
 import serve_optimize.endpoint_benchmark as endpoint_benchmark
 from serve_optimize.aiconfig_parser import parse_aiconfig_prediction_csv
 from serve_optimize.endpoint_benchmark import (
+    _endpoint_url,
     _run_requests,
     aggregate_benchmark_summaries,
     compare_prediction,
@@ -196,7 +197,64 @@ def test_summary_warmup_and_steady_state_window() -> None:
     assert summary.steady_state_requests == 1
     assert summary.total_tokens == 30
     assert summary.steady_state_total_tokens == 30
+    assert summary.measurement_duration_s == pytest.approx(1.0)
+    assert summary.request_rate_req_s == pytest.approx(1.0)
+    assert summary.total_tokens_s == pytest.approx(30.0)
+    assert summary.measured_requests == 1
+    assert summary.measured_successful_requests == 1
+    assert summary.measured_failed_requests == 0
     assert summary.measurement_quality["steady_state_requests"] == 1
+
+
+def test_measurement_window_filters_failures_and_power_with_the_same_boundaries() -> None:
+    records = [
+        RequestRecord(0, 0.0, 1.0, 1.0, "error", error="warmup failure"),
+        RequestRecord(1, 1.0, 2.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        RequestRecord(2, 4.0, 5.0, 1.0, "ok", prompt_tokens=10, completion_tokens=30, total_tokens=40),
+    ]
+    samples = [
+        PowerSampleRecord(0.5, "active", 200.0, "nvml"),
+        PowerSampleRecord(1.5, "active", 100.0, "nvml"),
+        PowerSampleRecord(4.5, "active", 300.0, "nvml"),
+    ]
+
+    summary = summarize_requests(
+        "run-window",
+        records,
+        wall_time_s=5.0,
+        power_samples=samples,
+        telemetry=TelemetryCapture(provider="nvml", samples=samples, warnings=[]),
+        warmup_requests=1,
+        steady_state_duration_s=1.5,
+    )
+
+    assert summary.total_requests == 3
+    assert summary.failed_requests == 1
+    assert summary.measured_requests == 1
+    assert summary.measured_failed_requests == 0
+    assert summary.average_power_watts == pytest.approx(100.0)
+    assert summary.energy_joules == pytest.approx(100.0)
+    assert summary.joules_per_token == pytest.approx(100.0 / 30.0)
+
+
+def test_all_warmup_requests_leave_the_measurement_window_empty() -> None:
+    records = [RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30)]
+    samples = [PowerSampleRecord(0.5, "active", 100.0, "nvml")]
+
+    summary = summarize_requests(
+        "run-all-warmup",
+        records,
+        wall_time_s=1.0,
+        power_samples=samples,
+        telemetry=TelemetryCapture(provider="nvml", samples=samples, warnings=[]),
+        warmup_requests=1,
+    )
+
+    assert summary.measured_requests == 0
+    assert summary.measurement_duration_s is None
+    assert summary.total_tokens_s == 0.0
+    assert summary.average_power_watts is None
+    assert summary.energy_joules is None
 
 
 def test_aggregate_benchmark_summaries_adds_trial_statistics_and_confidence() -> None:
@@ -219,6 +277,8 @@ def test_aggregate_benchmark_summaries_adds_trial_statistics_and_confidence() ->
     assert aggregate.trial_statistics["trial_count"] == 2
     assert aggregate.confidence_intervals["total_tokens_s"]["count"] == 2
     assert aggregate.stability_classification == "mostly_stable"
+    assert aggregate.measurement_quality["measured_requests"] == 2
+    assert aggregate.measurement_quality["measurement_duration_s"] == pytest.approx(2.0)
 
 
 def test_telemetry_summary_with_full_fields_is_good() -> None:
@@ -482,6 +542,167 @@ def test_streaming_request_records_ttft_and_tpot(monkeypatch: pytest.MonkeyPatch
     assert record.prompt_tokens == 3
     assert record.completion_tokens == 2
     assert record.total_tokens == 5
+    assert record.token_count_source == "response_usage"
+
+
+def test_streaming_request_asks_for_usage_without_using_chunks_as_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n'
+            yield b'data: {"choices":[{"text":"answer"}]}\n'
+            yield b"data: [DONE]\n"
+
+    def fake_urlopen(http_request, timeout):
+        captured["payload"] = json.loads(http_request.data)
+        return FakeResponse()
+
+    times = iter([0.0, 0.2, 0.5, 0.6])
+    monkeypatch.setattr(endpoint_benchmark.time, "time", lambda: next(times))
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", fake_urlopen)
+    config = EndpointBenchmarkConfig(
+        run_id="run-stream-no-usage",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        stream=True,
+    )
+
+    record = send_chat_completion_request(config, request_id=0)
+    summary = summarize_requests("run-stream-no-usage", [record], wall_time_s=0.6)
+
+    assert captured["payload"]["stream_options"] == {"include_usage": True}
+    assert record.status == "ok"
+    assert record.completion_tokens == 0
+    assert record.total_tokens == 0
+    assert record.token_count_source is None
+    assert summary.total_tokens_s == 0.0
+    assert "Streaming usage was unavailable" in summary.warnings[0]
+
+
+def test_streaming_response_without_output_is_a_failed_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{}}]}\n'
+            yield b"data: [DONE]\n"
+
+    times = iter([0.0, 0.2])
+    monkeypatch.setattr(endpoint_benchmark.time, "time", lambda: next(times))
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", lambda request, timeout: FakeResponse())
+    config = EndpointBenchmarkConfig(
+        run_id="run-empty-stream",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        stream=True,
+    )
+
+    record = send_chat_completion_request(config, request_id=0)
+
+    assert record.status == "stream_no_output"
+    assert record.error == "Streaming response contained no output content."
+
+
+@pytest.mark.parametrize("base_url", ["file:///tmp/model", "ftp://example.com/v1", "example.com/v1"])
+def test_endpoint_url_rejects_non_http_schemes(base_url: str) -> None:
+    with pytest.raises(ValueError, match="must use http or https"):
+        _endpoint_url(base_url, "/v1/chat/completions")
+
+
+def test_endpoint_url_rejects_embedded_credentials() -> None:
+    with pytest.raises(ValueError, match="must not be embedded"):
+        _endpoint_url("https://user:secret@example.com/v1", "/v1/chat/completions")
+
+
+def test_endpoint_auth_reads_secret_from_environment_without_storing_it(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}'
+
+    def fake_urlopen(http_request, timeout):
+        captured["authorization"] = http_request.get_header("Authorization")
+        return FakeResponse()
+
+    monkeypatch.setenv("SERVE_OPTIMIZE_TEST_KEY", "top-secret-value")
+    times = iter([0.0, 0.2])
+    monkeypatch.setattr(endpoint_benchmark.time, "time", lambda: next(times))
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", fake_urlopen)
+    config = EndpointBenchmarkConfig(
+        run_id="run-auth",
+        base_url="https://example.com/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        api_key_env="SERVE_OPTIMIZE_TEST_KEY",
+    )
+
+    record = send_chat_completion_request(config, request_id=0)
+    run = run_endpoint_benchmark(
+        config,
+        tmp_path,
+        request_fn=lambda _config, request_id: RequestRecord(request_id, 0.0, 0.1, 0.1, "ok"),
+    )
+    config_text = (run.run_dir / "config.json").read_text(encoding="utf-8")
+
+    assert record.status == "ok"
+    assert captured["authorization"] == "Bearer top-secret-value"
+    assert "SERVE_OPTIMIZE_TEST_KEY" in config_text
+    assert "top-secret-value" not in config_text
+
+
+def test_endpoint_auth_rejects_an_unset_environment_variable() -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="run-auth-missing",
+        base_url="https://example.com/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        api_key_env="SERVE_OPTIMIZE_MISSING_KEY",
+    )
+
+    with pytest.raises(ValueError, match="unset or empty"):
+        send_chat_completion_request(config, request_id=0)
 
 
 def test_soak_duration_runs_additional_request_batches(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -557,7 +557,7 @@ def _synthesized_config_id(
         "workload_concurrency": workload_concurrency,
         "engine_options": engine_options,
     }
-    digest = hashlib.sha1(repr(sorted(payload.items())).encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(repr(sorted(payload.items())).encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     return f"cfg-aic-synth-{digest}"
 
 

@@ -257,6 +257,51 @@ def test_all_candidates_failed_produce_no_recommendation() -> None:
     assert all("no_successful_requests" in score.disqualifiers for score in scores)
 
 
+def test_throughput_goal_rejects_success_without_measured_tokens() -> None:
+    inputs = [_input("missing", total_tokens_s=0.0, p95_latency_s=0.5)]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+
+    assert result.recommended_candidate_id is None
+    assert "missing_throughput_metric" in scores[0].disqualifiers
+
+
+def test_balanced_goal_requires_both_throughput_and_latency() -> None:
+    inputs = [
+        _input("missing-latency", total_tokens_s=120.0, p95_latency_s=None),
+        _input("complete", total_tokens_s=100.0, p95_latency_s=0.8),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.BALANCED)
+    score_by_id = {score.candidate_id: score for score in scores}
+
+    assert result.recommended_candidate_id == "complete"
+    assert "missing_latency_metric" in score_by_id["missing-latency"].disqualifiers
+
+
+def test_missing_optional_power_is_an_actual_score_penalty() -> None:
+    inputs = [
+        _input("missing-power", total_tokens_s=100.0, p95_latency_s=1.0),
+        _input("complete", total_tokens_s=100.0, p95_latency_s=1.0, tokens_per_second_per_watt=1.0, joules_per_token=0.01),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+    score_by_id = {score.candidate_id: score for score in scores}
+
+    assert result.recommended_candidate_id == "complete"
+    assert score_by_id["complete"].final_score > score_by_id["missing-power"].final_score
+    assert "missing_power_telemetry" in score_by_id["missing-power"].missing_metric_penalties
+
+
+def test_nonfinite_throughput_is_not_eligible() -> None:
+    inputs = [_input("nan", total_tokens_s=float("nan"), p95_latency_s=0.5)]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+
+    assert result.recommended_candidate_id is None
+    assert "missing_throughput_metric" in scores[0].disqualifiers
+
+
 def test_slo_latency_violation_is_ineligible_for_recommendation() -> None:
     inputs = [
         _input("slow", total_tokens_s=200.0, p95_latency_s=1.2, raw=_slo_raw({"p95_latency_ms": 800})),

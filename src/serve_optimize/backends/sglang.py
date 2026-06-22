@@ -971,6 +971,7 @@ def _disable_piecewise_cuda_graph(config: ServingConfig) -> bool:
 
 
 def _health_host(host: str) -> str:
-    if host in {"0.0.0.0", "::"}:
+    # Convert wildcard bind addresses to a local health check host.
+    if host in {"0.0.0.0", "::"}:  # nosec B104
         return "127.0.0.1"
     return host

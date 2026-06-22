@@ -2160,7 +2160,7 @@ def _write_evidence_recommendation(
     try:
         evidence_store.insert_recommendation(
             EvidenceRecommendationRecord(
-                recommendation_id=f"rec-{hashlib.sha1(f'{run_id}|{recommendation.recommended_candidate_id}'.encode()).hexdigest()[:16]}",
+                recommendation_id=f"rec-{hashlib.sha1(f'{run_id}|{recommendation.recommended_candidate_id}'.encode(), usedforsecurity=False).hexdigest()[:16]}",
                 run_id=run_id,
                 created_at=datetime.now(timezone.utc).isoformat(),
                 goal=goal,
@@ -2216,7 +2216,7 @@ def _summary_metrics(summary: object) -> dict[str, float | int | None]:
         row = {}
     throughput = _optional_float(row.get("total_tokens_s"))
     request_rate = _optional_float(row.get("request_rate_req_s"))
-    stable_rates = _stable_rates_from_request_latencies(row)
+    stable_rates = _stable_rates_from_request_latencies(row) if row.get("measurement_duration_s") is None else None
     if stable_rates is not None:
         throughput = stable_rates["throughput_tokens_per_sec"]
         request_rate = stable_rates["requests_per_sec"]
@@ -2231,9 +2231,21 @@ def _summary_metrics(summary: object) -> dict[str, float | int | None]:
         "active_joules_per_token": _optional_float(row.get("active_joules_per_token")),
         "stability_classification": _optional_str(row.get("stability_classification")),
         "tokens_per_watt": _optional_float(row.get("tokens_per_second_per_watt")),
-        "total_requests": _optional_int(row.get("total_requests")),
-        "successful_requests": _optional_int(row.get("successful_requests")),
-        "failed_requests": _optional_int(row.get("failed_requests")),
+        "total_requests": (
+            _optional_int(row.get("measured_requests"))
+            if row.get("measured_requests") is not None
+            else _optional_int(row.get("total_requests"))
+        ),
+        "successful_requests": (
+            _optional_int(row.get("measured_successful_requests"))
+            if row.get("measured_successful_requests") is not None
+            else _optional_int(row.get("successful_requests"))
+        ),
+        "failed_requests": (
+            _optional_int(row.get("measured_failed_requests"))
+            if row.get("measured_failed_requests") is not None
+            else _optional_int(row.get("failed_requests"))
+        ),
     }
 
 
@@ -2264,7 +2276,7 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
     raw_summary = raw_json.get("summary") if isinstance(raw_json.get("summary"), dict) else {}
     throughput = _optional_float(measurement.get("throughput_tokens_per_sec"))
     request_rate = _optional_float(measurement.get("requests_per_sec"))
-    stable_rates = _stable_rates_from_request_latencies(raw_summary)
+    stable_rates = _stable_rates_from_request_latencies(raw_summary) if raw_summary.get("measurement_duration_s") is None else None
     if stable_rates is not None:
         throughput = stable_rates["throughput_tokens_per_sec"]
         request_rate = stable_rates["requests_per_sec"]

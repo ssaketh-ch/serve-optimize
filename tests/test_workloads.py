@@ -47,3 +47,16 @@ def test_workload_manifest_overrides_preset_and_slos(tmp_path) -> None:
 def test_unknown_slo_constraint_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unsupported SLO constraint"):
         load_workload_profile(slo_constraints={"unknown": 1})
+
+
+@pytest.mark.parametrize(
+    ("constraints", "message"),
+    [
+        ({"ttft_ms": -1}, "must be nonnegative"),
+        ({"max_failed_request_rate": 1.1}, "must be between 0 and 1"),
+        ({"p95_latency_ms": float("nan")}, "must be a finite number"),
+    ],
+)
+def test_invalid_slo_values_are_rejected(constraints: dict[str, float], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_workload_profile(slo_constraints=constraints)

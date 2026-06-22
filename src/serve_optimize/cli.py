@@ -29,7 +29,7 @@ from .hardware import detect_hardware
 from .io import write_json, write_jsonl
 from .landscape import grouped_landscape
 from .managed import build_managed_preflight, run_managed_evaluation
-from .model_store import TINY_MODEL_IDS, download_model, download_tiny_models
+from .model_store import TINY_MODEL_IDS, download_model
 from .modeling import infer_model_spec
 from .pareto import pareto_frontier, select_recommendation
 from .real_benchmark import (
@@ -83,6 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare = subparsers.add_parser("prepare-models", help="Download tiny models for functional smoke tests.")
     prepare.add_argument("--model", action="append", dest="models", help="Model id to download. Can be passed multiple times.")
     prepare.add_argument("--cache-dir", type=Path, default=Path("data/models"), help="Model cache directory.")
+    prepare.add_argument("--model-revision", default=None, help="Optional immutable model revision or commit hash.")
     prepare.add_argument("--json", action="store_true", help="Emit JSON.")
     prepare.set_defaults(func=_cmd_prepare_models)
 
@@ -120,6 +121,8 @@ def _build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--trials", type=int, default=1, help="Number of repeated trials for real benchmark backends.")
     optimize.add_argument("--max-new-tokens", type=int, default=16, help="Generated tokens per prompt for real benchmark backends.")
     optimize.add_argument("--cache-dir", type=Path, default=Path("data/models"), help="Model cache directory.")
+    optimize.add_argument("--model-revision", default=None, help="Optional immutable model revision or commit hash.")
+    optimize.add_argument("--device-index", type=int, default=0, help="GPU index for inference and power sampling.")
     optimize.add_argument("--output-dir", type=Path, default=Path("results/synthetic"), help="Directory for JSON artifacts.")
     optimize.add_argument("--json", action="store_true", help="Emit JSON.")
     optimize.set_defaults(func=_cmd_optimize)
@@ -148,6 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_plan.add_argument("--override-concurrency", type=int, default=None, help="Override benchmark concurrency.")
     run_plan.add_argument("--override-num-requests", type=int, default=None, help="Override request count per candidate.")
     run_plan.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout in seconds.")
+    run_plan.add_argument("--api-key-env", default=None, help="Environment variable containing the endpoint API key.")
     run_plan.add_argument(
         "--telemetry",
         choices=["none", "nvml", "nvidia-smi", "auto"],
@@ -196,6 +200,7 @@ def _build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--override-concurrency", type=int, default=None, help="Override benchmark concurrency for every candidate.")
     recommend.add_argument("--override-num-requests", type=int, default=None, help="Override request count for every candidate.")
     recommend.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout in seconds.")
+    recommend.add_argument("--api-key-env", default=None, help="Environment variable containing the endpoint API key.")
     recommend.add_argument("--allow-efficiency-fallback", action="store_true", help="Allow efficiency goal to fall back to balanced scoring when power telemetry is unavailable.")
     recommend.add_argument("--dry-run", action="store_true", help="Write a preflight plan without endpoint health checks or benchmarks.")
     _add_workload_args(recommend)
@@ -317,6 +322,7 @@ def _build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--prompt", default=None, help="Prompt text. Defaults to a generated validation prompt.")
     endpoint.add_argument("--prompt-file", type=Path, default=None, help="Path to a UTF-8 prompt file.")
     endpoint.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout in seconds.")
+    endpoint.add_argument("--api-key-env", default=None, help="Environment variable containing the endpoint API key.")
     _add_measurement_quality_args(endpoint)
     endpoint.add_argument("--prediction-csv", type=Path, default=None, help="AIConfigurator best_config_topn.csv or pareto.csv.")
     endpoint.add_argument("--use-aic-concurrency", action="store_true", help="Use concurrency from the prediction CSV top row.")
@@ -349,6 +355,8 @@ def _build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--trials", type=int, default=2, help="Trials per candidate.")
     smoke.add_argument("--max-new-tokens", type=int, default=16, help="Generated tokens per prompt.")
     smoke.add_argument("--cache-dir", type=Path, default=Path("data/models"), help="Model cache directory.")
+    smoke.add_argument("--model-revision", default=None, help="Optional immutable model revision or commit hash.")
+    smoke.add_argument("--device-index", type=int, default=0, help="GPU index for inference and power sampling.")
     smoke.add_argument("--output-dir", type=Path, default=Path("results/real-smoke"), help="Directory for JSON artifacts.")
     smoke.add_argument("--json", action="store_true", help="Emit JSON.")
     smoke.set_defaults(func=_cmd_smoke)
@@ -444,10 +452,8 @@ def _cmd_landscape(args: argparse.Namespace) -> None:
 
 def _cmd_prepare_models(args: argparse.Namespace) -> None:
     args.cache_dir.mkdir(parents=True, exist_ok=True)
-    if args.models:
-        models = [download_model(model_id, cache_dir=args.cache_dir) for model_id in args.models]
-    else:
-        models = download_tiny_models(cache_dir=args.cache_dir)
+    model_ids = args.models or TINY_MODEL_IDS
+    models = [download_model(model_id, cache_dir=args.cache_dir, revision=args.model_revision) for model_id in model_ids]
     if args.json:
         print(json.dumps(to_dict(models), indent=2, sort_keys=True))
         return
@@ -502,6 +508,10 @@ def _cmd_benchmark(args: argparse.Namespace) -> None:
 
 def _cmd_endpoint_bench(args: argparse.Namespace) -> None:
     _validate_measurement_quality_args(args)
+    if args.max_tokens < 1:
+        raise SystemExit("--max-tokens must be at least 1.")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be greater than 0.")
     prediction = parse_aiconfig_prediction_csv(args.prediction_csv) if args.prediction_csv else None
     concurrency = args.concurrency
     if args.use_aic_concurrency:
@@ -533,6 +543,7 @@ def _cmd_endpoint_bench(args: argparse.Namespace) -> None:
         idle_power_watts=args.idle_power_watts,
         soak_duration_s=args.soak_seconds,
         stream=args.stream,
+        api_key_env=args.api_key_env,
     )
     hardware = detect_hardware()
     run = run_endpoint_benchmark(config=config, out_dir=args.out, prediction=prediction, hardware=hardware)
@@ -623,6 +634,8 @@ def _cmd_run_evaluation_plan(args: argparse.Namespace) -> None:
         raise SystemExit("--override-concurrency must be at least 1 when provided.")
     if args.override_num_requests is not None and args.override_num_requests < 1:
         raise SystemExit("--override-num-requests must be at least 1 when provided.")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be greater than 0.")
     result = run_evaluation_plan_dir(
         plan_dir=args.plan_dir,
         out_dir=args.out,
@@ -631,6 +644,7 @@ def _cmd_run_evaluation_plan(args: argparse.Namespace) -> None:
         override_num_requests=args.override_num_requests,
         timeout_s=args.timeout,
         telemetry=args.telemetry,
+        api_key_env=args.api_key_env,
     )
     _print_evaluation_summary(result.run_dir, result.summary)
     if result.failed:
@@ -648,6 +662,8 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
         raise SystemExit("--override-concurrency must be at least 1 when provided.")
     if args.override_num_requests is not None and args.override_num_requests < 1:
         raise SystemExit("--override-num-requests must be at least 1 when provided.")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be greater than 0.")
     concurrency_sweep = _parse_concurrency_sweep(args.concurrency_sweep)
     workload_profile = _resolve_workload_profile(args)
 
@@ -675,6 +691,7 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
                 timeout_s=args.timeout,
                 allow_efficiency_fallback=args.allow_efficiency_fallback,
                 workload_profile=workload_profile,
+                api_key_env=args.api_key_env,
             )
             _print_preflight(run.payload)
             return
@@ -700,6 +717,7 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
             timeout_s=args.timeout,
             allow_efficiency_fallback=args.allow_efficiency_fallback,
             workload_profile=workload_profile,
+            api_key_env=args.api_key_env,
         )
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -1049,6 +1067,14 @@ def _cmd_evidence_list(args: argparse.Namespace) -> None:
 
 
 def _cmd_optimize(args: argparse.Namespace) -> None:
+    if args.limit < 1:
+        raise SystemExit("--limit must be at least 1.")
+    if args.trials < 1:
+        raise SystemExit("--trials must be at least 1.")
+    if args.max_new_tokens < 1:
+        raise SystemExit("--max-new-tokens must be at least 1.")
+    if args.device_index < 0:
+        raise SystemExit("--device-index must be nonnegative.")
     hardware = detect_hardware()
     model = infer_model_spec(args.model, max_context_tokens=args.max_context)
     goal = Goal(args.goal)
@@ -1057,7 +1083,7 @@ def _cmd_optimize(args: argparse.Namespace) -> None:
         configs = generate_candidates(hardware, model, goal=goal, limit=args.limit)
         results = [run_dry_benchmark(config, hardware, model) for config in configs]
     elif args.backend == "transformers":
-        download_model(args.model, cache_dir=args.cache_dir)
+        download_model(args.model, cache_dir=args.cache_dir, revision=args.model_revision)
         configs = make_transformers_configs(args.model)[: args.limit]
         results = []
         for trial in range(args.trials):
@@ -1067,10 +1093,12 @@ def _cmd_optimize(args: argparse.Namespace) -> None:
                     max_new_tokens=args.max_new_tokens,
                     trial=trial,
                     cache_dir=args.cache_dir,
+                    model_revision=args.model_revision,
+                    device_index=args.device_index,
                 )
                 results.append(run_transformers_benchmark(config, hardware, model, options))
     elif args.backend == "vllm":
-        download_model(args.model, cache_dir=args.cache_dir)
+        download_model(args.model, cache_dir=args.cache_dir, revision=args.model_revision)
         configs = make_vllm_configs(args.model)[: args.limit]
         results = []
         for trial in range(args.trials):
@@ -1080,6 +1108,8 @@ def _cmd_optimize(args: argparse.Namespace) -> None:
                     max_new_tokens=args.max_new_tokens,
                     trial=trial,
                     cache_dir=args.cache_dir,
+                    model_revision=args.model_revision,
+                    device_index=args.device_index,
                 )
                 results.append(run_vllm_benchmark(config, hardware, model, options))
     else:
@@ -1101,13 +1131,19 @@ def _cmd_optimize(args: argparse.Namespace) -> None:
 
 
 def _cmd_smoke(args: argparse.Namespace) -> None:
+    if args.trials < 1:
+        raise SystemExit("--trials must be at least 1.")
+    if args.max_new_tokens < 1:
+        raise SystemExit("--max-new-tokens must be at least 1.")
+    if args.device_index < 0:
+        raise SystemExit("--device-index must be nonnegative.")
     hardware = detect_hardware()
     model_ids = args.models or TINY_MODEL_IDS
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     all_recommendations = []
     all_results = []
     for model_id in model_ids:
-        download_model(model_id, cache_dir=args.cache_dir)
+        download_model(model_id, cache_dir=args.cache_dir, revision=args.model_revision)
         model = infer_model_spec(model_id)
         configs = make_transformers_configs(model_id) if args.backend == "transformers" else make_vllm_configs(model_id)
         results = []
@@ -1118,6 +1154,8 @@ def _cmd_smoke(args: argparse.Namespace) -> None:
                     max_new_tokens=args.max_new_tokens,
                     trial=trial,
                     cache_dir=args.cache_dir,
+                    model_revision=args.model_revision,
+                    device_index=args.device_index,
                 )
                 if args.backend == "transformers":
                     result = run_transformers_benchmark(config, hardware, model, options)

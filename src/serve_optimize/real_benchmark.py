@@ -25,6 +25,8 @@ class RealBenchmarkOptions:
     trial: int = 0
     device: str = "auto"
     cache_dir: Path | None = None
+    model_revision: str | None = None
+    device_index: int = 0
 
 
 def run_transformers_benchmark(
@@ -40,13 +42,17 @@ def run_transformers_benchmark(
     except ImportError as exc:  # pragma: no cover - optional runtime
         return _failed(config, f"Missing runtime dependency: {exc}")
 
-    device = _choose_device(torch, options.device)
-    dtype = torch.float16 if device == "cuda" else torch.float32
+    device = _choose_device(torch, options.device, options.device_index)
+    dtype = torch.float16 if device.startswith("cuda") else torch.float32
     if config.dtype == "fp32":
         dtype = torch.float32
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_id, cache_dir=str(options.cache_dir) if options.cache_dir else None)
+        tokenizer = AutoTokenizer.from_pretrained(
+            config.model_id,
+            cache_dir=str(options.cache_dir) if options.cache_dir else None,
+            revision=options.model_revision,
+        )
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None or tokenizer.pad_token_id is None or tokenizer.pad_token_id < 0:
             tokenizer.pad_token = tokenizer.eos_token
@@ -54,12 +60,14 @@ def run_transformers_benchmark(
             model_obj = AutoModelForCausalLM.from_pretrained(
                 config.model_id,
                 cache_dir=str(options.cache_dir) if options.cache_dir else None,
+                revision=options.model_revision,
                 dtype=dtype,
             )
         except TypeError:
             model_obj = AutoModelForCausalLM.from_pretrained(
                 config.model_id,
                 cache_dir=str(options.cache_dir) if options.cache_dir else None,
+                revision=options.model_revision,
                 torch_dtype=dtype,
             )
         model_obj.to(device)
@@ -82,34 +90,55 @@ def run_transformers_benchmark(
         encoded = tokenizer(prompts, return_tensors="pt", padding=True)
         encoded = {key: value.to(device) for key, value in encoded.items()}
         input_tokens = int(encoded["attention_mask"].sum().item())
+        input_token_slots = int(encoded["input_ids"].numel())
 
         with torch.inference_mode():
             _ = model_obj.generate(**encoded, max_new_tokens=1, do_sample=False)
-            if device == "cuda":
-                torch.cuda.synchronize()
+            if device.startswith("cuda"):
+                torch.cuda.synchronize(device)
 
-        sampler = NvidiaSmiPowerTrace(interval_s=0.2)
+        sampler = NvidiaSmiPowerTrace(interval_s=0.2, device_index=options.device_index)
         sampler.start()
-        start = time.perf_counter()
-        with torch.inference_mode():
-            output = model_obj.generate(
-                **encoded,
-                max_new_tokens=options.max_new_tokens,
-                do_sample=False,
-            )
-            if device == "cuda":
-                torch.cuda.synchronize()
-        end = time.perf_counter()
-        samples = sampler.stop()
+        try:
+            start = time.perf_counter()
+            with torch.inference_mode():
+                output = model_obj.generate(
+                    **encoded,
+                    max_new_tokens=options.max_new_tokens,
+                    do_sample=False,
+                )
+                if device.startswith("cuda"):
+                    torch.cuda.synchronize(device)
+            end = time.perf_counter()
+        finally:
+            samples = sampler.stop()
     except Exception as exc:
         return _failed(config, f"Inference failed: {exc.__class__.__name__}: {exc}")
 
     duration_s = max(end - start, 1e-9)
     total_tokens = int(output.numel())
-    generated_tokens = max(1, total_tokens - input_tokens)
+    generated_tokens = max(0, total_tokens - input_token_slots)
+    if generated_tokens == 0:
+        return _failed(config, "Inference produced no generated tokens.")
     throughput = generated_tokens / duration_s
     power_summary = summarize_samples(samples)
-    average_power = power_summary["average_watts"] or _fallback_power(hardware)
+    average_power = power_summary["average_watts"]
+    if average_power is None:
+        return _missing_power_result(
+            config,
+            throughput=throughput,
+            generated_tokens=generated_tokens,
+            raw={
+                "mode": "transformers",
+                "device": device,
+                "duration_s": duration_s,
+                "input_tokens": input_tokens,
+                "input_token_slots": input_token_slots,
+                "output_tokens_total": total_tokens,
+                "trial": options.trial,
+                "model_revision": options.model_revision,
+            },
+        )
     energy = average_power * duration_s
     joules_per_token = energy / generated_tokens
 
@@ -128,10 +157,12 @@ def run_transformers_benchmark(
             "device": device,
             "duration_s": duration_s,
             "input_tokens": input_tokens,
+            "input_token_slots": input_token_slots,
             "output_tokens_total": total_tokens,
             "trial": options.trial,
+            "model_revision": options.model_revision,
             "power_sample_count": power_summary["count"],
-            "power_source": "nvidia-smi" if samples else "hardware_snapshot_fallback",
+            "power_source": "nvidia-smi",
         },
     )
 
@@ -190,10 +221,10 @@ def run_vllm_benchmark(
     prompts = options.prompts[: max(1, config.max_batch_size)] or DEFAULT_PROMPTS[:1]
     try:
         model_ref = config.model_id
-        if options.cache_dir is not None:
+        if options.cache_dir is not None or options.model_revision is not None:
             from .model_store import download_model
 
-            model_ref = download_model(config.model_id, cache_dir=options.cache_dir).path
+            model_ref = download_model(config.model_id, cache_dir=options.cache_dir, revision=options.model_revision).path
         llm = LLM(
             model=model_ref,
             dtype="float16",
@@ -206,21 +237,40 @@ def run_vllm_benchmark(
         warmup_params = SamplingParams(max_tokens=1, temperature=0.0)
         _ = llm.generate(prompts[:1], warmup_params, use_tqdm=False)
         sampling_params = SamplingParams(max_tokens=options.max_new_tokens, temperature=0.0)
-        sampler = NvidiaSmiPowerTrace(interval_s=0.2)
+        sampler = NvidiaSmiPowerTrace(interval_s=0.2, device_index=options.device_index)
         sampler.start()
-        start = time.perf_counter()
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-        end = time.perf_counter()
-        samples = sampler.stop()
+        try:
+            start = time.perf_counter()
+            outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
+            end = time.perf_counter()
+        finally:
+            samples = sampler.stop()
     except Exception as exc:
         return _failed(config, f"vLLM inference failed: {exc.__class__.__name__}: {exc}")
 
     duration_s = max(end - start, 1e-9)
-    generated_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
-    generated_tokens = max(1, generated_tokens)
+    generated_tokens = sum(
+        len(output.outputs[0].token_ids)
+        for output in outputs
+        if getattr(output, "outputs", None)
+    )
+    if generated_tokens == 0:
+        return _failed(config, "vLLM inference produced no generated tokens.")
     throughput = generated_tokens / duration_s
     power_summary = summarize_samples(samples)
-    average_power = power_summary["average_watts"] or _fallback_power(hardware)
+    average_power = power_summary["average_watts"]
+    if average_power is None:
+        return _missing_power_result(
+            config,
+            throughput=throughput,
+            generated_tokens=generated_tokens,
+            raw={
+                "mode": "vllm-offline",
+                "duration_s": duration_s,
+                "trial": options.trial,
+                "model_revision": options.model_revision,
+            },
+        )
     energy = average_power * duration_s
     joules_per_token = energy / generated_tokens
 
@@ -238,15 +288,17 @@ def run_vllm_benchmark(
             "energy_method": "tokenpowerbench-style-nvidia-smi-sampling",
             "duration_s": duration_s,
             "trial": options.trial,
+            "model_revision": options.model_revision,
             "power_sample_count": power_summary["count"],
-            "power_source": "nvidia-smi" if samples else "hardware_snapshot_fallback",
+            "power_source": "nvidia-smi",
         },
     )
 
 
 class NvidiaSmiPowerTrace:
-    def __init__(self, interval_s: float = 0.2):
+    def __init__(self, interval_s: float = 0.2, device_index: int = 0):
         self.interval_s = interval_s
+        self.device_index = device_index
         self._stop = threading.Event()
         self._samples: list[float] = []
         self._thread: threading.Thread | None = None
@@ -264,16 +316,16 @@ class NvidiaSmiPowerTrace:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            watts = query_nvidia_smi_power()
+            watts = query_nvidia_smi_power(self.device_index)
             if watts is not None:
                 self._samples.append(watts)
             time.sleep(self.interval_s)
 
 
-def query_nvidia_smi_power() -> float | None:
+def query_nvidia_smi_power(device_index: int = 0) -> float | None:
     try:
         completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "-i", str(device_index), "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
             check=True,
             capture_output=True,
             text=True,
@@ -294,19 +346,32 @@ def summarize_samples(samples: list[float]) -> dict[str, float | int | None]:
     return {"count": len(samples), "average_watts": sum(samples) / len(samples), "peak_watts": max(samples)}
 
 
-def _choose_device(torch_module: object, requested: str) -> str:
+def _choose_device(torch_module: object, requested: str, device_index: int = 0) -> str:
     if requested == "cpu":
         return "cpu"
     if requested == "cuda":
-        return "cuda"
-    return "cuda" if torch_module.cuda.is_available() else "cpu"
+        return f"cuda:{device_index}"
+    return f"cuda:{device_index}" if torch_module.cuda.is_available() else "cpu"
 
 
-def _fallback_power(hardware: HardwareSnapshot) -> float:
-    gpu = hardware.best_gpu
-    if gpu and gpu.current_power_watts:
-        return gpu.current_power_watts
-    return 1.0
+def _missing_power_result(
+    config: ServingConfig,
+    *,
+    throughput: float,
+    generated_tokens: int,
+    raw: dict[str, object],
+) -> BenchmarkResult:
+    return BenchmarkResult(
+        config=config,
+        throughput_tok_s=round(throughput, 6),
+        average_power_watts=0.0,
+        joules_per_token=0.0,
+        tokens_per_watt=0.0,
+        generated_tokens=generated_tokens,
+        feasible=False,
+        reason="No benchmark power samples were collected; energy metrics are unavailable.",
+        raw={**raw, "power_sample_count": 0, "power_source": "unavailable"},
+    )
 
 
 def _failed(config: ServingConfig, reason: str) -> BenchmarkResult:

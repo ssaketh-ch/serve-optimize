@@ -60,6 +60,29 @@ Recorded on 2026-06-22:
 * packaged CLI smoke passed
 * release check passed with 72 checks
 
+## Correctness And Security Audit
+
+Recorded on 2026-06-23:
+
+* aligned request, token, time, failure, and power accounting to the same measured window
+* separated full run counters from measured window counters in benchmark summaries
+* removed stream chunk token proxies and recorded token count provenance
+* added authenticated endpoint support through environment variable names without serializing secrets
+* restricted endpoint base URLs to HTTP and HTTPS without embedded credentials
+* required complete goal metrics and applied real score penalties for missing optional metrics
+* rejected nonfinite recommendation metrics and invalid SLO constraints
+* removed fabricated local benchmark power fallback and corrected padded token accounting
+* added model revision and GPU index propagation for local real benchmarks
+* corrected balanced Pareto normalization for two point tradeoffs
+* dependency audit found no known vulnerabilities
+* Bandit medium and high severity scan passed
+* 336 tests passed
+* 1 test skipped
+* Ruff passed
+* source distribution and wheel builds passed
+* packaged CLI smoke passed
+* release check passed with 72 checks
+
 ## Phase 5 Measurement Depth
 
 Recorded on 2026-06-21:
