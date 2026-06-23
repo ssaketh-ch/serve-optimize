@@ -224,10 +224,12 @@ class SglangAdapter:
         if rendered.unsupported_fields:
             fields = ", ".join(sorted(rendered.unsupported_fields))
             raise ValueError(f"SGLang launch config has unsupported fields: {fields}.")
+        grpc_port = _allocate_distinct_port(host, resolved_port)
         candidate_log_dir = log_dir / config.id
         base_url = f"http://{_health_host(host)}:{resolved_port}/v1"
         metadata = self.backend_metadata()
         metadata["rendered_launch"] = rendered.to_metadata()
+        metadata["allocated_grpc_port"] = grpc_port
         return ServerLaunchSpec(
             config_id=config.id,
             backend=self.name,
@@ -236,7 +238,7 @@ class SglangAdapter:
             port=resolved_port,
             base_url=base_url,
             command=rendered.command,
-            environment={},
+            environment={"SGLANG_GRPC_PORT": str(grpc_port)},
             stdout_log_path=str(candidate_log_dir / "stdout.log"),
             stderr_log_path=str(candidate_log_dir / "stderr.log"),
             metadata=metadata,
@@ -379,6 +381,14 @@ def allocate_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
+
+
+def _allocate_distinct_port(host: str, port: int) -> int:
+    for _ in range(16):
+        candidate = allocate_port(host)
+        if candidate != port:
+            return candidate
+    raise RuntimeError("could not allocate a distinct SGLang gRPC port")
 
 
 def validate_port_available(host: str, port: int) -> None:

@@ -476,15 +476,19 @@ def render_vllm_launch(
             },
             capabilities_help_hash=capabilities.help_hash if capabilities is not None else None,
         )
+    omit_max_num_seqs = (config.extra or {}).get("omit_max_num_seqs") is True
     rendered_fields: dict[str, object] = {
         "dtype": config.dtype,
         "quantization": config.quantization,
         "max_model_len": config.max_context_tokens,
         "gpu_memory_utilization": config.gpu_memory_utilization,
-        "max_num_seqs": config.max_batch_size,
         "tensor_parallel_size": config.tensor_parallelism,
     }
     omitted_fields: dict[str, str] = {}
+    if omit_max_num_seqs:
+        omitted_fields["max_num_seqs"] = "backend default requested by candidate."
+    else:
+        rendered_fields["max_num_seqs"] = config.max_batch_size
     unsupported_fields: dict[str, str] = {}
     flag_aliases: dict[str, str] = {}
     canonical_values: dict[str, object] = {
@@ -506,11 +510,13 @@ def render_vllm_launch(
         str(config.max_context_tokens),
         "--gpu-memory-utilization",
         str(config.gpu_memory_utilization),
-        "--max-num-seqs",
-        str(config.max_batch_size),
+    ]
+    if not omit_max_num_seqs:
+        command.extend(["--max-num-seqs", str(config.max_batch_size)])
+    command.extend([
         "--tensor-parallel-size",
         str(config.tensor_parallelism),
-    ]
+    ])
 
     if config.block_size is not None:
         if _supports_flag(capabilities, "--block-size"):

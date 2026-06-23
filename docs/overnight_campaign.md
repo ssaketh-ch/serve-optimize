@@ -38,7 +38,7 @@ Override it with:
 GOALS=balanced,throughput scripts/run_overnight_campaign.sh standard vllm
 ```
 
-The runner continues after individual model, backend, and goal cell failures. It records skipped cells in `failures.tsv` with a reason such as `oom`, `model_access`, or `command_failed`. It writes one log per matrix cell, all managed run artifacts, a campaign evidence database, `overnight_summary.json`, `overnight_summary.csv`, `overnight_summary.md`, and validation campaign artifacts.
+The runner continues after failures and records skipped cells in `failures.tsv` with a reason such as `oom`, `model_access`, `backend_launch`, `startup_timeout`, or `command_failed`. Access and memory failures skip the remaining cells for that model. Backend launch and startup timeout failures skip the remaining goals for that model and backend. It writes one log per matrix cell, all managed run artifacts, a campaign evidence database, `overnight_summary.json`, `overnight_summary.csv`, `overnight_summary.md`, and validation campaign artifacts.
 
 ## Suites
 
@@ -97,6 +97,7 @@ The script uses:
 * eight warmup requests
 * five seconds of idle baseline sampling
 * sixty seconds of active soak time
+* fifteen minute backend startup timeout
 * streaming measurements for TTFT and TPOT
 
 Override these without editing the script:
@@ -107,6 +108,7 @@ TRIALS=3 \
 WARMUP_REQUESTS=12 \
 IDLE_BASELINE_SECONDS=8 \
 SOAK_SECONDS=120 \
+STARTUP_TIMEOUT=1200 \
 scripts/run_overnight_campaign.sh standard vllm results/my-campaign
 ```
 

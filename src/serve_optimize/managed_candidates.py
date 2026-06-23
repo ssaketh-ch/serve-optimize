@@ -63,7 +63,7 @@ def generate_managed_candidates_from_capabilities(
         max_context_tokens=_bounded_context(model_spec, 2048),
         max_batch_size=1,
         gpu_memory_utilization=0.9,
-        workload_concurrency=1,
+        workload_concurrency=_profile_concurrency(workload_profile),
         source="safe_baseline",
         baseline=True,
         engine_options={"backend_defaults": True},
@@ -134,13 +134,7 @@ def _generate_sglang_candidates(
     dtype = _sglang_dtype(_native_dtype(metadata) or _hardware_default_dtype(context.hardware), context.sglang_argument_capabilities)
     quantization = _allowed_quantizations(metadata)[0]
     capabilities = context.sglang_argument_capabilities
-    engine_options: dict[str, object] = {}
-    if (
-        capabilities is not None
-        and capabilities.detection_status == "success"
-        and capabilities.supports("--disable-piecewise-cuda-graph")
-    ):
-        engine_options["disable_piecewise_cuda_graph"] = True
+    workload_profile = context.workload_profile or WorkloadProfile()
     memory_fraction_supported = bool(
         capabilities is not None
         and capabilities.detection_status == "success"
@@ -168,24 +162,26 @@ def _generate_sglang_candidates(
             max_context_tokens=primary_context,
             max_batch_size=1,
             gpu_memory_utilization=0.8 if memory_fraction_supported else 0.0,
-            workload_concurrency=1,
+            workload_concurrency=_profile_concurrency(workload_profile),
             source="safe_baseline",
             baseline=True,
             engine_options={"backend_defaults": True},
         )
     ]
-    candidate_batch_size = 4 if running_requests_supported else 1
+    profile_concurrency = _profile_concurrency(workload_profile)
+    candidate_batch_size = max(4, profile_concurrency) if running_requests_supported else 1
     shapes = [
-        (primary_context, candidate_batch_size, 0.8, 2, chunked_prefill_supported),
-        (secondary_context, 1, 0.9, 1, False),
-        (secondary_context, candidate_batch_size, 0.9, 4, chunked_prefill_supported),
+        (primary_context, 1, 0.9, profile_concurrency, False),
+        (primary_context, candidate_batch_size, 0.8, max(2, profile_concurrency), chunked_prefill_supported),
+        (secondary_context, max(1, profile_concurrency), 0.9, profile_concurrency, False),
+        (secondary_context, candidate_batch_size, 0.9, max(4, profile_concurrency), chunked_prefill_supported),
     ]
     if context.goal == Goal.EFFICIENT:
-        shapes = shapes[:2]
+        shapes = shapes[:3]
     elif context.goal == Goal.PERFORMANCE:
-        shapes = [shapes[0], shapes[-1]]
+        shapes = [shapes[0], shapes[1], shapes[-1]]
     for max_context_tokens, max_batch_size, memory_fraction, workload_concurrency, use_chunked_prefill in shapes:
-        shape_options = dict(engine_options)
+        shape_options: dict[str, object] = {}
         if use_chunked_prefill:
             shape_options["chunked_prefill_size"] = primary_context
         candidates.append(
@@ -259,8 +255,16 @@ def _candidate_shapes(
     secondary_context = contexts[1] if len(contexts) > 1 else contexts[0]
     tertiary_context = contexts[2] if len(contexts) > 2 else secondary_context
     dtype_option = _kv_cache_dtype_for_model_dtype(dtype)
+    profile_concurrency = _profile_concurrency(workload_profile)
 
     shapes: list[tuple[int, int, float, int, dict[str, object]]] = [
+        (
+            primary_context,
+            profile_concurrency,
+            0.9,
+            profile_concurrency,
+            {"omit_max_num_seqs": True} if profile_concurrency > 1 else {},
+        ),
         (primary_context, 1, 0.7, 1, {}),
         (
             primary_context,
@@ -320,6 +324,7 @@ def _candidate_shapes(
         (context, batch_size, memory, workload, _filter_engine_options(options, capabilities))
         for context, batch_size, memory, workload, options in shapes
     ]
+    shapes = _scale_shapes_for_profile(shapes, workload_profile)
     if _prefix_cache_profile(workload_profile) and capabilities is not None and capabilities.supports("--enable-prefix-caching"):
         shapes = _with_prefix_cache_shape(shapes)
     if goal == Goal.EFFICIENT:
@@ -330,9 +335,11 @@ def _candidate_shapes(
 
 
 def _filter_engine_options(options: dict[str, object], capabilities: VLLMArgumentCapabilities | None) -> dict[str, object]:
-    if not options or capabilities is None or capabilities.detection_status != "success":
-        return {}
     filtered: dict[str, object] = {}
+    if options.get("omit_max_num_seqs") is True:
+        filtered["omit_max_num_seqs"] = True
+    if not options or capabilities is None or capabilities.detection_status != "success":
+        return filtered
     if "block_size" in options and capabilities.supports("--block-size"):
         filtered["block_size"] = options["block_size"]
     if "max_num_batched_tokens" in options and capabilities.supports("--max-num-batched-tokens"):
@@ -377,6 +384,51 @@ def _profile_payload(context: CapabilityContext) -> dict[str, object]:
     if profile is None or profile.profile_name == "default":
         return {}
     return to_dict(profile)
+
+
+def _profile_concurrency(profile: WorkloadProfile) -> int:
+    value = profile.concurrency
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 1
+
+
+def _scale_shapes_for_profile(
+    shapes: list[tuple[int, int, float, int, dict[str, object]]],
+    profile: WorkloadProfile,
+) -> list[tuple[int, int, float, int, dict[str, object]]]:
+    concurrency = _profile_concurrency(profile)
+    if concurrency <= 1:
+        return shapes
+    scaled = []
+    for max_context_tokens, max_batch_size, memory, workload_concurrency, options in shapes:
+        next_batch_size = max(max_batch_size, concurrency)
+        next_workload_concurrency = max(workload_concurrency, concurrency)
+        next_options = dict(options)
+        batched_tokens = _profile_batched_tokens_for(
+            max_context_tokens,
+            max_batch_size=next_batch_size,
+            profile=profile,
+        )
+        if batched_tokens is not None and next_options.get("max_num_batched_tokens") is not None:
+            next_options["max_num_batched_tokens"] = max(
+                int(next_options["max_num_batched_tokens"]),
+                batched_tokens,
+            )
+        scaled.append((max_context_tokens, next_batch_size, memory, next_workload_concurrency, next_options))
+    return scaled
+
+
+def _profile_batched_tokens_for(
+    max_context_tokens: int,
+    *,
+    max_batch_size: int,
+    profile: WorkloadProfile,
+) -> int | None:
+    input_tokens = profile.input_tokens
+    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens <= 0:
+        return None
+    return max(max_context_tokens + 1, min(max_context_tokens * max_batch_size, input_tokens * max_batch_size))
 
 
 def _kv_cache_dtype_allowed(value: str, capabilities: VLLMArgumentCapabilities) -> bool:
@@ -439,6 +491,7 @@ def _candidate(
         "chunked_prefill_size",
         "cuda_graph_max_bs",
         "backend_defaults",
+        "omit_max_num_seqs",
     ):
         if field_name in engine_options:
             extra[field_name] = engine_options[field_name]
@@ -540,6 +593,7 @@ def _dedupe_candidates(candidates: list[ServingConfig]) -> list[ServingConfig]:
             config.max_cudagraph_capture_size,
             config.enable_prefix_caching,
             extra.get("disable_piecewise_cuda_graph"),
+            extra.get("omit_max_num_seqs"),
             extra.get("workload_concurrency"),
         )
         if config.id in seen_ids or shape in seen_shapes:

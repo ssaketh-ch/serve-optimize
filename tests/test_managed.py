@@ -15,6 +15,7 @@ from serve_optimize.backends.factory import (
     create_managed_backend_adapter,
 )
 from serve_optimize.backends.sglang import (
+    SglangAdapter,
     SGLangArgumentCapabilities,
     _select_sglang_help_text,
     detect_sglang_argument_capabilities,
@@ -141,6 +142,22 @@ def test_sglang_backend_default_baseline_omits_tuning_flags() -> None:
     assert "--context-length" not in rendered.command
     assert "--mem-fraction-static" not in rendered.command
     assert rendered.rendered_fields["backend_defaults"] is True
+
+
+def test_sglang_launch_spec_sets_distinct_grpc_port(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("serve_optimize.backends.sglang.validate_port_available", lambda host, port: None)
+    monkeypatch.setattr("serve_optimize.backends.sglang.allocate_port", lambda host: 12345)
+
+    spec = SglangAdapter(argument_capabilities=_sglang_caps()).build_launch_spec(
+        _config(backend="sglang"),
+        host="127.0.0.1",
+        port=65000,
+        log_dir=tmp_path / "logs",
+    )
+
+    assert spec.port == 65000
+    assert spec.environment["SGLANG_GRPC_PORT"] == "12345"
+    assert spec.metadata["allocated_grpc_port"] == 12345
 
 
 def test_managed_metrics_preserve_power_quality_and_active_efficiency() -> None:
@@ -1042,6 +1059,47 @@ def test_capability_generation_for_bf16_model_emits_multiple_none_candidates(tmp
     assert any(config.block_size == 16 for config in result.candidates[1:])
 
 
+def test_vllm_medium_profile_scales_scheduler_capacity(tmp_path) -> None:
+    model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
+    metadata = infer_model_capability_metadata(str(model_dir))
+    profile = WorkloadProfile(profile_name="medium", input_tokens=1024, concurrency=8, num_requests=96)
+
+    result = generate_managed_candidates_from_capabilities(
+        CapabilityContext(
+            backend="vllm",
+            model=str(model_dir),
+            goal=Goal.PERFORMANCE,
+            hardware=_managed_hardware(),
+            model_metadata=metadata,
+            vllm_argument_capabilities=_all_engine_caps(),
+            workload_profile=profile,
+        ),
+        limit=4,
+    )
+
+    assert result.candidates[0].extra["candidate_source"] == "safe_baseline"
+    assert result.candidates[0].extra["workload_concurrency"] == 8
+    assert any(config.extra.get("omit_max_num_seqs") is True for config in result.candidates[1:])
+    assert all(config.max_batch_size >= 8 for config in result.candidates[1:])
+    assert all(config.extra["workload_concurrency"] >= 8 for config in result.candidates[1:])
+    assert all(
+        config.max_num_batched_tokens is None or config.max_num_batched_tokens >= 8192
+        for config in result.candidates[1:]
+    )
+
+
+def test_vllm_omit_max_num_seqs_uses_backend_scheduler_default() -> None:
+    rendered = render_vllm_launch(
+        _config(extra={"omit_max_num_seqs": True}),
+        host="127.0.0.1",
+        port=8000,
+        capabilities=_all_engine_caps(),
+    )
+
+    assert "--max-num-seqs" not in rendered.command
+    assert rendered.omitted_fields["max_num_seqs"] == "backend default requested by candidate."
+
+
 def test_sglang_capability_generation_is_bounded_and_excludes_vllm_fields(tmp_path) -> None:
     model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
     metadata = infer_model_capability_metadata(str(model_dir))
@@ -1068,7 +1126,7 @@ def test_sglang_capability_generation_is_bounded_and_excludes_vllm_fields(tmp_pa
     assert any(config.max_batch_size == 4 for config in result.candidates)
     assert any("chunked_prefill_size" in config.extra for config in result.candidates)
     assert "disable_piecewise_cuda_graph" not in result.candidates[0].extra
-    assert all(config.extra["disable_piecewise_cuda_graph"] is True for config in result.candidates[1:])
+    assert all("disable_piecewise_cuda_graph" not in config.extra for config in result.candidates[1:])
     assert all(
         getattr(config, field_name) is None
         for config in result.candidates
@@ -1082,6 +1140,31 @@ def test_sglang_capability_generation_is_bounded_and_excludes_vllm_fields(tmp_pa
             "enable_prefix_caching",
         )
     )
+
+
+def test_sglang_medium_profile_scales_scheduler_capacity(tmp_path) -> None:
+    model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
+    metadata = infer_model_capability_metadata(str(model_dir))
+    profile = WorkloadProfile(profile_name="medium", input_tokens=1024, concurrency=8, num_requests=96)
+
+    result = generate_managed_candidates_from_capabilities(
+        CapabilityContext(
+            backend="sglang",
+            model=str(model_dir),
+            goal=Goal.PERFORMANCE,
+            hardware=_managed_hardware(),
+            model_metadata=metadata,
+            sglang_argument_capabilities=_sglang_caps(),
+            workload_profile=profile,
+        ),
+        limit=4,
+    )
+
+    assert result.candidates[0].extra["workload_concurrency"] == 8
+    assert any(config.max_batch_size == 1 and config.extra["workload_concurrency"] == 8 for config in result.candidates[1:])
+    assert all(config.max_batch_size >= 8 or config.max_batch_size == 1 for config in result.candidates[1:])
+    assert all(config.extra["workload_concurrency"] >= 8 for config in result.candidates[1:])
+    assert all("disable_piecewise_cuda_graph" not in config.extra for config in result.candidates[1:])
 
 
 def test_sglang_generation_uses_model_compatible_quantization(tmp_path) -> None:
