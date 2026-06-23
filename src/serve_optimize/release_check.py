@@ -39,7 +39,7 @@ FAST_COMMANDS = (
     "ruff check .",
     "python -m json.tool feature_list.json",
     "serve-optimize --help",
-    "serve-optimize managed-evaluate --help",
+    "serve-optimize optimize --help",
     "serve-optimize validate-campaign --help",
     "serve-optimize campaign-plan --help",
 )

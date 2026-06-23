@@ -44,23 +44,57 @@ def infer_model_spec(model_id: str, max_context_tokens: int | None = None) -> Mo
     )
 
 
-def infer_model_capability_metadata(model_id: str) -> ModelCapabilityMetadata:
+def infer_model_capability_metadata(
+    model_id: str,
+    *,
+    allow_remote_download: bool = False,
+) -> ModelCapabilityMetadata:
     model_path = Path(model_id).expanduser()
-    if not model_path.exists():
+    if model_path.exists():
+        config_path = model_path / "config.json" if model_path.is_dir() else model_path
+        return _metadata_from_config(
+            model_id,
+            config_path,
+            is_local_path=True,
+            source_label="Local",
+        )
+    config_path, notes, warnings = _resolve_remote_config_path(
+        model_id,
+        allow_download=allow_remote_download,
+    )
+    if config_path is None:
         return ModelCapabilityMetadata(
             model_id=model_id,
             metadata_known=False,
             is_local_path=False,
-            notes=["Model metadata is unknown for non-local model identifiers."],
+            notes=notes or ["Remote model metadata is unavailable."],
+            warnings=warnings,
         )
-    config_path = model_path / "config.json" if model_path.is_dir() else model_path
+    return _metadata_from_config(
+        model_id,
+        config_path,
+        is_local_path=False,
+        source_label="Remote",
+        notes=notes,
+    )
+
+
+def _metadata_from_config(
+    model_id: str,
+    config_path: Path,
+    *,
+    is_local_path: bool,
+    source_label: str,
+    notes: list[str] | None = None,
+) -> ModelCapabilityMetadata:
     if config_path.name != "config.json" or not config_path.exists():
         return ModelCapabilityMetadata(
             model_id=model_id,
             metadata_known=False,
-            is_local_path=True,
+            is_local_path=is_local_path,
             config_path=str(config_path),
-            warnings=["Local model config.json was not found."],
+            notes=notes or [],
+            warnings=[f"{source_label} model config.json was not found."],
         )
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -68,24 +102,58 @@ def infer_model_capability_metadata(model_id: str) -> ModelCapabilityMetadata:
         return ModelCapabilityMetadata(
             model_id=model_id,
             metadata_known=False,
-            is_local_path=True,
+            is_local_path=is_local_path,
             config_path=str(config_path),
-            warnings=[f"Local model config.json could not be read: {exc.__class__.__name__}: {exc}"],
+            notes=notes or [],
+            warnings=[f"{source_label} model config.json could not be read: {exc.__class__.__name__}: {exc}"],
         )
     quantization_config = payload.get("quantization_config")
     if not isinstance(quantization_config, dict):
         quantization_config = {}
     quant_method = quantization_config.get("quant_method")
-    torch_dtype = payload.get("torch_dtype")
+    torch_dtype = payload.get("torch_dtype", payload.get("dtype"))
     return ModelCapabilityMetadata(
         model_id=model_id,
         metadata_known=True,
-        is_local_path=True,
+        is_local_path=is_local_path,
         config_path=str(config_path),
         torch_dtype=str(torch_dtype) if torch_dtype is not None else None,
         quantization_method=str(quant_method).lower() if quant_method is not None else None,
         quantization_config=quantization_config,
+        notes=notes or [],
     )
+
+
+def _resolve_remote_config_path(
+    model_id: str,
+    *,
+    allow_download: bool,
+) -> tuple[Path | None, list[str], list[str]]:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return None, ["Remote model config lookup requires huggingface_hub."], []
+
+    modes = (True, False) if allow_download else (True,)
+    warnings: list[str] = []
+    for local_files_only in modes:
+        try:
+            path = hf_hub_download(
+                repo_id=model_id,
+                filename="config.json",
+                local_files_only=local_files_only,
+            )
+        except Exception as exc:
+            if local_files_only and allow_download:
+                continue
+            mode = "cached" if local_files_only else "downloaded"
+            warnings.append(f"Remote model {mode} config lookup failed: {exc.__class__.__name__}: {exc}")
+            continue
+        note = "Remote model config was read from the local Hub cache."
+        if not local_files_only:
+            note = "Remote model config was downloaded before candidate generation."
+        return Path(path), [note], warnings
+    return None, ["Remote model config was not found in the local Hub cache."], warnings
 
 
 def _parse_parameter_count(model_id: str) -> float:

@@ -86,6 +86,39 @@ def test_unknown_remote_model_metadata_rejects_explicit_quantization_without_cra
     assert "quantization_config.quant_method=awq" in str(result.reason)
 
 
+def test_remote_model_metadata_reads_downloaded_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"torch_dtype": "bfloat16", "quantization_config": {"quant_method": "awq"}}),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, bool]] = []
+
+    def fake_resolve(model_id: str, *, allow_download: bool):
+        calls.append((model_id, allow_download))
+        return config_path, ["Remote model config was downloaded before candidate generation."], []
+
+    monkeypatch.setattr("serve_optimize.modeling._resolve_remote_config_path", fake_resolve)
+
+    metadata = infer_model_capability_metadata("org/model-id", allow_remote_download=True)
+
+    assert calls == [("org/model-id", True)]
+    assert metadata.metadata_known is True
+    assert metadata.is_local_path is False
+    assert metadata.config_path == str(config_path)
+    assert metadata.torch_dtype == "bfloat16"
+    assert metadata.quantization_method == "awq"
+
+
+def test_model_metadata_reads_dtype_alias(tmp_path) -> None:
+    model_dir = _model_dir(tmp_path, {"dtype": "bfloat16"})
+
+    metadata = infer_model_capability_metadata(str(model_dir))
+
+    assert metadata.metadata_known is True
+    assert metadata.torch_dtype == "bfloat16"
+
+
 def test_invalid_block_size_is_rejected() -> None:
     result = validate_managed_candidate(
         _config("none", block_size=0),

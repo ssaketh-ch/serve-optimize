@@ -20,6 +20,7 @@ from .aiconfigurator_bridge import run_aiconfigurator
 from .backend_status import INSTALLATION_PROFILES, check_backend_status, check_installation_profile
 from .backends.factory import MANAGED_BACKEND_CHOICES
 from .benchmark import run_dry_benchmark
+from .branding import LOGO, TAGLINE
 from .campaign_plan import CampaignPlanRequest, write_campaign_plan_artifacts
 from .candidates import generate_candidates
 from .endpoint_benchmark import DEFAULT_ENDPOINT_PROMPT, make_run_id, run_endpoint_benchmark
@@ -54,13 +55,25 @@ from .workloads import load_workload_profile, workload_profile_choices
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if _show_branding(args):
+        Console().print(
+            f"[bold cyan]{LOGO}[/bold cyan]\n[bold]Serve Optimize[/bold] v{__version__}\n{TAGLINE}\n"
+        )
     args.func(args)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="serve-optimize", description="Energy-aware LLM inference configuration optimizer.")
+    parser = argparse.ArgumentParser(
+        prog="serve-optimize",
+        description=f"{LOGO}\n\nServe Optimize\n{TAGLINE}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"serve-optimize {__version__}")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="COMMAND",
+    )
 
     detect = subparsers.add_parser("detect", help="Detect local GPU and MIG hardware.")
     detect.add_argument("--json", action="store_true", help="Emit JSON instead of a readable summary.")
@@ -76,18 +89,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor.set_defaults(func=_cmd_doctor)
 
-    landscape = subparsers.add_parser("landscape", help="Print the related literature and tooling landscape.")
+    landscape = subparsers.add_parser("landscape")
     landscape.add_argument("--json", action="store_true", help="Emit JSON.")
     landscape.set_defaults(func=_cmd_landscape)
 
-    prepare = subparsers.add_parser("prepare-models", help="Download tiny models for functional smoke tests.")
+    prepare = subparsers.add_parser("prepare-models")
     prepare.add_argument("--model", action="append", dest="models", help="Model id to download. Can be passed multiple times.")
     prepare.add_argument("--cache-dir", type=Path, default=Path("data/models"), help="Model cache directory.")
     prepare.add_argument("--model-revision", default=None, help="Optional immutable model revision or commit hash.")
     prepare.add_argument("--json", action="store_true", help="Emit JSON.")
     prepare.set_defaults(func=_cmd_prepare_models)
 
-    aiconfig = subparsers.add_parser("aiconfig", help="Run AIConfigurator support/generate/estimate for a target system.")
+    aiconfig = subparsers.add_parser("aiconfig")
     aiconfig.add_argument("--mode", choices=["support", "generate", "estimate"], default="support")
     aiconfig.add_argument("--model", required=True, help="Hugging Face model id or local model path.")
     aiconfig.add_argument("--system", default="h200_sxm", help="AIConfigurator system name, for example h200_sxm.")
@@ -100,41 +113,48 @@ def _build_parser() -> argparse.ArgumentParser:
     aiconfig.add_argument("--json", action="store_true", help="Emit JSON.")
     aiconfig.set_defaults(func=_cmd_aiconfig)
 
-    candidates = subparsers.add_parser("candidates", help="Generate candidate serving configurations.")
+    candidates = subparsers.add_parser("candidates")
     _add_model_args(candidates)
     _add_goal_arg(candidates)
     candidates.add_argument("--limit", type=int, default=24, help="Maximum number of candidates to print.")
     candidates.add_argument("--json", action="store_true", help="Emit JSON.")
     candidates.set_defaults(func=_cmd_candidates)
 
-    optimize = subparsers.add_parser("optimize", help="Generate, benchmark, and recommend a configuration.")
-    _add_model_args(optimize)
-    _add_goal_arg(optimize)
-    optimize.add_argument("--limit", type=int, default=36, help="Maximum number of candidates to evaluate.")
-    optimize.add_argument(
+    optimize = subparsers.add_parser(
+        "optimize",
+        help="Launch candidate servers, measure them, and recommend the best configuration.",
+    )
+    _add_managed_args(optimize, positional_model=True)
+    optimize.set_defaults(func=_cmd_optimize)
+
+    offline = subparsers.add_parser("offline-benchmark")
+    _add_model_args(offline)
+    _add_goal_arg(offline)
+    offline.add_argument("--limit", type=int, default=36, help="Maximum number of candidates to evaluate.")
+    offline.add_argument(
         "--backend",
         choices=["synthetic", "transformers", "vllm"],
         default="synthetic",
-        help="Benchmark backend to use for optimization.",
+        help="Local benchmark implementation.",
     )
-    optimize.add_argument("--dry-run", action="store_true", help="Use the synthetic benchmark runner.")
-    optimize.add_argument("--trials", type=int, default=1, help="Number of repeated trials for real benchmark backends.")
-    optimize.add_argument("--max-new-tokens", type=int, default=16, help="Generated tokens per prompt for real benchmark backends.")
-    optimize.add_argument("--cache-dir", type=Path, default=Path("data/models"), help="Model cache directory.")
-    optimize.add_argument("--model-revision", default=None, help="Optional immutable model revision or commit hash.")
-    optimize.add_argument("--device-index", type=int, default=0, help="GPU index for inference and power sampling.")
-    optimize.add_argument("--output-dir", type=Path, default=Path("results/synthetic"), help="Directory for JSON artifacts.")
-    optimize.add_argument("--json", action="store_true", help="Emit JSON.")
-    optimize.set_defaults(func=_cmd_optimize)
+    offline.add_argument("--dry-run", action="store_true", help="Use the synthetic benchmark runner.")
+    offline.add_argument("--trials", type=int, default=1, help="Repeated trials for real benchmark backends.")
+    offline.add_argument("--max-new-tokens", type=int, default=16, help="Generated tokens per prompt.")
+    offline.add_argument("--cache-dir", type=Path, default=Path("data/models"), help="Model cache directory.")
+    offline.add_argument("--model-revision", default=None, help="Optional immutable model revision or commit hash.")
+    offline.add_argument("--device-index", type=int, default=0, help="GPU index for inference and power sampling.")
+    offline.add_argument("--output-dir", type=Path, default=Path("results/offline"), help="Artifact directory.")
+    offline.add_argument("--json", action="store_true", help="Emit JSON.")
+    offline.set_defaults(func=_cmd_offline_benchmark)
 
-    benchmark = subparsers.add_parser("benchmark", help="Run the current synthetic benchmark path.")
+    benchmark = subparsers.add_parser("benchmark")
     _add_model_args(benchmark)
     _add_goal_arg(benchmark)
     benchmark.add_argument("--limit", type=int, default=12, help="Maximum number of candidates to benchmark.")
     benchmark.add_argument("--output", type=Path, default=Path("results/synthetic/results.jsonl"), help="JSONL output path.")
     benchmark.set_defaults(func=_cmd_benchmark)
 
-    plan = subparsers.add_parser("plan-from-aic", help="Generate serve and benchmark plans from AIConfigurator CSV output.")
+    plan = subparsers.add_parser("plan-from-aic")
     plan.add_argument("--best-config-csv", type=Path, required=True, help="Path to AIConfigurator best_config_topn.csv.")
     plan.add_argument("--top-k", type=int, default=None, help="Limit to the first K ranked candidates.")
     plan.add_argument("--host", default="127.0.0.1", help="Host for generated vLLM serve plans.")
@@ -144,7 +164,7 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--out", type=Path, default=Path("results/plans"), help="Output root directory.")
     plan.set_defaults(func=_cmd_plan_from_aic)
 
-    run_plan = subparsers.add_parser("run-evaluation-plan", help="Run endpoint benchmarks from generated evaluation plans.")
+    run_plan = subparsers.add_parser("run-evaluation-plan")
     run_plan.add_argument("--plan-dir", type=Path, required=True, help="Directory produced by plan-from-aic.")
     run_plan.add_argument("--out", type=Path, default=Path("results/evaluations"), help="Evaluation output root directory.")
     run_plan.add_argument("--limit-candidates", type=int, default=None, help="Limit the number of candidates to evaluate.")
@@ -161,13 +181,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run_plan.set_defaults(func=_cmd_run_evaluation_plan)
 
     recommend = subparsers.add_parser("recommend", help="Attach to a running endpoint, evaluate candidates, and recommend a measured configuration.")
-    recommend.add_argument("--base-url", required=True, help="Base URL, for example http://127.0.0.1:8080/v1.")
-    recommend.add_argument("--model", required=True, help="Model name or path used for candidate generation and endpoint requests.")
-    recommend.add_argument("--backend", required=True, help="Candidate backend label, for example vllm or sglang.")
-    recommend.add_argument("--system", required=True, help="Target system label for candidate generation, for example local_gpu.")
-    recommend.add_argument("--total-gpus", type=int, required=True, help="Total GPUs for candidate generation inputs.")
-    recommend.add_argument("--isl", type=int, required=True, help="Expected input sequence length.")
-    recommend.add_argument("--osl", type=int, required=True, help="Expected output sequence length.")
+    recommend.add_argument("model", nargs="?", help="Model name or path served by the endpoint.")
+    recommend.add_argument("--model", dest="model_flag", default=None, help=argparse.SUPPRESS)
+    recommend.add_argument("--base-url", default="http://127.0.0.1:8000/v1", help="OpenAI compatible endpoint base URL.")
+    recommend.add_argument("--backend", choices=["vllm", "sglang"], default="vllm", help="Serving backend label.")
+    recommend.add_argument("--system", default="local_gpu", help="Target system label for candidate generation.")
+    recommend.add_argument("--total-gpus", type=int, default=1, help="GPU count used by the endpoint.")
+    recommend.add_argument("--isl", type=int, default=512, help="Expected input token count.")
+    recommend.add_argument("--osl", type=int, default=128, help="Expected output token count.")
     recommend.add_argument("--ttft", type=float, default=None, help="Target TTFT in milliseconds for AIConfigurator candidate generation.")
     recommend.add_argument("--tpot", type=float, default=None, help="Target TPOT in milliseconds for AIConfigurator candidate generation.")
     recommend.add_argument(
@@ -207,45 +228,8 @@ def _build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--out", type=Path, default=Path("results/recommendations"), help="Recommendation output root directory.")
     recommend.set_defaults(func=_cmd_recommend)
 
-    managed = subparsers.add_parser("managed-evaluate", help="Launch, benchmark, and stop candidate servers.")
-    managed.add_argument(
-        "--backend",
-        choices=MANAGED_BACKEND_CHOICES,
-        default="vllm",
-        help="Managed backend to launch. vLLM and SGLang are supported; vLLM remains the default.",
-    )
-    managed.add_argument("--model", required=True, help="Model name or path to serve and benchmark.")
-    managed.add_argument(
-        "--goal",
-        choices=[goal.value for goal in Goal],
-        default=Goal.BALANCED.value,
-        help="Candidate generation goal.",
-    )
-    managed.add_argument("--limit", type=int, default=4, help="Maximum number of managed candidates to evaluate.")
-    managed.add_argument("--trials", type=int, default=1, help="Benchmark trials per launched candidate.")
-    managed.add_argument("--startup-timeout", type=float, default=300.0, help="Seconds to wait for the launched server to become healthy.")
-    managed.add_argument("--cooldown-seconds", type=float, default=5.0, help="Seconds to wait after stopping each candidate server.")
-    managed.add_argument("--host", default="127.0.0.1", help="Host passed to the backend server.")
-    managed.add_argument("--port", type=int, default=None, help="Port passed to the backend server. Omit to allocate one per candidate.")
-    managed.add_argument(
-        "--telemetry",
-        choices=["none", "nvml", "nvidia-smi", "auto"],
-        default="auto",
-        help="Optional host-side telemetry provider during endpoint benchmarks.",
-    )
-    managed.add_argument(
-        "--evidence-db",
-        type=Path,
-        default=DEFAULT_EVIDENCE_DB_PATH,
-        help="SQLite evidence database for measured managed evaluation results.",
-    )
-    managed.add_argument("--no-evidence-write", action="store_true", help="Do not create or write the evidence database.")
-    managed.add_argument("--evidence-freshness-hours", type=float, default=168.0, help="Freshness window for exact measured evidence hits.")
-    managed.add_argument("--dry-run", action="store_true", help="Write a preflight plan without launching servers, health checks, benchmarks, or evidence writes.")
-    managed.add_argument("--resume-from", type=Path, default=None, help="Reuse completed matching managed workload artifacts from an earlier run directory.")
-    _add_workload_args(managed)
-    _add_measurement_quality_args(managed)
-    managed.add_argument("--out", type=Path, default=Path("results/managed"), help="Managed evaluation output root directory.")
+    managed = subparsers.add_parser("managed-evaluate")
+    _add_managed_args(managed, positional_model=False)
     managed.set_defaults(func=_cmd_managed_evaluate)
 
     repeatability = subparsers.add_parser("repeatability", help="Compare managed recommendation repeatability across run directories.")
@@ -291,7 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     campaign_plan.add_argument("--json", action="store_true", help="Emit JSON.")
     campaign_plan.set_defaults(func=_cmd_campaign_plan)
 
-    release_check = subparsers.add_parser("release-check", help="Run local release readiness checks.")
+    release_check = subparsers.add_parser("release-check")
     release_check.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root to inspect.")
     release_check.add_argument("--out", type=Path, default=Path("results/release-check"), help="Output directory.")
     release_check.add_argument("--json", action="store_true", help="Emit JSON.")
@@ -313,9 +297,10 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence_list.add_argument("--limit", type=int, default=20, help="Maximum number of evidence rows to print.")
     evidence_list.set_defaults(func=_cmd_evidence_list)
 
-    endpoint = subparsers.add_parser("endpoint-bench", help="Benchmark an already-running OpenAI-compatible endpoint.")
-    endpoint.add_argument("--base-url", required=True, help="Base URL, for example http://127.0.0.1:8080/v1.")
-    endpoint.add_argument("--model", required=True, help="Model name or path served by the endpoint.")
+    endpoint = subparsers.add_parser("endpoint-bench", help="Benchmark an already running OpenAI compatible endpoint.")
+    endpoint.add_argument("model", nargs="?", help="Model name or path served by the endpoint.")
+    endpoint.add_argument("--model", dest="model_flag", default=None, help=argparse.SUPPRESS)
+    endpoint.add_argument("--base-url", default="http://127.0.0.1:8000/v1", help="OpenAI compatible endpoint base URL.")
     endpoint.add_argument("--concurrency", type=int, default=1, help="Concurrent in-flight requests.")
     endpoint.add_argument("--num-requests", type=int, default=16, help="Total requests to send.")
     endpoint.add_argument("--max-tokens", type=int, default=128, help="Maximum generated tokens per request.")
@@ -349,7 +334,7 @@ def _build_parser() -> argparse.ArgumentParser:
     telemetry_check.add_argument("--out", type=Path, default=Path("results/telemetry_checks"), help="Telemetry check output root directory.")
     telemetry_check.set_defaults(func=_cmd_telemetry_check)
 
-    smoke = subparsers.add_parser("smoke", help="Download tiny models and run repeated functional benchmarks.")
+    smoke = subparsers.add_parser("smoke")
     smoke.add_argument("--model", action="append", dest="models", help="Model id to test. Defaults to two tiny models.")
     smoke.add_argument("--backend", choices=["transformers", "vllm"], default="transformers", help="Functional smoke backend.")
     smoke.add_argument("--trials", type=int, default=2, help="Trials per candidate.")
@@ -377,11 +362,62 @@ def _add_goal_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_managed_args(parser: argparse.ArgumentParser, *, positional_model: bool) -> None:
+    if positional_model:
+        parser.add_argument("model", help="Hugging Face model id or local model path.")
+    else:
+        parser.add_argument("--model", required=True, help="Hugging Face model id or local model path.")
+    parser.add_argument(
+        "--backend",
+        choices=MANAGED_BACKEND_CHOICES,
+        default="vllm",
+        help="Backend to launch. vLLM and SGLang are supported; vLLM is the default.",
+    )
+    parser.add_argument(
+        "--goal",
+        choices=[goal.value for goal in Goal],
+        default=Goal.BALANCED.value,
+        help="Recommendation goal.",
+    )
+    parser.add_argument("--limit", type=int, default=4, help="Maximum candidate configurations to evaluate.")
+    parser.add_argument("--trials", type=int, default=1, help="Measured trials per candidate.")
+    parser.add_argument("--startup-timeout", type=float, default=300.0, help="Server startup timeout in seconds.")
+    parser.add_argument(
+        "--cooldown",
+        "--cooldown-seconds",
+        dest="cooldown_seconds",
+        type=float,
+        default=5.0,
+        help="Cooldown after each candidate in seconds.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Backend server host.")
+    parser.add_argument("--port", type=int, default=None, help="Backend server port. By default, one is allocated.")
+    parser.add_argument(
+        "--telemetry",
+        choices=["none", "nvml", "nvidia-smi", "auto"],
+        default="auto",
+        help="Power telemetry provider.",
+    )
+    parser.add_argument(
+        "--evidence-db",
+        type=Path,
+        default=DEFAULT_EVIDENCE_DB_PATH,
+        help="SQLite database for reusable measured evidence.",
+    )
+    parser.add_argument("--no-evidence-write", action="store_true", help="Disable evidence database writes.")
+    parser.add_argument("--evidence-freshness-hours", type=float, default=168.0, help="Evidence reuse window in hours.")
+    parser.add_argument("--dry-run", action="store_true", help="Write a plan without launching servers.")
+    parser.add_argument("--resume-from", type=Path, default=None, help="Resume matching workloads from an earlier run.")
+    _add_workload_args(parser)
+    _add_measurement_quality_args(parser)
+    parser.add_argument("--out", type=Path, default=Path("results/managed"), help="Managed run output directory.")
+
+
 def _add_workload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--workload-profile",
         choices=workload_profile_choices(),
-        default="default",
+        default="medium",
         help="Synthetic workload profile preset.",
     )
     parser.add_argument("--workload-manifest", type=Path, default=None, help="JSON workload manifest path.")
@@ -403,12 +439,17 @@ def _add_workload_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_measurement_quality_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--warmup-requests", type=int, default=0, help="Successful requests to exclude from measured summary metrics.")
+    parser.add_argument("--warmup-requests", type=int, default=4, help="Successful warmup requests excluded from metrics.")
     parser.add_argument("--steady-state-seconds", type=float, default=None, help="Measured steady state window duration in seconds.")
-    parser.add_argument("--idle-baseline-seconds", type=float, default=0.0, help="Seconds to sample idle power before active requests.")
+    parser.add_argument("--idle-baseline-seconds", type=float, default=3.0, help="Idle power sampling duration in seconds.")
     parser.add_argument("--idle-power-watts", type=float, default=None, help="Known idle power baseline in watts for idle subtracted energy.")
     parser.add_argument("--soak-seconds", type=float, default=None, help="Minimum active request window for longer soak style runs.")
-    parser.add_argument("--stream", action="store_true", help="Use streaming chat completions to measure TTFT and stream chunk TPOT.")
+    parser.add_argument(
+        "--stream",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use streaming responses to measure TTFT and TPOT.",
+    )
 
 
 def _cmd_detect(args: argparse.Namespace) -> None:
@@ -507,6 +548,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> None:
 
 
 def _cmd_endpoint_bench(args: argparse.Namespace) -> None:
+    args.model = _required_model(args)
     _validate_measurement_quality_args(args)
     if args.max_tokens < 1:
         raise SystemExit("--max-tokens must be at least 1.")
@@ -652,6 +694,7 @@ def _cmd_run_evaluation_plan(args: argparse.Namespace) -> None:
 
 
 def _cmd_recommend(args: argparse.Namespace) -> None:
+    args.model = _required_model(args)
     if args.top_k < 1:
         raise SystemExit("--top-k must be at least 1.")
     if args.total_gpus < 1:
@@ -742,7 +785,13 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _cmd_optimize(args: argparse.Namespace) -> None:
+    args.model = _required_model(args)
+    _cmd_managed_evaluate(args)
+
+
 def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
+    args.model = _required_model(args)
     workload_profile = _resolve_workload_profile(args)
     _validate_measurement_quality_args(args)
     try:
@@ -788,7 +837,7 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
             evidence_db_path=args.evidence_db,
             evidence_write=not args.no_evidence_write,
             evidence_freshness_hours=args.evidence_freshness_hours,
-            command=["serve-optimize", "managed-evaluate"],
+            command=["serve-optimize", args.command, args.model],
             workload_profile=workload_profile,
             warmup_requests=args.warmup_requests,
             steady_state_duration_s=args.steady_state_seconds,
@@ -797,6 +846,7 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
             soak_duration_s=args.soak_seconds,
             stream=args.stream,
             resume_from=args.resume_from,
+            allow_remote_model_config_download=True,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -989,6 +1039,7 @@ def _print_managed_recommendation_summary(summary) -> None:
         return
 
     metrics = payload.get("metrics", {}) if isinstance(payload.get("metrics"), dict) else {}
+    baseline = payload.get("baseline_comparison", {}) if isinstance(payload.get("baseline_comparison"), dict) else {}
     command = payload.get("recommended_command") or "n/a"
     summary_path = summary.artifacts.get("recommendation_summary_txt") or summary.recommendation_summary_txt_path or "recommendation_summary.txt"
     print("")
@@ -1001,6 +1052,14 @@ def _print_managed_recommendation_summary(summary) -> None:
     print(f"  avg power: {_format_metric(metrics.get('average_power_w'), ' W', decimals=1)}")
     print(f"  energy/token: {_format_metric(metrics.get('joules_per_token'), ' J/token', decimals=4)}")
     print(f"  efficiency: {_format_metric(metrics.get('tokens_per_watt'), ' tok/W', decimals=1)}")
+    if baseline.get("available") is True:
+        baseline_metrics = baseline.get("metrics", {}) if isinstance(baseline.get("metrics"), dict) else {}
+        throughput = baseline_metrics.get("throughput_tokens_per_sec", {})
+        energy = baseline_metrics.get("joules_per_token", {})
+        print("")
+        print("Change from default baseline:")
+        print(f"  throughput: {_format_change(throughput)}")
+        print(f"  energy/token: {_format_change(energy)}")
     print("")
     print(f"Confidence: {_display_text(payload.get('confidence')).upper()}")
     print(f"Summary: {summary_path}")
@@ -1025,6 +1084,12 @@ def _format_metric(value: object, suffix: str, *, decimals: int) -> str:
     return f"{number:,.{decimals}f}{suffix}"
 
 
+def _format_change(metric: object) -> str:
+    row = metric if isinstance(metric, dict) else {}
+    change = _optional_float(row.get("improvement_percent"))
+    return "n/a" if change is None else f"{change:+.1f}%"
+
+
 def _display_text(value: object) -> str:
     if value is None or value == "":
         return "n/a"
@@ -1036,6 +1101,19 @@ def _optional_float(value: object) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _required_model(args: argparse.Namespace) -> str:
+    model = getattr(args, "model", None) or getattr(args, "model_flag", None)
+    if not model:
+        raise SystemExit("A model is required. Pass it as a positional argument.")
+    return str(model)
+
+
+def _show_branding(args: argparse.Namespace) -> bool:
+    if getattr(args, "json", False) or getattr(args, "quiet", False):
+        return False
+    return getattr(args, "format", "text") != "json"
 
 
 def _cmd_evidence_list(args: argparse.Namespace) -> None:
@@ -1066,7 +1144,7 @@ def _cmd_evidence_list(args: argparse.Namespace) -> None:
         )
 
 
-def _cmd_optimize(args: argparse.Namespace) -> None:
+def _cmd_offline_benchmark(args: argparse.Namespace) -> None:
     if args.limit < 1:
         raise SystemExit("--limit must be at least 1.")
     if args.trials < 1:

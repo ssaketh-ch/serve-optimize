@@ -3,7 +3,8 @@
 ## Core Setup
 
 ```bash
-pip install -e ".[dev]"
+uv venv --python python3 .venv
+uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
 serve-optimize --help
 serve-optimize detect
 serve-optimize doctor
@@ -28,15 +29,8 @@ This does not run inference.
 Start an OpenAI compatible server separately, then run:
 
 ```bash
-serve-optimize recommend \
-  --base-url http://127.0.0.1:8080/v1 \
-  --model /path/to/model \
-  --backend vllm \
-  --system local_gpu \
-  --total-gpus 1 \
-  --isl 512 \
-  --osl 128 \
-  --goal balanced
+serve-optimize recommend /path/to/model \
+  --base-url http://127.0.0.1:8000/v1
 ```
 
 Attach Mode measures the running endpoint. It does not verify its launch command.
@@ -48,14 +42,7 @@ Add `--dry-run` first to write a preflight plan without endpoint health checks o
 ```bash
 # Activate an environment installed from requirements/profiles/vllm.txt
 
-serve-optimize managed-evaluate \
-  --backend vllm \
-  --model /path/to/model \
-  --goal balanced \
-  --limit 1 \
-  --trials 1 \
-  --telemetry auto \
-  --evidence-db results/evidence.sqlite \
+serve-optimize optimize /path/to/model \
   --out results/managed-vllm
 ```
 
@@ -63,16 +50,9 @@ serve-optimize managed-evaluate \
 
 ```bash
 # Activate an environment installed from requirements/profiles/sglang.txt
-source scripts/env_base_runtime.sh
 
-serve-optimize managed-evaluate \
+serve-optimize optimize /path/to/model \
   --backend sglang \
-  --model /path/to/model \
-  --goal balanced \
-  --limit 1 \
-  --trials 1 \
-  --telemetry auto \
-  --evidence-db results/evidence.sqlite \
   --out results/managed-sglang
 ```
 
@@ -83,9 +63,7 @@ Add `--dry-run` to either Managed command to write a preflight plan without laun
 Add a workload profile and SLO guards when you want recommendation eligibility to reflect a specific workload:
 
 ```bash
-serve-optimize managed-evaluate \
-  --backend vllm \
-  --model /path/to/model \
+serve-optimize optimize /path/to/model \
   --workload-profile repeated-prefix \
   --slo-p95-latency-ms 900 \
   --slo-max-failed-request-rate 0.02 \
@@ -97,9 +75,7 @@ Built in workload profiles are `default`, `short`, `medium`, `long`, `decode-hea
 For measurement quality, add warmup, steady state, and idle baseline controls:
 
 ```bash
-serve-optimize managed-evaluate \
-  --backend vllm \
-  --model /path/to/model \
+serve-optimize optimize /path/to/model \
   --warmup-requests 8 \
   --steady-state-seconds 30 \
   --soak-seconds 120 \
@@ -127,9 +103,7 @@ Runtime or command drift blocks exact reuse.
 Resume a managed run from completed matching workload artifacts:
 
 ```bash
-serve-optimize managed-evaluate \
-  --backend vllm \
-  --model /path/to/model \
+serve-optimize optimize /path/to/model \
   --resume-from results/managed-vllm/managed-run-id
 ```
 

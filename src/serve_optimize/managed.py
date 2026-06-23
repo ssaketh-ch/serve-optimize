@@ -232,6 +232,7 @@ def run_managed_evaluation(
     soak_duration_s: float | None = None,
     stream: bool = False,
     resume_from: Path | None = None,
+    allow_remote_model_config_download: bool = False,
 ) -> ManagedRunSummary:
     backend = normalize_managed_backend_name(backend)
     _validate_run_inputs(backend, limit, trials, startup_timeout_s, cooldown_s)
@@ -350,7 +351,10 @@ def run_managed_evaluation(
             evidence_store.close()
             evidence_store = None
 
-    model_metadata = infer_model_capability_metadata(model)
+    model_metadata = infer_model_capability_metadata(
+        model,
+        allow_remote_download=allow_remote_model_config_download,
+    )
     candidate_generation = _provided_candidate_generation()
     if candidate_provider is not None:
         candidate_pool = candidate_provider()
@@ -2015,6 +2019,7 @@ def _managed_serve_candidate(
         raw={
             "candidate_source": source,
             "managed_candidate_source": extra.get("candidate_source"),
+            "backend_defaults": extra.get("backend_defaults"),
             "dtype": config.dtype,
             "quantization": config.quantization,
             "max_context_tokens": config.max_context_tokens,
@@ -2105,14 +2110,28 @@ def _managed_measured_metrics(metrics: dict[str, Any]) -> dict[str, float | int 
 
 
 def _managed_telemetry_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    active_tokens_per_watt = _optional_float(metrics.get("active_tokens_per_watt"))
+    gross_tokens_per_watt = _optional_float(metrics.get("tokens_per_watt"))
+    active_joules_per_token = _optional_float(metrics.get("active_joules_per_token"))
+    gross_joules_per_token = _optional_float(metrics.get("joules_per_token"))
     return {
         "average_power_watts": _optional_float(metrics.get("average_power_w")),
-        "joules_per_token": _optional_float(metrics.get("active_joules_per_token")) or _optional_float(metrics.get("joules_per_token")),
-        "tokens_per_second_per_watt": _optional_float(metrics.get("tokens_per_watt")),
+        "joules_per_token": (
+            active_joules_per_token if active_joules_per_token is not None else gross_joules_per_token
+        ),
+        "tokens_per_second_per_watt": (
+            active_tokens_per_watt if active_tokens_per_watt is not None else gross_tokens_per_watt
+        ),
+        "active_joules_per_token": active_joules_per_token,
+        "gross_joules_per_token": gross_joules_per_token,
+        "active_tokens_per_second_per_watt": active_tokens_per_watt,
+        "gross_tokens_per_second_per_watt": gross_tokens_per_watt,
+        "energy_accounting": "idle_subtracted" if active_joules_per_token is not None else "gross",
         "temperature_rise_c": _optional_float(metrics.get("temperature_rise_c")),
         "temperature_slope_c_per_min": _optional_float(metrics.get("temperature_slope_c_per_min")),
         "thermal_stability_classification": _optional_str(metrics.get("thermal_stability_classification")),
-        "telemetry_quality": "good" if metrics.get("average_power_w") is not None else "unavailable",
+        "telemetry_quality": _optional_str(metrics.get("telemetry_quality"))
+        or ("limited" if metrics.get("average_power_w") is not None else "unavailable"),
     }
 
 
@@ -2210,7 +2229,7 @@ def _seconds_from_ms(value: object) -> float | None:
     return latency_ms / 1000.0 if latency_ms is not None else None
 
 
-def _summary_metrics(summary: object) -> dict[str, float | int | None]:
+def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
     row = to_dict(summary)
     if not isinstance(row, dict):
         row = {}
@@ -2227,10 +2246,16 @@ def _summary_metrics(summary: object) -> dict[str, float | int | None]:
         "p95_latency_ms": _latency_s_to_ms(row.get("p95_latency_s")),
         "p99_latency_ms": _latency_s_to_ms(row.get("p99_latency_s")),
         "average_power_w": _optional_float(row.get("average_power_watts")),
-        "joules_per_token": _optional_float(row.get("active_joules_per_token")) or _optional_float(row.get("joules_per_token")),
+        "joules_per_token": (
+            _optional_float(row.get("active_joules_per_token"))
+            if row.get("active_joules_per_token") is not None
+            else _optional_float(row.get("joules_per_token"))
+        ),
         "active_joules_per_token": _optional_float(row.get("active_joules_per_token")),
         "stability_classification": _optional_str(row.get("stability_classification")),
         "tokens_per_watt": _optional_float(row.get("tokens_per_second_per_watt")),
+        "active_tokens_per_watt": _optional_float(row.get("active_tokens_per_second_per_watt")),
+        "telemetry_quality": _optional_str(row.get("telemetry_quality")) or "unavailable",
         "total_requests": (
             _optional_int(row.get("measured_requests"))
             if row.get("measured_requests") is not None
@@ -2271,7 +2296,7 @@ def _stable_rates_from_request_latencies(row: dict[str, Any]) -> dict[str, float
     }
 
 
-def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int | None]:
+def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int | str | None]:
     raw_json = measurement.get("raw_json") if isinstance(measurement.get("raw_json"), dict) else {}
     raw_summary = raw_json.get("summary") if isinstance(raw_json.get("summary"), dict) else {}
     throughput = _optional_float(measurement.get("throughput_tokens_per_sec"))
@@ -2303,9 +2328,27 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
         "temperature_slope_c_per_min": _optional_float(raw_summary.get("temperature_slope_c_per_min")),
         "thermal_stability_classification": _optional_str(raw_summary.get("thermal_stability_classification")),
         "tokens_per_watt": _optional_float(measurement.get("tokens_per_watt")),
-        "total_requests": _optional_int(raw_summary.get("total_requests")),
-        "successful_requests": _optional_int(raw_summary.get("successful_requests")),
-        "failed_requests": _optional_int(raw_summary.get("failed_requests")),
+        "active_tokens_per_watt": _optional_float(raw_summary.get("active_tokens_per_second_per_watt")),
+        "telemetry_quality": (
+            _optional_str(raw_summary.get("telemetry_quality"))
+            or _optional_str(measurement.get("confidence"))
+            or "unavailable"
+        ),
+        "total_requests": (
+            _optional_int(raw_summary.get("measured_requests"))
+            if raw_summary.get("measured_requests") is not None
+            else _optional_int(raw_summary.get("total_requests"))
+        ),
+        "successful_requests": (
+            _optional_int(raw_summary.get("measured_successful_requests"))
+            if raw_summary.get("measured_successful_requests") is not None
+            else _optional_int(raw_summary.get("successful_requests"))
+        ),
+        "failed_requests": (
+            _optional_int(raw_summary.get("measured_failed_requests"))
+            if raw_summary.get("measured_failed_requests") is not None
+            else _optional_int(raw_summary.get("failed_requests"))
+        ),
     }
 
 
@@ -2425,11 +2468,11 @@ def serving_config_to_workload_config(
     extra = dict(config.extra or {})
     profile = _workload_profile_payload(extra.get("workload_profile"))
     concurrency = _positive_int(
-        extra.get("workload_concurrency") or profile.get("concurrency"),
+        profile.get("concurrency") or extra.get("workload_concurrency"),
         default=max(1, config.max_batch_size),
     )
     max_new_tokens = _positive_int(
-        extra.get("max_new_tokens") or extra.get("output_length") or profile.get("max_new_tokens") or profile.get("output_tokens"),
+        profile.get("max_new_tokens") or profile.get("output_tokens") or extra.get("max_new_tokens") or extra.get("output_length"),
         default=128,
     )
     num_requests = _positive_int(extra.get("num_requests") or profile.get("num_requests"), default=max(128, 2 * concurrency))

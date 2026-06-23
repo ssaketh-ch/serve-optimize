@@ -22,14 +22,35 @@ if [[ -e "$target" ]]; then
   exit 2
 fi
 
-python -m venv "$target"
-"$target/bin/python" -m pip install --upgrade "pip==26.1.2"
-cd "$repo_root"
-"$target/bin/python" -m pip install -r "$requirements_file"
-
-if [[ "$profile" == "sglang" ]]; then
-  source "$repo_root/scripts/env_base_runtime.sh"
+if [[ "$profile" == "vllm" || "$profile" == "sglang" ]]; then
+  if ! "${PYTHON:-python3}" - <<'PY'
+import pathlib
+import os
+import sysconfig
+paths = [pathlib.Path(sysconfig.get_path("include"))]
+paths.extend(pathlib.Path(item) for item in os.environ.get("C_INCLUDE_PATH", "").split(os.pathsep) if item)
+raise SystemExit(0 if any((path / "Python.h").is_file() for path in paths) else 1)
+PY
+  then
+    echo "Python development headers are required. On Ubuntu, install python3-dev and build-essential." >&2
+    exit 2
+  fi
 fi
 
-"$target/bin/python" -m pip check
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is required. Install it from https://docs.astral.sh/uv/." >&2
+  exit 2
+fi
+
+uv venv --python "${PYTHON:-python3}" "$target"
+cd "$repo_root"
+if [[ "$profile" == "vllm" ]]; then
+  uv pip install --python "$target/bin/python" --torch-backend=auto -r "$requirements_file"
+elif [[ "$profile" == "sglang" ]]; then
+  uv pip install --python "$target/bin/python" -r "$requirements_file"
+else
+  uv pip install --python "$target/bin/python" -r "$requirements_file"
+fi
+
+uv pip check --python "$target/bin/python"
 "$target/bin/serve-optimize" doctor --profile "$profile"

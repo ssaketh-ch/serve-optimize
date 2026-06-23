@@ -9,7 +9,7 @@ ruff check .
 python -m build --no-isolation --outdir /tmp/serve-optimize-dist .
 python -m json.tool feature_list.json
 serve-optimize --help
-serve-optimize managed-evaluate --help
+serve-optimize optimize --help
 serve-optimize validate-campaign --help
 serve-optimize campaign-plan --help
 serve-optimize release-check --help
@@ -261,35 +261,44 @@ Recorded on 2026-06-21:
 * required CLI help checks passed
 * release check passed with 51 checks
 
-## Validated Environments
+## Security audit
+
+Latest dependency audit results are recorded in [Security Notes](security.md). The default project environment reported no known vulnerabilities. Optional backend profile advisories remain bounded to upstream vLLM, SGLang, and torch pins with no compatible fixed backend release available at the time of validation.
+
+## Current Validation Environment
+
+Recorded on 2026-06-23:
 
 ### vLLM
 
-* profile: `requirements/profiles/vllm.txt`
-* vLLM: `0.10.0`
-* Torch: `2.7.1+cu126`
-* CUDA runtime: `12.6`
-* Python: `3.10.20`
+* profile: requirements/profiles/vllm.txt
+* vLLM: 0.23.0
+* Torch: 2.11.0+cu130 in the clean profile environment
+* Transformers: 5.9.0
+* Python: 3.12.3
+* GPU: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 96 GB
+* NVIDIA driver: 595.71.05
+* CUDA driver capability and toolkit: 13.2
+* profile doctor: passed
+* live smoke: Qwen/Qwen3-0.6B, 2 candidates, short streaming workload, selected true backend default
+* measured smoke result: 8,306 total tokens/s, p95 latency 137.9 ms, active energy 0.015457 J/token, good telemetry, 307 TTFT and TPOT samples
 
 ### SGLang
 
-* profile: `requirements/profiles/sglang.txt`
-* SGLang: `0.5.10.post1`
-* Torch: `2.9.1+cu128`
-* CUDA runtime: `12.8`
-* Python: `3.10.20`
-* GCC Toolset: `12.2.1`
-
-SGLang verification requires:
-
-```bash
-source scripts/env_base_runtime.sh
-```
+* profile: requirements/profiles/sglang.txt
+* SGLang: 0.5.13.post1
+* Torch: 2.11.0
+* Transformers: 5.8.1
+* Python: 3.12.3
+* clean dependency resolution: passed
+* profile doctor: passed
+* live smoke: Qwen/Qwen3-0.6B, baseline candidate, short streaming workload, selected true backend default
+* measured smoke result: 8,561 total tokens/s, p95 latency 127.8 ms, active energy 0.014066 J/token, good telemetry, 159 TTFT and TPOT samples
 
 ## Known Verification Limits
 
-* Latest vLLM is not validated.
 * Installation is not yet tested across a multi platform release matrix.
+* SGLang runtime validation is a single baseline smoke on Qwen/Qwen3-0.6B, not a broad option matrix.
 * TensorRT LLM is not implemented.
 * Prefill and decode phase attribution is not verified.
 * Broad production workload and SLO coverage is not verified.

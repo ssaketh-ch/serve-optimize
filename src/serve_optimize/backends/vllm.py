@@ -155,7 +155,7 @@ class VllmAdapter:
         self._launched_pgids: set[int] = set()
 
     def is_available(self) -> bool:
-        return shutil.which("vllm") is not None
+        return _vllm_sibling_executable() is not None or shutil.which("vllm") is not None
 
     def build_launch_plan(self, config: ServingConfig) -> LaunchPlan:
         command = render_vllm_launch(config, capabilities=self.argument_capabilities()).command
@@ -311,7 +311,7 @@ class VllmAdapter:
         capabilities = self.argument_capabilities()
         return {
             "adapter": self.name,
-            "executable": shutil.which("vllm"),
+            "executable": _vllm_sibling_executable() or shutil.which("vllm"),
             "version": _installed_version("vllm"),
             "argument_detection_status": capabilities.detection_status,
             "argument_capabilities_help_hash": capabilities.help_hash,
@@ -340,7 +340,7 @@ def validate_port_available(host: str, port: int) -> None:
 
 
 def detect_vllm_argument_capabilities(*, executable: str | None = None, timeout_s: float = 30.0) -> VLLMArgumentCapabilities:
-    resolved = executable or shutil.which("vllm")
+    resolved = executable or _vllm_sibling_executable() or shutil.which("vllm")
     cache_key = resolved or "vllm"
     return _detect_vllm_argument_capabilities_cached(cache_key, timeout_s)
 
@@ -447,6 +447,35 @@ def render_vllm_launch(
     port: int | None = None,
     capabilities: VLLMArgumentCapabilities | None = None,
 ) -> VLLMRenderedLaunch:
+    if (config.extra or {}).get("backend_defaults") is True:
+        command = [_vllm_sibling_executable() or "vllm", "serve", config.model_id]
+        if host is not None:
+            command.extend(["--host", host])
+        if port is not None:
+            command.extend(["--port", str(port)])
+        return VLLMRenderedLaunch(
+            command=command,
+            canonical_config=replace(
+                config,
+                block_size=None,
+                kv_cache_dtype=None,
+                enforce_eager=None,
+                max_num_batched_tokens=None,
+                enable_chunked_prefill=None,
+                max_cudagraph_capture_size=None,
+                enable_prefix_caching=None,
+            ),
+            rendered_fields={"backend_defaults": True},
+            omitted_fields={
+                "dtype": "backend default",
+                "quantization": "backend default",
+                "max_model_len": "backend default",
+                "gpu_memory_utilization": "backend default",
+                "max_num_seqs": "backend default",
+                "tensor_parallel_size": "backend default",
+            },
+            capabilities_help_hash=capabilities.help_hash if capabilities is not None else None,
+        )
     rendered_fields: dict[str, object] = {
         "dtype": config.dtype,
         "quantization": config.quantization,
@@ -468,7 +497,7 @@ def render_vllm_launch(
         "enable_prefix_caching": None,
     }
     command = [
-        "vllm",
+        _vllm_sibling_executable() or "vllm",
         "serve",
         config.model_id,
         "--dtype",
@@ -597,6 +626,11 @@ def vllm_command(
     capabilities: VLLMArgumentCapabilities | None = None,
 ) -> list[str]:
     return render_vllm_launch(config, host=host, port=port, capabilities=capabilities).command
+
+
+def _vllm_sibling_executable() -> str | None:
+    path = Path(sys.executable).with_name("vllm")
+    return str(path) if path.is_file() and os.access(path, os.X_OK) else None
 
 
 def _supports_flag(capabilities: VLLMArgumentCapabilities | None, flag: str) -> bool:

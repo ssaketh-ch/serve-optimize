@@ -174,6 +174,7 @@ def test_summary_idle_subtraction_fields() -> None:
     assert summary.active_power_watts == pytest.approx(20.0)
     assert summary.active_energy_joules == pytest.approx(40.0)
     assert summary.active_joules_per_token == pytest.approx(40.0 / 70.0)
+    assert summary.active_tokens_per_second_per_watt == pytest.approx(35.0 / 20.0)
     assert summary.measurement_quality["energy_accounting"] == "idle_subtracted"
 
 

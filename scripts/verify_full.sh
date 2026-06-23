@@ -7,13 +7,17 @@ trap 'rm -rf "$DIST_DIR"' EXIT
 python -m compileall -q src tests
 pytest -q
 ruff check .
-python -m build --no-isolation --outdir "$DIST_DIR" .
+if command -v uv >/dev/null 2>&1; then
+    uv build --wheel --out-dir "$DIST_DIR"
+else
+    python -m build --no-isolation --outdir "$DIST_DIR" .
+fi
 WHEEL_PATH="$(find "$DIST_DIR" -maxdepth 1 -name 'serve_optimize-*.whl' -print -quit)"
 python -m zipfile -e "$WHEEL_PATH" "$DIST_DIR/site"
 PYTHONPATH="$DIST_DIR/site" python -m serve_optimize --version
 python -m json.tool feature_list.json >/tmp/serve_optimize_feature_list.json
 serve-optimize --help >/tmp/serve_optimize_help.txt
-serve-optimize managed-evaluate --help >/tmp/serve_optimize_managed_help.txt
+serve-optimize optimize --help >/tmp/serve_optimize_optimize_help.txt
 serve-optimize validate-campaign --help >/tmp/serve_optimize_campaign_help.txt
 serve-optimize campaign-plan --help >/tmp/serve_optimize_campaign_plan_help.txt
 serve-optimize release-check --help >/tmp/serve_optimize_release_check_help.txt

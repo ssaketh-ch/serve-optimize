@@ -672,6 +672,7 @@ class EndpointBenchmarkSummary:
     joules_per_token: float | None = None
     active_joules_per_token: float | None = None
     tokens_per_second_per_watt: float | None = None
+    active_tokens_per_second_per_watt: float | None = None
     warmup_requests: int = 0
     steady_state_requests: int | None = None
     steady_state_duration_s: float | None = None

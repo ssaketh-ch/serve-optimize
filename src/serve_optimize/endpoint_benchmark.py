@@ -341,6 +341,11 @@ def summarize_requests(
     active_power = _active_power(telemetry_summary.average_power_watts, idle_power_watts)
     active_energy = active_power * measurement_duration if active_power is not None and measurement_duration is not None else None
     active_joules_per_token = active_energy / total_tokens if active_energy is not None and total_tokens > 0 else None
+    active_tokens_per_watt = (
+        total_tokens / measurement_duration / active_power
+        if active_power is not None and active_power > 0 and measurement_duration is not None and measurement_duration > 0
+        else None
+    )
     measurement_quality = {
         "schema_version": "measurement-quality/v1",
         "warmup_requests": warmup_requests,
@@ -404,6 +409,7 @@ def summarize_requests(
         joules_per_token=telemetry_summary.joules_per_token,
         active_joules_per_token=_round_or_none(active_joules_per_token),
         tokens_per_second_per_watt=telemetry_summary.tokens_per_second_per_watt,
+        active_tokens_per_second_per_watt=_round_or_none(active_tokens_per_watt),
         warmup_requests=warmup_requests,
         steady_state_requests=len(measured_successful),
         steady_state_duration_s=_round_or_none(measurement_duration),
@@ -526,6 +532,13 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         active_energy_joules=sum([summary.active_energy_joules for summary in summaries if summary.active_energy_joules is not None]) or None,
         active_joules_per_token=_mean(metric_values["active_joules_per_token"]),
         tokens_per_second_per_watt=_mean([_float(summary.tokens_per_second_per_watt) for summary in summaries if _float(summary.tokens_per_second_per_watt) is not None]),
+        active_tokens_per_second_per_watt=_mean(
+            [
+                _float(summary.active_tokens_per_second_per_watt)
+                for summary in summaries
+                if _float(summary.active_tokens_per_second_per_watt) is not None
+            ]
+        ),
         temperature_rise_c=_mean([_float(summary.temperature_rise_c) for summary in summaries if _float(summary.temperature_rise_c) is not None]),
         temperature_slope_c_per_min=_mean([_float(summary.temperature_slope_c_per_min) for summary in summaries if _float(summary.temperature_slope_c_per_min) is not None]),
         thermal_stability_classification=_aggregate_thermal_classification(summaries),

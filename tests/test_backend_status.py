@@ -14,10 +14,10 @@ def test_installation_profiles_are_explicit() -> None:
 def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.10.0",
-        "torch": "2.7.1",
-        "transformers": "5.3.0",
-        "huggingface-hub": "0.36.2",
+        "vllm": "0.23.0",
+        "torch": "2.11.0",
+        "transformers": "5.12.1",
+        "huggingface-hub": "1.17.0",
         "nvidia-ml-py": "13.610.43",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
@@ -27,17 +27,35 @@ def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
     transformers = next(status for status in statuses if status.name == "transformers")
 
     assert transformers.available is False
-    assert transformers.version == "5.3.0"
-    assert transformers.reason == "expected 4.57.6"
+    assert transformers.version == "5.12.1"
+    assert transformers.reason == "expected 5.9.0"
 
 
-def test_vllm_profile_does_not_accept_command_from_ambient_path(monkeypatch, tmp_path) -> None:
+def test_vllm_profile_accepts_torch_cuda_local_version(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.10.0",
-        "torch": "2.7.1",
-        "transformers": "4.57.6",
-        "huggingface-hub": "0.36.2",
+        "vllm": "0.23.0",
+        "torch": "2.11.0+cu129",
+        "transformers": "5.9.0",
+        "huggingface-hub": "1.17.0",
+        "nvidia-ml-py": "13.610.43",
+    }
+    monkeypatch.setattr(metadata, "version", lambda name: versions[name])
+    monkeypatch.setattr("serve_optimize.backend_status.shutil.which", lambda command: f"/env/bin/{command}")
+    monkeypatch.setattr("serve_optimize.backend_status._python_headers_status", lambda: _ok_status("python-headers"))
+
+    statuses = check_installation_profile("vllm")
+
+    assert all(status.available for status in statuses)
+
+
+def test_vllm_profile_accepts_command_from_active_path(monkeypatch, tmp_path) -> None:
+    versions = {
+        "serve-optimize": "0.1.0",
+        "vllm": "0.23.0",
+        "torch": "2.11.0",
+        "transformers": "5.9.0",
+        "huggingface-hub": "1.17.0",
         "nvidia-ml-py": "13.610.43",
     }
     python = tmp_path / "profile" / "bin" / "python"
@@ -53,29 +71,41 @@ def test_vllm_profile_does_not_accept_command_from_ambient_path(monkeypatch, tmp
     statuses = check_installation_profile("vllm")
     command = next(status for status in statuses if status.name == "cmd:vllm")
 
-    assert command.available is False
-    assert command.reason == f"not installed beside {python}"
+    assert command.available is True
+    assert command.command == "/ambient/bin/vllm"
 
 
-def test_sglang_profile_requires_toolset_and_cuda_helper(monkeypatch) -> None:
+def test_sglang_profile_checks_current_runtime_without_host_specific_toolchain(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "sglang": "0.5.10.post1",
-        "sglang-kernel": "0.4.1",
-        "torch": "2.9.1",
-        "transformers": "5.3.0",
-        "huggingface-hub": "1.19.0",
+        "sglang": "0.5.13.post1",
+        "flash-attn-4": "4.0.0b18",
+        "sglang-kernel": "0.4.3",
+        "torch": "2.11.0",
+        "transformers": "5.8.1",
+        "huggingface-hub": "1.17.0",
         "nvidia-ml-py": "13.610.43",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
     monkeypatch.setattr("serve_optimize.backend_status._sglang_runtime_status", lambda: _ok_status("sglang-runtime"))
+    monkeypatch.setattr("serve_optimize.backend_status._python_headers_status", lambda: _ok_status("python-headers"))
     monkeypatch.setattr("serve_optimize.backend_status.shutil.which", lambda command: f"/usr/bin/{command}")
-    monkeypatch.delenv("CUDA_HOME", raising=False)
-
     statuses = check_installation_profile("sglang")
 
-    assert next(status for status in statuses if status.name == "compiler:gcc").available is False
-    assert next(status for status in statuses if status.name == "cuda-toolkit").available is False
+    assert all(status.available for status in statuses)
+    assert next(status for status in statuses if status.name == "compiler:gcc").available is True
+    assert not any(status.name == "cuda-toolkit" for status in statuses)
+
+
+def test_backend_profile_reports_missing_python_headers(monkeypatch) -> None:
+    monkeypatch.setattr("serve_optimize.backend_status.sysconfig.get_path", lambda _name: "/missing/include")
+
+    from serve_optimize.backend_status import _python_headers_status
+
+    status = _python_headers_status()
+
+    assert status.available is False
+    assert "Python.h" in str(status.reason)
 
 
 def test_doctor_profile_exits_when_requirement_is_missing(monkeypatch, capsys) -> None:

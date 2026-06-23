@@ -9,7 +9,15 @@ from typing import Any
 
 from .schemas import RecommendationResult, ServingConfig
 
-SUMMARY_SCHEMA_VERSION = "recommendation-summary/v1"
+SUMMARY_SCHEMA_VERSION = "recommendation-summary/v2"
+
+_BASELINE_METRICS = {
+    "throughput_tokens_per_sec": ("total_tokens_s", True),
+    "p95_latency_ms": ("p95_latency_s", False),
+    "average_power_w": ("average_power_watts", False),
+    "joules_per_token": ("joules_per_token", False),
+    "tokens_per_watt": ("tokens_per_second_per_watt", True),
+}
 
 
 def write_recommendation_summary_artifacts(
@@ -55,6 +63,7 @@ def build_recommendation_summary(
     selected = selected_summary(recommendation, selected_config)
     metrics = metrics_summary(recommendation)
     fidelity = fidelity_summary(recommendation)
+    baseline = baseline_comparison(recommendation)
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": status,
@@ -65,6 +74,7 @@ def build_recommendation_summary(
         "recommended_command": command,
         "selected": selected,
         "metrics": metrics,
+        "baseline_comparison": baseline,
         "evaluated_set_fidelity": fidelity,
         "runtime_environment": runtime_environment or {},
         "selected_runtime_fingerprint": selected_runtime_fingerprint,
@@ -83,6 +93,10 @@ def build_recommendation_summary(
 def recommended_command(config: ServingConfig | None) -> str:
     if config is None:
         return "n/a"
+    if (config.extra or {}).get("backend_defaults") is True:
+        if config.backend == "sglang":
+            return shlex.join(["python", "-m", "sglang.launch_server", "--model-path", config.model_id])
+        return shlex.join(["vllm", "serve", config.model_id])
     if config.backend == "sglang":
         command = [
             "python",
@@ -149,8 +163,16 @@ def selected_summary(recommendation: RecommendationResult, config: ServingConfig
         "max_num_seqs": config.max_batch_size if config else None,
         "tensor_parallel_size": config.tensor_parallelism if config else None,
         "benchmark_concurrency": _optional_int(extra.get("workload_concurrency")) if config else None,
+        "backend_defaults": extra.get("backend_defaults") is True if config else False,
     }
     if config is not None:
+        if extra.get("backend_defaults") is True:
+            selected["dtype"] = "backend default"
+            selected["quantization"] = "backend default"
+            selected["max_model_len"] = None
+            selected["gpu_memory_utilization"] = None
+            selected["max_num_seqs"] = None
+            selected["tensor_parallel_size"] = None
         if config.backend != "vllm":
             selected.pop("gpu_memory_utilization", None)
         profile = extra.get("workload_profile")
@@ -176,6 +198,60 @@ def metrics_summary(recommendation: RecommendationResult) -> dict[str, Any]:
         "joules_per_token": _optional_float(telemetry.get("joules_per_token")),
         "tokens_per_watt": _optional_float(telemetry.get("tokens_per_second_per_watt")),
         "failed_requests": _optional_int(measured.get("failed_requests")),
+    }
+
+
+def baseline_comparison(recommendation: RecommendationResult) -> dict[str, Any]:
+    selected_id = recommendation.recommended_candidate_id
+    selected = _candidate_row(recommendation.candidate_table, selected_id)
+    baseline = next(
+        (
+            row
+            for row in recommendation.candidate_table
+            if row.get("candidate_source") == "safe_baseline"
+        ),
+        None,
+    )
+    if selected is None:
+        return {
+            "available": False,
+            "reason": "No selected candidate measurement was available.",
+            "baseline_candidate_id": _text(baseline.get("candidate_id")) if baseline else None,
+            "selected_candidate_id": selected_id,
+            "metrics": {},
+        }
+    if baseline is None:
+        return {
+            "available": False,
+            "reason": "The safe baseline did not produce a recommendable measurement.",
+            "baseline_candidate_id": None,
+            "selected_candidate_id": selected_id,
+            "metrics": {},
+        }
+
+    comparisons = {}
+    for name, (field, higher_is_better) in _BASELINE_METRICS.items():
+        baseline_value = _optional_float(baseline.get(field))
+        selected_value = _optional_float(selected.get(field))
+        if name == "p95_latency_ms":
+            baseline_value = baseline_value * 1000.0 if baseline_value is not None else None
+            selected_value = selected_value * 1000.0 if selected_value is not None else None
+        comparisons[name] = {
+            "baseline": baseline_value,
+            "selected": selected_value,
+            "improvement_percent": _improvement_percent(
+                baseline_value,
+                selected_value,
+                higher_is_better=higher_is_better,
+            ),
+        }
+    return {
+        "available": True,
+        "reason": None,
+        "baseline_candidate_id": _text(baseline.get("candidate_id")),
+        "selected_candidate_id": selected_id,
+        "selected_is_baseline": selected_id == baseline.get("candidate_id"),
+        "metrics": comparisons,
     }
 
 
@@ -223,6 +299,7 @@ def format_recommendation_summary_text(payload: dict[str, Any]) -> str:
     selected = _dict(payload.get("selected"))
     metrics = _dict(payload.get("metrics"))
     fidelity = _dict(payload.get("evaluated_set_fidelity"))
+    baseline = _dict(payload.get("baseline_comparison"))
     lines = [
         "=" * 60,
         "Serve Optimize Recommendation",
@@ -269,6 +346,13 @@ def format_recommendation_summary_text(payload: dict[str, Any]) -> str:
                 f"  average_power: {_metric(metrics.get('average_power_w'), ' W')}",
                 f"  joules_per_token: {_metric(metrics.get('joules_per_token'), '')}",
                 f"  tokens_per_watt: {_metric(metrics.get('tokens_per_watt'), '')}",
+                "",
+                "Default baseline comparison:",
+            ]
+        )
+        lines.extend(_baseline_comparison_lines(baseline))
+        lines.extend(
+            [
                 "",
                 "Evaluated-set fidelity:",
                 f"  selected_rank: {_display(fidelity.get('selected_rank'))}",
@@ -320,6 +404,25 @@ def _selected_optional_lines(selected: dict[str, Any]) -> list[str]:
     return [f"  {key}: {_display(selected.get(key))}" for key in keys if key in selected]
 
 
+def _baseline_comparison_lines(comparison: dict[str, Any]) -> list[str]:
+    if comparison.get("available") is not True:
+        return [f"  unavailable: {_display(comparison.get('reason'))}"]
+    metrics = _dict(comparison.get("metrics"))
+    lines = [
+        f"  baseline_candidate: {_display(comparison.get('baseline_candidate_id'))}",
+        f"  selected_is_baseline: {_display(comparison.get('selected_is_baseline'))}",
+    ]
+    for name in _BASELINE_METRICS:
+        metric = _dict(metrics.get(name))
+        change = _optional_float(metric.get("improvement_percent"))
+        change_text = "n/a" if change is None else f"{change:+.2f}%"
+        lines.append(
+            f"  {name}: {change_text} "
+            f"(baseline {_display(metric.get('baseline'))}, selected {_display(metric.get('selected'))})"
+        )
+    return lines
+
+
 def _text(value: object) -> str:
     if value is None or value == "":
         return "n/a"
@@ -363,6 +466,24 @@ def _optional_int(value: object) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _candidate_row(rows: list[dict[str, Any]], candidate_id: str | None) -> dict[str, Any] | None:
+    if candidate_id is None:
+        return None
+    return next((row for row in rows if row.get("candidate_id") == candidate_id), None)
+
+
+def _improvement_percent(
+    baseline: float | None,
+    selected: float | None,
+    *,
+    higher_is_better: bool,
+) -> float | None:
+    if baseline is None or selected is None or baseline == 0:
+        return None
+    delta = selected - baseline if higher_is_better else baseline - selected
+    return round(delta / abs(baseline) * 100.0, 6)
 
 
 def _dict(value: object) -> dict[str, Any]:

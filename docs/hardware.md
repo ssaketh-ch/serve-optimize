@@ -18,7 +18,7 @@ Missing telemetry fields are capability limitations, not zero values.
 
 Managed Mode requires a compatible NVIDIA GPU, a supported backend runtime, and an OpenAI compatible serving endpoint.
 
-The validated backend stacks are listed in [Support Matrix](support_matrix.md). SGLang uses GCC Toolset `12.2.1` through `scripts/env_base_runtime.sh` when local compilation needs it.
+The validated backend stacks are listed in [Support Matrix](support_matrix.md). Backend wheel environments do not require a repository specific compiler path.
 
 ## MIG
 
@@ -40,7 +40,7 @@ For any new NVIDIA host:
 2. Run `serve-optimize detect`.
 3. Run `serve-optimize telemetry-check --telemetry auto --duration 5`.
 4. Install backend profiles only for the backends you plan to run.
-5. Run `serve-optimize managed-evaluate --dry-run` before measured runs.
+5. Run `serve-optimize optimize MODEL --dry-run` before measured runs.
 6. Collect fresh runtime fingerprinted evidence on the new host.
 7. Validate repeatability with `serve-optimize validate-campaign`.
 

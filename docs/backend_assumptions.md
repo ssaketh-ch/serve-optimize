@@ -43,11 +43,7 @@ Detection failure does not imply optional flag support.
 
 SGLang supports the common managed fields plus capability detected memory fraction, request capacity, compatible AWQ or GPTQ quantization, chunked prefill size, radix cache disable, CUDA graph controls, served model naming, remote code trust, and piecewise CUDA graph disable.
 
-For local SGLang runtimes that need native compilation:
-
-* `source scripts/env_base_runtime.sh` is required
-* GCC Toolset `12.2.1` must lead compiler resolution
-* `--disable-piecewise-cuda-graph` must remain rendered and fingerprinted
+For local SGLang runtimes, options are rendered only when the installed command surface reports support. The conservative generated baseline enables `--disable-piecewise-cuda-graph` when that flag is available. Source builds may use `scripts/env_base_runtime.sh` to expose the local CUDA toolkit, but wheel installs do not require the helper.
 
 ## Intentional Non Parity
 

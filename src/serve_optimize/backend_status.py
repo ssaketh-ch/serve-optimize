@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from .schemas import BackendStatus
@@ -36,19 +37,20 @@ PROFILE_DISTRIBUTIONS = {
     ),
     "vllm": (
         ("serve-optimize", "0.1.0"),
-        ("vllm", "0.10.0"),
-        ("torch", "2.7.1"),
-        ("transformers", "4.57.6"),
-        ("huggingface-hub", "0.36.2"),
+        ("vllm", "0.23.0"),
+        ("torch", "2.11.0"),
+        ("transformers", "5.9.0"),
+        ("huggingface-hub", "1.17.0"),
         ("nvidia-ml-py", "13.610.43"),
     ),
     "sglang": (
         ("serve-optimize", "0.1.0"),
-        ("sglang", "0.5.10.post1"),
-        ("sglang-kernel", "0.4.1"),
-        ("torch", "2.9.1"),
-        ("transformers", "5.3.0"),
-        ("huggingface-hub", "1.19.0"),
+        ("sglang", "0.5.13.post1"),
+        ("flash-attn-4", "4.0.0b18"),
+        ("sglang-kernel", "0.4.3"),
+        ("torch", "2.11.0"),
+        ("transformers", "5.8.1"),
+        ("huggingface-hub", "1.17.0"),
         ("nvidia-ml-py", "13.610.43"),
     ),
 }
@@ -89,15 +91,20 @@ def check_installation_profile(profile: str) -> list[BackendStatus]:
     )
 
     if profile == "vllm":
-        statuses.append(_environment_command_status("vllm"))
+        statuses.extend(
+            [
+                _environment_command_status("vllm"),
+                _compiler_status("gcc"),
+                _python_headers_status(),
+            ]
+        )
     elif profile == "sglang":
         statuses.extend(
             [
                 _environment_command_status("sglang"),
                 _sglang_runtime_status(),
-                _compiler_status("gcc", required_path="/opt/rh/gcc-toolset-12/"),
-                _compiler_status("g++", required_path="/opt/rh/gcc-toolset-12/"),
-                _cuda_status(),
+                _compiler_status("gcc"),
+                _python_headers_status(),
             ]
         )
     return statuses
@@ -108,7 +115,8 @@ def _distribution_status(name: str, expected_version: str | None) -> BackendStat
         version = importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return BackendStatus(name=name, available=False, reason="distribution is not installed")
-    if expected_version is not None and version != expected_version:
+    public_version = version.partition("+")[0]
+    if expected_version is not None and version != expected_version and public_version != expected_version:
         return BackendStatus(
             name=name,
             available=False,
@@ -213,59 +221,37 @@ def _command_status(command: str) -> BackendStatus:
 
 
 def _environment_command_status(command: str) -> BackendStatus:
-    path = Path(sys.executable).with_name(command)
-    if not path.is_file() or not os.access(path, os.X_OK):
+    sibling = Path(sys.executable).with_name(command)
+    path = str(sibling) if sibling.is_file() and os.access(sibling, os.X_OK) else shutil.which(command)
+    if path is None:
         return BackendStatus(
             name=f"cmd:{command}",
             available=False,
-            reason=f"not installed beside {sys.executable}",
+            reason="not found on PATH or beside the active Python interpreter",
         )
-    return BackendStatus(name=f"cmd:{command}", available=True, command=str(path))
+    return BackendStatus(name=f"cmd:{command}", available=True, command=path)
 
 
-def _compiler_status(command: str, *, required_path: str) -> BackendStatus:
+def _compiler_status(command: str) -> BackendStatus:
     path = shutil.which(command)
     if path is None:
-        return BackendStatus(
-            name=f"compiler:{command}",
-            available=False,
-            reason=f"{command} is not available; source scripts/env_base_runtime.sh",
-        )
-    if required_path not in path:
-        return BackendStatus(
-            name=f"compiler:{command}",
-            available=False,
-            command=path,
-            reason="GCC Toolset 12 must lead PATH; source scripts/env_base_runtime.sh",
-        )
+        return BackendStatus(name=f"compiler:{command}", available=False, reason=f"{command} is not available")
     return BackendStatus(name=f"compiler:{command}", available=True, command=path)
 
 
-def _cuda_status() -> BackendStatus:
-    cuda_home = os.environ.get("CUDA_HOME")
-    nvcc = shutil.which("nvcc")
-    if not cuda_home:
-        return BackendStatus(
-            name="cuda-toolkit",
-            available=False,
-            command=nvcc,
-            reason="CUDA_HOME is not set; source scripts/env_base_runtime.sh",
-        )
-    if not Path(cuda_home).exists():
-        return BackendStatus(
-            name="cuda-toolkit",
-            available=False,
-            command=cuda_home,
-            reason="CUDA_HOME does not exist",
-        )
-    if not nvcc:
-        return BackendStatus(
-            name="cuda-toolkit",
-            available=False,
-            command=cuda_home,
-            reason="nvcc is not available on PATH",
-        )
-    return BackendStatus(name="cuda-toolkit", available=True, command=f"{cuda_home} ({nvcc})")
+def _python_headers_status() -> BackendStatus:
+    include_dirs = [Path(sysconfig.get_path("include"))]
+    include_dirs.extend(Path(item) for item in os.environ.get("C_INCLUDE_PATH", "").split(os.pathsep) if item)
+    for include_dir in include_dirs:
+        header = include_dir / "Python.h"
+        if header.is_file():
+            return BackendStatus(name="python-headers", available=True, command=str(header))
+    return BackendStatus(
+        name="python-headers",
+        available=False,
+        command=str(include_dirs[0]),
+        reason="Python.h is missing; install the Python development headers",
+    )
 
 
 def _sglang_runtime_status() -> BackendStatus:

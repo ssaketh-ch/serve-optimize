@@ -9,6 +9,6 @@ Profiles:
 * `profiles/vllm.txt`: validated vLLM Managed Mode runtime.
 * `profiles/sglang.txt`: validated SGLang Managed Mode runtime.
 
-The vLLM and SGLang profiles must be installed in separate environments because they require different Torch and Transformers stacks.
+The vLLM and SGLang profiles must be installed in separate environments because they require different Transformers stacks.
 
-Constraints under `constraints/` pin directly validated backend packages while allowing backend packages to resolve transitive dependencies.
+Constraints under `constraints/` pin directly validated backend packages while allowing backend packages to resolve transitive dependencies. Use `scripts/verify_install_profile.sh` so vLLM receives CUDA aware Torch wheel selection.

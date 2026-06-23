@@ -14,8 +14,8 @@
 
 | Backend | Status | Validated Runtime | Managed Mode |
 |---|---|---|---|
-| vLLM | First class | `0.10.0` | Supported. |
-| SGLang | First class for detected surface | `0.5.10.post1` | Supported with runtime helper. |
+| vLLM | First class | `0.23.0` | Runtime validated on the current Blackwell host. |
+| SGLang | First class for detected surface | `0.5.13.post1` | Clean profile resolution is verified; runtime support remains capability detected. |
 | TensorRT LLM | Planned only | none | Managed Mode is not in current scope; Attach Mode may measure an external compatible endpoint. |
 | TGI | Attach only | none | Not supported. |
 | LMDeploy | Attach only | none | Not supported. |
@@ -28,7 +28,7 @@
 | core | Verified | CLI, docs, schema, synthetic paths. |
 | telemetry | Verified | Optional host telemetry. |
 | vLLM | Verified | Managed vLLM runtime. |
-| SGLang | Verified | Managed SGLang runtime. |
+| SGLang | Resolver verified | Managed SGLang runtime profile; require a local doctor and smoke run before production use. |
 
 ## Evidence And Recommendation Claims
 

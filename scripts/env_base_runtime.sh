@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
-toolset_root=/opt/rh/gcc-toolset-12/root/usr
-cuda_home=${CUDA_HOME:-/usr/local/cuda-12.8}
+cuda_home=${CUDA_HOME:-/usr/local/cuda}
+cc=${CC:-$(command -v gcc)}
+cxx=${CXX:-$(command -v g++)}
 
-if [[ ! -x "$toolset_root/bin/gcc" || ! -x "$toolset_root/bin/g++" ]]; then
-  echo "GCC Toolset 12 is required at $toolset_root/bin." >&2
+if [[ -z "$cc" || -z "$cxx" ]]; then
+  echo "gcc and g++ are required for source builds." >&2
   return 1 2>/dev/null || exit 1
 fi
 
@@ -13,8 +14,8 @@ if [[ ! -x "$cuda_home/bin/nvcc" ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
-export CC="$toolset_root/bin/gcc"
-export CXX="$toolset_root/bin/g++"
-export CUDAHOSTCXX="$toolset_root/bin/g++"
+export CC="$cc"
+export CXX="$cxx"
+export CUDAHOSTCXX="$cxx"
 export CUDA_HOME="$cuda_home"
-export PATH="$toolset_root/bin:$cuda_home/bin:$PATH"
+export PATH="$cuda_home/bin:$PATH"

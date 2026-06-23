@@ -818,12 +818,23 @@ def score_recommendation_inputs(
         )
         return [], result
 
-    has_any_power = any(_positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt")) for item in inputs)
+    has_any_power = any(_usable_power_telemetry(item) for item in inputs)
     effective_goal = goal
     if goal == RecommendationGoal.EFFICIENCY and not has_any_power:
         if not allow_efficiency_fallback:
             warnings.append("Efficiency recommendation is unavailable because no candidate has usable power telemetry.")
-            scores = [_make_unavailable_score(item, goal, "missing_power_telemetry") for item in inputs]
+            scores = [
+                _make_unavailable_score(
+                    item,
+                    goal,
+                    (
+                        "poor_power_telemetry"
+                        if _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt"))
+                        else "missing_power_telemetry"
+                    ),
+                )
+                for item in inputs
+            ]
             result = RecommendationResult(
                 recommended_candidate_id=None,
                 goal=goal.value,
@@ -866,8 +877,14 @@ def score_recommendation_inputs(
 
     throughput_scores = _normalize_higher(inputs, lambda item: _optional_float(item.measured_metrics.get("total_tokens_s")))
     latency_scores = _normalize_lower(inputs, lambda item: _latency_value(item))
-    efficiency_scores = _normalize_higher(inputs, lambda item: _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")))
-    joules_scores = _normalize_lower(inputs, lambda item: _optional_float(item.telemetry_metrics.get("joules_per_token")))
+    efficiency_scores = _normalize_higher(
+        inputs,
+        lambda item: _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")) if _usable_power_telemetry(item) else None,
+    )
+    joules_scores = _normalize_lower(
+        inputs,
+        lambda item: _optional_float(item.telemetry_metrics.get("joules_per_token")) if _usable_power_telemetry(item) else None,
+    )
     reliability_scores = {item.candidate_id: _reliability_score(item) for item in inputs}
     prediction_accuracy_scores = {item.candidate_id: _prediction_accuracy_score(item) for item in inputs}
     power_scores = {
@@ -1540,8 +1557,21 @@ def _telemetry_metrics(summary: EndpointBenchmarkSummary) -> dict[str, Any]:
         "power_sampling_duration_s": summary.power_sampling_duration_s,
         "power_sampling_rate_hz": summary.power_sampling_rate_hz,
         "energy_joules": summary.energy_joules,
-        "joules_per_token": summary.joules_per_token,
-        "tokens_per_second_per_watt": summary.tokens_per_second_per_watt,
+        "gross_joules_per_token": summary.joules_per_token,
+        "active_joules_per_token": summary.active_joules_per_token,
+        "gross_tokens_per_second_per_watt": summary.tokens_per_second_per_watt,
+        "active_tokens_per_second_per_watt": summary.active_tokens_per_second_per_watt,
+        "tokens_per_second_per_watt": (
+            summary.active_tokens_per_second_per_watt
+            if summary.active_tokens_per_second_per_watt is not None
+            else summary.tokens_per_second_per_watt
+        ),
+        "joules_per_token": (
+            summary.active_joules_per_token
+            if summary.active_joules_per_token is not None
+            else summary.joules_per_token
+        ),
+        "energy_accounting": "idle_subtracted" if summary.active_joules_per_token is not None else "gross",
         "power_sample_count": summary.power_sample_count,
         "observed_memory_mb": summary.observed_memory_mb,
         "average_gpu_util_percent": summary.average_gpu_util_percent,
@@ -1587,8 +1617,12 @@ def _disqualifiers(item: RecommendationInput, goal: RecommendationGoal, has_any_
         disqualifiers.append("missing_latency_metric")
     if goal == RecommendationGoal.BALANCED and _latency_value(item) is None:
         disqualifiers.append("missing_latency_metric")
-    if goal == RecommendationGoal.EFFICIENCY and not _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt")):
-        disqualifiers.append("missing_power_telemetry")
+    if goal == RecommendationGoal.EFFICIENCY and not _usable_power_telemetry(item):
+        disqualifiers.append(
+            "poor_power_telemetry"
+            if _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt"))
+            else "missing_power_telemetry"
+        )
     disqualifiers.extend(slo_disqualifiers(item))
     return disqualifiers
 
@@ -1723,9 +1757,9 @@ def _missing_metric_penalties(item: RecommendationInput, goal: RecommendationGoa
         penalties.append("missing_latency")
     if _reliability_score(item) is None:
         penalties.append("missing_reliability")
-    if has_any_power and not _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt")):
+    if has_any_power and not _usable_power_telemetry(item):
         penalties.append("missing_power_telemetry")
-    if goal == RecommendationGoal.EFFICIENCY and not _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt")):
+    if goal == RecommendationGoal.EFFICIENCY and not _usable_power_telemetry(item):
         penalties.append("missing_efficiency_metric")
     return penalties
 
@@ -1908,6 +1942,7 @@ def _candidate_engine_fields(item: RecommendationInput) -> dict[str, float | int
     raw = item.candidate.raw or {}
     values: dict[str, float | int | str | None] = {
         "candidate_source": _optional_str(raw.get("managed_candidate_source")),
+        "backend_defaults": _optional_bool(raw.get("backend_defaults")),
         "dtype": _optional_str(raw.get("dtype")),
         "quantization": _optional_str(raw.get("quantization")),
         "max_model_len": _optional_int(raw.get("max_context_tokens")),
@@ -2305,6 +2340,13 @@ def _optional_str(value: object) -> str | None:
 def _positive_number(value: object) -> bool:
     parsed = _optional_float(value)
     return parsed is not None and parsed > 0
+
+
+def _usable_power_telemetry(item: RecommendationInput) -> bool:
+    quality = str(item.telemetry_metrics.get("telemetry_quality") or "unavailable").lower()
+    return quality not in {"poor", "unavailable"} and _positive_number(
+        item.telemetry_metrics.get("tokens_per_second_per_watt")
+    )
 
 
 def _ratio(measured: float | None, predicted: float | None) -> float | None:

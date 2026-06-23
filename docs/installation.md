@@ -1,79 +1,27 @@
 # Reproducible Installation
 
-Serve Optimize uses mutually exclusive backend profiles because the validated vLLM and SGLang releases require different Torch and Transformers versions.
+Serve Optimize keeps vLLM and SGLang in separate environments because their tested Transformers versions differ. The installation scripts use `uv`, which follows the current vLLM guidance for selecting a compatible Torch backend.
 
-## Profiles
+## Prerequisites
 
-| Profile | Requirement file | Purpose |
-|---|---|---|
-| core | `requirements/profiles/core.txt` | CLI, schemas, synthetic paths, endpoint client, and artifact tooling |
-| telemetry | `requirements/profiles/telemetry.txt` | Core plus direct NVML Python bindings |
-| vLLM | `requirements/profiles/vllm.txt` | Validated vLLM Managed Mode stack |
-| SGLang | `requirements/profiles/sglang.txt` | Validated SGLang Managed Mode stack |
+* Linux with an NVIDIA driver compatible with the selected CUDA wheels
+* Python 3.10 or newer
+* [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+* An NVIDIA GPU supported by the selected backend
+* A C compiler and Python development headers for runtime kernel launchers
 
-Do not install the vLLM and SGLang profiles into the same environment.
-
-## Core
+On Ubuntu:
 
 ```bash
-python -m venv .venv-core
-.venv-core/bin/python -m pip install --upgrade "pip==26.1.2"
-.venv-core/bin/python -m pip install -r requirements/profiles/core.txt
-.venv-core/bin/serve-optimize doctor --profile core
+sudo apt update
+sudo apt install build-essential python3-dev
 ```
 
-## Telemetry
+Blackwell GPUs require CUDA 12.8 or newer for vLLM. See the [vLLM GPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) and the [SGLang installation guide](https://docs.sglang.io/docs/get-started/install) for upstream platform requirements.
 
-```bash
-python -m venv .venv-telemetry
-.venv-telemetry/bin/python -m pip install --upgrade "pip==26.1.2"
-.venv-telemetry/bin/python -m pip install -r requirements/profiles/telemetry.txt
-.venv-telemetry/bin/serve-optimize doctor --profile telemetry
-```
+## Automated Install
 
-## vLLM
-
-```bash
-python -m venv .venv-vllm
-.venv-vllm/bin/python -m pip install --upgrade "pip==26.1.2"
-.venv-vllm/bin/python -m pip install -r requirements/profiles/vllm.txt
-.venv-vllm/bin/serve-optimize doctor --profile vllm
-```
-
-The profile pins:
-
-* vLLM `0.10.0`
-* Torch `2.7.1`
-* Transformers `4.57.6`
-* Hugging Face Hub `0.36.2`
-* NVML Python bindings `13.610.43`
-
-## SGLang
-
-```bash
-python -m venv .venv-sglang
-.venv-sglang/bin/python -m pip install --upgrade "pip==26.1.2"
-.venv-sglang/bin/python -m pip install -r requirements/profiles/sglang.txt
-source scripts/env_base_runtime.sh
-.venv-sglang/bin/serve-optimize doctor --profile sglang
-```
-
-The profile pins:
-
-* SGLang `0.5.10.post1`
-* SGLang Kernel `0.4.1`
-* Torch `2.9.1`
-* Transformers `5.3.0`
-* Hugging Face Hub `1.19.0`
-* NVML Python bindings `13.610.43`
-
-The runtime helper verifies GCC Toolset 12 and CUDA `nvcc`, then exports `CC`, `CXX`, `CUDAHOSTCXX`, `CUDA_HOME`, and the required `PATH`.
-
-The validated SGLang launch still requires `--disable-piecewise-cuda-graph`.
-
-## Automated Profile Check
-
-Create and verify a fresh profile environment:
+Create and verify a fresh environment from the repository root:
 
 ```bash
 scripts/verify_install_profile.sh core /tmp/serve-optimize-core
@@ -82,25 +30,87 @@ scripts/verify_install_profile.sh vllm /tmp/serve-optimize-vllm
 scripts/verify_install_profile.sh sglang /tmp/serve-optimize-sglang
 ```
 
-The target directory must not already exist.
+The target directory must not already exist. Each command creates an isolated environment, installs the selected profile, runs dependency checks, and runs `serve-optimize doctor --profile PROFILE`.
 
-## Verification Evidence
+## vLLM
 
-Clean profile verification completed on 2026-06-16.
+Manual installation:
 
-The reproducible vLLM profile includes the direct NVML binding so telemetry availability does not depend on an ambient package.
+```bash
+uv venv --python python3 .venv-vllm
+uv pip install \
+  --python .venv-vllm/bin/python \
+  --torch-backend=auto \
+  -r requirements/profiles/vllm.txt
+.venv-vllm/bin/serve-optimize doctor --profile vllm
+```
 
-## Constraints
+Pinned and validated stack:
 
-Backend constraints live under `requirements/constraints`.
+* vLLM `0.23.0`
+* Torch `2.11.0`, with the CUDA wheel selected by `uv`
+* Transformers `5.9.0`
+* Hugging Face Hub `1.17.0`
+* NVML Python bindings `13.610.43`
 
-They pin the directly validated runtime packages while allowing each backend package to resolve its remaining transitive dependencies.
-The profile files perform standard local package installs, not editable installs.
+## SGLang
 
-## Safety
+Manual installation:
 
-* Use pip installation commands.
+```bash
+uv venv --python python3 .venv-sglang
+uv pip install \
+  --python .venv-sglang/bin/python \
+  -r requirements/profiles/sglang.txt
+.venv-sglang/bin/serve-optimize doctor --profile sglang
+```
+
+Pinned profile:
+
+* SGLang `0.5.13.post1`
+* FlashAttention 4 `4.0.0b18`, the explicit prerelease required by SGLang
+* SGLang Kernel `0.4.3`
+* Torch `2.11.0`
+* Transformers `5.8.1`
+* Hugging Face Hub `1.17.0`
+* NVML Python bindings `13.610.43`
+
+The SGLang wheel stack targets CUDA 13. It no longer requires the old validation host's GCC Toolset 12 path. `scripts/env_base_runtime.sh` is only an optional helper for source builds that need an explicit local CUDA toolkit.
+
+## Core And Telemetry
+
+For development without a serving backend:
+
+```bash
+uv venv --python python3 .venv
+uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
+.venv/bin/serve-optimize doctor --profile telemetry
+```
+
+## Current Validation Host
+
+Recorded on 2026-06-23:
+
+| Component | Value |
+|---|---|
+| OS | Ubuntu 24.04.4 LTS |
+| Python | 3.12.3 |
+| GPU | NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 96 GB |
+| NVIDIA driver | 595.71.05 |
+| Driver CUDA capability | 13.2 |
+| CUDA toolkit | 13.2 |
+| vLLM | 0.23.0 |
+| Torch | 2.11.0+cu130 in the clean vLLM profile environment |
+| Transformers | 5.9.0 |
+| Hugging Face Hub | 1.17.0 |
+| NVML Python bindings | 13.610.43 |
+
+The vLLM profile passes the profile doctor on this host. Runtime launch evidence is recorded in [Verification](verification.md).
+Review [Security Notes](security.md) before production deployment. It records audit commands and the current upstream advisory boundary for optional backend stacks.
+
+## Rules
+
 * Keep backend environments isolated.
-* Do not mutate a validated environment to test another profile.
-* Do not disable SSL verification.
-* Do not treat the failed latest vLLM environment as validated.
+* Keep SSL verification enabled.
+* Use the profile requirement files for reproducible runs.
+* Rerun the profile installer and a real managed smoke test before changing a validated version claim.

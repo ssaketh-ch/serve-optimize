@@ -146,6 +146,18 @@ def validate_sglang_engine_options(
             valid=False,
             reason="served_model_name must be a non-empty string.",
         )
+    if extra.get("backend_defaults") is True:
+        if (
+            sglang_argument_capabilities is not None
+            and sglang_argument_capabilities.detection_status == "success"
+            and not sglang_argument_capabilities.supports("--model-path")
+        ):
+            return CandidateValidationResult(
+                config_id=config.id,
+                valid=False,
+                reason="SGLang default launch requires detected support for --model-path.",
+            )
+        return CandidateValidationResult(config_id=config.id, valid=True)
     chunked_prefill_size = extra.get("chunked_prefill_size")
     if chunked_prefill_size is not None and (
         not isinstance(chunked_prefill_size, int) or isinstance(chunked_prefill_size, bool) or chunked_prefill_size == 0 or chunked_prefill_size < -1

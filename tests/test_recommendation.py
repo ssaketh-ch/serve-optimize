@@ -244,6 +244,25 @@ def test_efficiency_goal_without_power_returns_unavailable_result() -> None:
     assert result.power_missing_reason == "No candidate had usable power telemetry."
 
 
+def test_efficiency_goal_rejects_poor_power_telemetry() -> None:
+    inputs = [
+        _input(
+            "noisy",
+            total_tokens_s=90.0,
+            p95_latency_s=1.0,
+            tokens_per_second_per_watt=2.0,
+            joules_per_token=0.005,
+            telemetry_quality="poor",
+        )
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.EFFICIENCY)
+
+    assert result.recommended_candidate_id is None
+    assert scores[0].disqualifiers == ["poor_power_telemetry"]
+    assert result.telemetry_used_in_scoring is False
+
+
 def test_all_candidates_failed_produce_no_recommendation() -> None:
     inputs = [
         _input("c1", total_tokens_s=0.0, p95_latency_s=None, successful_requests=0, failed_requests=4, total_requests=4),

@@ -66,6 +66,7 @@ def generate_managed_candidates_from_capabilities(
         workload_concurrency=1,
         source="safe_baseline",
         baseline=True,
+        engine_options={"backend_defaults": True},
     )
     candidates.append(baseline)
 
@@ -170,7 +171,7 @@ def _generate_sglang_candidates(
             workload_concurrency=1,
             source="safe_baseline",
             baseline=True,
-            engine_options=engine_options,
+            engine_options={"backend_defaults": True},
         )
     ]
     candidate_batch_size = 4 if running_requests_supported else 1
@@ -437,13 +438,14 @@ def _candidate(
         "disable_cuda_graph",
         "chunked_prefill_size",
         "cuda_graph_max_bs",
+        "backend_defaults",
     ):
         if field_name in engine_options:
             extra[field_name] = engine_options[field_name]
     notes = ["Generated from managed capability context before validation."]
     if baseline:
         extra["baseline"] = True
-        notes = ["Model-native baseline inserted before managed validation."]
+        notes = ["Backend default baseline inserted before managed validation."]
     config_id = _config_id(
         context.backend,
         context.model,

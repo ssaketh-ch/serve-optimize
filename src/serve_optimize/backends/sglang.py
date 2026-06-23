@@ -575,6 +575,46 @@ def render_sglang_launch(
         else:
             unsupported_fields["port"] = "Detected SGLang launch surface does not support --port."
 
+    if (config.extra or {}).get("backend_defaults") is True:
+        canonical_config = replace(
+            config,
+            block_size=None,
+            kv_cache_dtype=None,
+            enforce_eager=None,
+            max_num_batched_tokens=None,
+            enable_chunked_prefill=None,
+            max_cudagraph_capture_size=None,
+            enable_prefix_caching=None,
+            kv_cache_policy="backend-default",
+            scheduler="backend-default",
+        )
+        rendered_fields["backend_defaults"] = True
+        omitted_fields.update(
+            {
+                "dtype": "backend default",
+                "quantization": "backend default",
+                "max_model_len": "backend default",
+                "gpu_memory_utilization": "backend default",
+                "max_num_seqs": "backend default",
+                "tensor_parallel_size": "backend default",
+            }
+        )
+        return SGLangRenderedLaunch(
+            command=command,
+            canonical_config=canonical_config,
+            rendered_fields=rendered_fields,
+            omitted_fields=omitted_fields,
+            unsupported_fields=unsupported_fields,
+            unavailable_fields=unavailable_fields,
+            flag_aliases=flag_aliases,
+            capabilities_help_hash=capabilities.help_hash,
+            backend_metadata={
+                "backend": "sglang",
+                "capability_detection_status": capabilities.detection_status,
+                "capability_help_hash": capabilities.help_hash,
+            },
+        )
+
     if config.dtype:
         rendered_dtype = _sglang_dtype(config.dtype)
         if _supports_dtype(capabilities, rendered_dtype):

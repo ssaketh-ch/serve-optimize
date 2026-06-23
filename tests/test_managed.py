@@ -35,6 +35,9 @@ from serve_optimize.cli import main
 from serve_optimize.evidence import launch_config_hash, workload_config_hash
 from serve_optimize.managed import (
     _generate_managed_candidates,
+    _managed_telemetry_metrics,
+    _measurement_metrics,
+    _summary_metrics,
     build_managed_preflight,
     group_candidates_by_launch_config,
     run_managed_evaluation,
@@ -86,6 +89,35 @@ def test_vllm_managed_launch_spec_builds_command_and_logs(tmp_path) -> None:
     assert spec.stderr_log_path == str(tmp_path / "logs" / config.id / "stderr.log")
 
 
+def test_vllm_launch_prefers_executable_beside_active_python(tmp_path, monkeypatch) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python"
+    executable = bin_dir / "vllm"
+    python.touch()
+    executable.touch(mode=0o755)
+    monkeypatch.setattr("serve_optimize.backends.vllm.sys.executable", str(python))
+
+    command = vllm_command(_config(), capabilities=_all_engine_caps())
+
+    assert command[0] == str(executable)
+
+
+def test_vllm_backend_default_baseline_omits_tuning_flags() -> None:
+    rendered = render_vllm_launch(
+        _config(extra={"backend_defaults": True, "baseline": True}),
+        host="127.0.0.1",
+        port=8000,
+        capabilities=_all_engine_caps(),
+    )
+
+    assert rendered.command[-4:] == ["--host", "127.0.0.1", "--port", "8000"]
+    assert "--dtype" not in rendered.command
+    assert "--max-model-len" not in rendered.command
+    assert "--gpu-memory-utilization" not in rendered.command
+    assert rendered.rendered_fields == {"backend_defaults": True}
+
+
 def test_managed_backend_factory_supports_vllm_and_sglang() -> None:
     adapter = create_managed_backend_adapter("vllm")
     sglang = create_managed_backend_adapter("sglang")
@@ -94,6 +126,52 @@ def test_managed_backend_factory_supports_vllm_and_sglang() -> None:
     assert sglang.name == "sglang"
     assert SUPPORTED_MANAGED_BACKENDS == ("vllm", "sglang")
     assert "sglang" in MANAGED_BACKEND_CHOICES
+
+
+def test_sglang_backend_default_baseline_omits_tuning_flags() -> None:
+    rendered = render_sglang_launch(
+        _config(backend="sglang", extra={"backend_defaults": True, "baseline": True}),
+        host="127.0.0.1",
+        port=8000,
+        capabilities=_sglang_caps(),
+    )
+
+    assert "--model-path" in rendered.command
+    assert "--dtype" not in rendered.command
+    assert "--context-length" not in rendered.command
+    assert "--mem-fraction-static" not in rendered.command
+    assert rendered.rendered_fields["backend_defaults"] is True
+
+
+def test_managed_metrics_preserve_power_quality_and_active_efficiency() -> None:
+    summary = {
+        "average_power_watts": 120.0,
+        "joules_per_token": 2.0,
+        "active_joules_per_token": 0.5,
+        "tokens_per_second_per_watt": 0.5,
+        "active_tokens_per_second_per_watt": 2.0,
+        "telemetry_quality": "poor",
+    }
+
+    metrics = _summary_metrics(summary)
+    telemetry = _managed_telemetry_metrics(metrics)
+
+    assert telemetry["joules_per_token"] == 0.5
+    assert telemetry["tokens_per_second_per_watt"] == 2.0
+    assert telemetry["energy_accounting"] == "idle_subtracted"
+    assert telemetry["telemetry_quality"] == "poor"
+
+
+def test_evidence_metrics_preserve_recorded_power_quality() -> None:
+    metrics = _measurement_metrics(
+        {
+            "average_power_w": 120.0,
+            "confidence": "limited",
+            "raw_json": {"summary": {"telemetry_quality": "poor"}},
+        }
+    )
+
+    assert metrics["telemetry_quality"] == "poor"
 
 
 def test_sglang_capability_detection_unavailable_nonfatal(monkeypatch) -> None:
@@ -881,6 +959,7 @@ def test_generated_managed_candidates_include_model_native_bf16_baseline(tmp_pat
     assert candidates[0].dtype == "bf16"
     assert candidates[0].extra["candidate_source"] == "safe_baseline"
     assert candidates[0].extra["baseline"] is True
+    assert candidates[0].extra["backend_defaults"] is True
     assert candidates[0].extra["model_native"] is True
     assert any(config.quantization == "none" for config in candidates)
 
@@ -988,7 +1067,8 @@ def test_sglang_capability_generation_is_bounded_and_excludes_vllm_fields(tmp_pa
     assert {config.gpu_memory_utilization for config in result.candidates} == {0.8, 0.9}
     assert any(config.max_batch_size == 4 for config in result.candidates)
     assert any("chunked_prefill_size" in config.extra for config in result.candidates)
-    assert all(config.extra["disable_piecewise_cuda_graph"] is True for config in result.candidates)
+    assert "disable_piecewise_cuda_graph" not in result.candidates[0].extra
+    assert all(config.extra["disable_piecewise_cuda_graph"] is True for config in result.candidates[1:])
     assert all(
         getattr(config, field_name) is None
         for config in result.candidates
@@ -1512,7 +1592,12 @@ def test_invalid_synthesized_candidate_is_rejected_before_launch(tmp_path, monke
 def test_duplicate_synthesized_candidate_is_deduped(tmp_path, monkeypatch) -> None:
     model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
     monkeypatch.setattr("serve_optimize.managed.detect_hardware", lambda: _managed_hardware())
-    duplicate = _synth_config(str(model_dir), config_id="cfg-synth-duplicate", max_batch_size=1)
+    duplicate = _synth_config(
+        str(model_dir),
+        config_id="cfg-synth-duplicate",
+        max_batch_size=1,
+        extra={"backend_defaults": True},
+    )
     provider = _StaticSynthesisProvider([duplicate])
 
     summary = run_managed_evaluation(
@@ -1566,7 +1651,12 @@ def test_exact_fresh_evidence_duplicate_synthesis_is_deduped(tmp_path, monkeypat
         prior_provider=_NoPriorProvider(),
         synthesis_provider=_StaticSynthesisProvider([]),
     )
-    duplicate = _synth_config(str(model_dir), config_id="cfg-synth-duplicate", max_batch_size=1)
+    duplicate = _synth_config(
+        str(model_dir),
+        config_id="cfg-synth-duplicate",
+        max_batch_size=1,
+        extra={"backend_defaults": True},
+    )
     second = run_managed_evaluation(
         backend="vllm",
         model=str(model_dir),
@@ -1668,6 +1758,55 @@ def test_managed_evaluate_cli_help() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["managed-evaluate", "--help"])
     assert exc.value.code == 0
+
+
+def test_root_help_shows_product_logo_and_primary_command(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "Serve Optimize" in output
+    assert "Energy aware LLM serving optimization" in output
+    assert "optimize" in output
+    assert "offline-benchmark" not in output
+
+
+def test_optimize_cli_uses_measured_managed_defaults(tmp_path, monkeypatch, capsys) -> None:
+    captured = {}
+
+    def fake_run_managed_evaluation(**kwargs):
+        captured.update(kwargs)
+        return ManagedRunSummary(
+            run_id="managed-test",
+            created_at="2026-01-01T00:00:00+00:00",
+            backend=kwargs["backend"],
+            model=kwargs["model"],
+            goal=kwargs["goal"].value,
+            candidate_count=1,
+            completed_candidate_count=1,
+            failed_candidate_count=0,
+            startup_timeout_s=kwargs["startup_timeout_s"],
+            cooldown_s=kwargs["cooldown_s"],
+            trials=kwargs["trials"],
+            status="success",
+            artifacts={"run_dir": str(tmp_path)},
+            recommendation_status="unavailable",
+        )
+
+    monkeypatch.setattr("serve_optimize.cli.run_managed_evaluation", fake_run_managed_evaluation)
+
+    main(["optimize", "model-path", "--out", str(tmp_path)])
+
+    capsys.readouterr()
+    assert captured["model"] == "model-path"
+    assert captured["backend"] == "vllm"
+    assert captured["telemetry"] == "auto"
+    assert captured["warmup_requests"] == 4
+    assert captured["idle_baseline_duration_s"] == 3.0
+    assert captured["stream"] is True
+    assert captured["workload_profile"].profile_name == "medium"
+    assert captured["command"] == ["serve-optimize", "optimize", "model-path"]
 
 
 def test_managed_evaluate_cli_help_does_not_expose_engine_surface_flags(capsys) -> None:
@@ -1950,6 +2089,28 @@ def test_workload_profile_preserves_dataset_distribution_and_slos() -> None:
             telemetry="none",
         )
     )
+
+
+def test_named_workload_profile_controls_load_across_candidates() -> None:
+    workload = serving_config_to_workload_config(
+        _config(
+            extra={
+                "workload_concurrency": 2,
+                "max_new_tokens": 128,
+                "workload_profile": {
+                    "profile_name": "medium",
+                    "concurrency": 8,
+                    "max_new_tokens": 256,
+                },
+            }
+        ),
+        trials=1,
+        request_timeout_s=30.0,
+        telemetry="none",
+    )
+
+    assert workload.concurrency == 8
+    assert workload.max_new_tokens == 256
 
 
 def test_same_launch_different_workloads_form_one_group() -> None:

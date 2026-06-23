@@ -444,9 +444,21 @@ def measurement_from_summary(
         p99_latency_ms=_latency_ms(row.get("p99_latency_s")),
         average_power_w=_optional_float(row.get("average_power_watts")),
         peak_power_w=_optional_float(row.get("peak_power_watts")),
-        joules_per_token=_optional_float(row.get("active_joules_per_token")) or _optional_float(row.get("joules_per_token")),
-        tokens_per_watt=_optional_float(row.get("tokens_per_second_per_watt")),
-        total_energy_j=_optional_float(row.get("active_energy_joules")) or _optional_float(row.get("energy_joules")),
+        joules_per_token=(
+            _optional_float(row.get("active_joules_per_token"))
+            if row.get("active_joules_per_token") is not None
+            else _optional_float(row.get("joules_per_token"))
+        ),
+        tokens_per_watt=(
+            _optional_float(row.get("active_tokens_per_second_per_watt"))
+            if row.get("active_tokens_per_second_per_watt") is not None
+            else _optional_float(row.get("tokens_per_second_per_watt"))
+        ),
+        total_energy_j=(
+            _optional_float(row.get("active_energy_joules"))
+            if row.get("active_energy_joules") is not None
+            else _optional_float(row.get("energy_joules"))
+        ),
         stability_score=_stability_score(row.get("stability_classification")),
         confidence=str(row.get("telemetry_quality")) if row.get("telemetry_quality") is not None else None,
         power_measurement_type=power_type,
