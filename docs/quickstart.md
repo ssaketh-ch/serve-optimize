@@ -12,6 +12,18 @@ serve-optimize doctor
 
 Use the mutually exclusive pip profiles in `requirements/profiles` for new environments. See [Installation](installation.md).
 
+Normal help shows the common path:
+
+```bash
+serve-optimize optimize --help
+```
+
+Use verbose help when you need lifecycle, evidence, SLO, or measurement tuning flags:
+
+```bash
+serve-optimize optimize --verbose-help
+```
+
 ## Telemetry Check
 
 ```bash
@@ -138,6 +150,16 @@ serve-optimize campaign-plan \
 ```
 
 The plan contains `campaign_plan.json`, `campaign_matrix.csv`, `campaign_commands.sh`, one executable script per backend, `campaign_postprocess.sh`, and a readable summary. Run `campaign_commands.sh vllm` in the vLLM environment and `campaign_commands.sh sglang` in the SGLang environment. Each backend runner continues through failed matrix cells. After all backend scripts finish, run `campaign_postprocess.sh` to analyze the timestamped managed run directories.
+
+For the ready made overnight model suite with baseline comparisons:
+
+```bash
+output=results/overnight-campaign
+scripts/run_overnight_campaign.sh standard vllm "$output"
+scripts/run_overnight_campaign.sh standard sglang "$output"
+```
+
+See [Overnight Model Campaign](overnight_campaign.md) before using gated models.
 
 ## Verify The Repository
 

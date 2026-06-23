@@ -37,6 +37,19 @@ bash scripts/verify_full.sh
 * Keep failed and unavailable run artifacts.
 * Record release verification in `docs/verification.md` or a release note.
 
+## Overnight Matrix And CLI Simplification
+
+Recorded on 2026-06-23:
+
+* overnight runner shell syntax passed
+* focused overnight summary and CLI tests passed
+* fast verification passed with 357 tests and 1 skipped test
+* full verification passed with 357 tests and 1 skipped test
+* Ruff passed
+* source distribution and wheel builds passed
+* packaged CLI smoke passed
+* release check passed with 72 checks
+
 ## Product Readiness Hardening
 
 Recorded on 2026-06-22:

@@ -308,10 +308,12 @@ Campaign plans write a managed run matrix, executable per backend command script
 For a ready to run multi family model suite with direct default versus optimized comparisons:
 
 ```bash
-scripts/run_overnight_campaign.sh standard vllm
+output=results/overnight-campaign
+scripts/run_overnight_campaign.sh standard vllm "$output"
+scripts/run_overnight_campaign.sh standard sglang "$output"
 ```
 
-See [Overnight Model Campaign](docs/overnight_campaign.md) for the model tiers, measurement defaults, output tables, and environment overrides.
+See [Overnight Model Campaign](docs/overnight_campaign.md) for the vLLM and SGLang matrix, gated model setup, model tiers, measurement defaults, output tables, and environment overrides.
 
 ## Release And Research Artifacts
 
@@ -358,6 +360,7 @@ ruff check .
 python -m json.tool feature_list.json
 serve-optimize --help
 serve-optimize optimize --help
+serve-optimize optimize --verbose-help
 serve-optimize validate-campaign --help
 serve-optimize release-check --help
 serve-optimize research-package --help

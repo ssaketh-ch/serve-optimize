@@ -77,6 +77,25 @@ Pinned profile:
 
 The SGLang wheel stack targets CUDA 13. It no longer requires the old validation host's GCC Toolset 12 path. `scripts/env_base_runtime.sh` is only an optional helper for source builds that need an explicit local CUDA toolkit.
 
+## Hugging Face Token
+
+Public models do not need a token. Gated models require both approved browser access on the model page and a read token on the server.
+
+Create a read token at <https://huggingface.co/settings/tokens>, then store it in the active backend environment:
+
+```bash
+hf auth login
+hf auth whoami
+```
+
+For noninteractive runs, export the token instead:
+
+```bash
+export HF_TOKEN=hf_your_read_token
+```
+
+Hugging Face Hub uses the saved token by default, and `HF_TOKEN` overrides the saved token when set. Request gated model access from the model page in a browser before launching a campaign.
+
 ## Core And Telemetry
 
 For development without a serving backend:
