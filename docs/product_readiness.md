@@ -1,15 +1,15 @@
 # Product Readiness
 
-Serve Optimize is ready for broader measured validation of its current product contract:
+Serve Optimize is deployed for measured LLM serving configuration optimization on the current GPU server. The current product contract includes:
 
 * Attach Mode for existing OpenAI compatible endpoints.
 * Managed Mode for the validated vLLM and SGLang surfaces.
 * Runtime fingerprinted evidence, conservative reuse, resume, workload profiles, SLO guards, measurement quality controls, campaign planning, validation, and research packaging.
 * Reproducible backend installation profiles, package builds, Python 3.10 through 3.12 CI, release checks, contributor guidance, and a security reporting policy.
 
-## Remaining Before Broad Production Adoption
+## Remaining Expansion Areas
 
-These items are not solved by testing more model sizes:
+These items are outside the current deployed contract. Testing more model sizes can improve evidence coverage, but it does not by itself solve these product areas:
 
 1. Static typing debt. The runtime test and lint gates pass, but the repository does not yet pass a strict full source MyPy run. Dynamic artifact parsing, telemetry provider protocols, and orchestration payloads need a dedicated typing pass.
 2. Production trace inputs. Built in workload profiles are controlled synthetic workloads, not anonymized production request traces.
@@ -18,9 +18,9 @@ These items are not solved by testing more model sizes:
 5. Operational orchestration. Containers, Kubernetes, multi node execution, and parallel managed launches remain explicitly outside the current contract.
 6. Phase energy attribution. Prefill and decode attribution remains unavailable until a backend exposes defensible phase markers.
 
-## Campaign Readiness
+## Campaign Operation
 
-Campaign plans now generate separate executable scripts for each backend environment. A dispatcher selects the backend runner, each runner continues through failed matrix cells, and a separate postprocessing script targets the timestamped managed run directories.
+Campaign plans generate separate executable scripts for each backend environment. The overnight runner also expects the active shell environment to match the backend being measured. A dispatcher selects the backend runner, each runner continues through failed matrix cells, and a separate postprocessing script targets the timestamped managed run directories.
 
 Before launching a campaign:
 

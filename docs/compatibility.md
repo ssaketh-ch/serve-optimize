@@ -2,6 +2,8 @@
 
 This document defines the current supported product surface. It is the authority for backend, evidence, artifact, installation, and exclusion claims.
 
+The project is currently deployed on the target GPU server. Support claims below describe the live product contract, not a hypothetical roadmap. Historical verification notes remain in [Verification](verification.md).
+
 ## Support Levels
 
 * First class: implemented, tested, and validated with real runtime artifacts on the current validation host.
@@ -235,11 +237,16 @@ Attach Mode and Managed Mode accept JSON workload manifests. Workload fingerprin
 
 Supported SLO guards are TTFT, TPOT, p95 latency, minimum token throughput, and maximum failed request rate. A candidate that violates one of these constraints is ineligible for recommendation.
 
-## Validation Baseline
+## Current Validation Baseline
 
-Phase One release evidence is stored under:
+The deployed validation baseline includes:
 
-* `results/phase1-runtime-evidence-v2`
-* `results/phase1-failure-lifecycle`
+* clean core, telemetry, vLLM, and SGLang install profile checks
+* managed vLLM measurements with runtime fingerprinted evidence
+* managed SGLang measurements for the detected supported surface
+* exact fresh evidence reuse checks
+* managed resume checks
+* overnight campaign summaries with default baseline comparisons
+* validation campaign and research package artifact generation
 
-The validation campaign passed with four usable vLLM and SGLang fresh and repeat runs. Each backend produced one fresh measurement and one identical exact evidence reuse with zero launches and zero workload measurements on the repeat.
+Older phase evidence paths remain documented in [Verification](verification.md) as historical audit records. New claims should use the latest managed run artifacts and validation campaign outputs supplied with the current deployment.

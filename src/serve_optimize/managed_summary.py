@@ -204,14 +204,7 @@ def metrics_summary(recommendation: RecommendationResult) -> dict[str, Any]:
 def baseline_comparison(recommendation: RecommendationResult) -> dict[str, Any]:
     selected_id = recommendation.recommended_candidate_id
     selected = _candidate_row(recommendation.candidate_table, selected_id)
-    baseline = next(
-        (
-            row
-            for row in recommendation.candidate_table
-            if row.get("candidate_source") == "safe_baseline"
-        ),
-        None,
-    )
+    baseline = _baseline_row_for_selection(recommendation.candidate_table, selected)
     if selected is None:
         return {
             "available": False,
@@ -402,6 +395,25 @@ def _selected_optional_lines(selected: dict[str, Any]) -> list[str]:
         "workload_profile",
     ]
     return [f"  {key}: {_display(selected.get(key))}" for key in keys if key in selected]
+
+
+def _baseline_row_for_selection(candidate_table: list[dict[str, Any]], selected: dict[str, Any] | None) -> dict[str, Any] | None:
+    baseline_rows = [
+        row
+        for row in candidate_table
+        if row.get("candidate_source") in {"safe_baseline", "backend_default_variant"}
+    ]
+    if not baseline_rows:
+        return None
+    selected_concurrency = _optional_int(selected.get("benchmark_concurrency")) if selected else None
+    if selected_concurrency is not None:
+        for row in baseline_rows:
+            if _optional_int(row.get("benchmark_concurrency")) == selected_concurrency:
+                return row
+    for row in baseline_rows:
+        if row.get("candidate_source") == "safe_baseline":
+            return row
+    return baseline_rows[0]
 
 
 def _baseline_comparison_lines(comparison: dict[str, Any]) -> list[str]:

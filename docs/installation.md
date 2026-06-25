@@ -1,6 +1,14 @@
 # Reproducible Installation
 
-Serve Optimize keeps vLLM and SGLang in separate environments because their tested Transformers versions differ. The installation scripts use `uv`, which follows the current vLLM guidance for selecting a compatible Torch backend.
+This page is the clean setup path from a fresh server to managed vLLM and SGLang runs.
+
+Serve Optimize keeps vLLM and SGLang in separate Python environments because their tested backend stacks pin different runtime packages. The command line tools and helper scripts do not switch environments for you. They use whichever `serve-optimize`, `vllm`, and `sglang` commands are active in your current shell.
+
+The practical rule is simple:
+
+1. Use the vLLM environment when running vLLM commands.
+2. Use the SGLang environment when running SGLang commands.
+3. Use one shared output directory when you want both backend results in the same campaign report.
 
 ## Prerequisites
 
@@ -19,22 +27,23 @@ sudo apt install build-essential python3-dev
 
 Blackwell GPUs require CUDA 12.8 or newer for vLLM. See the [vLLM GPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) and the [SGLang installation guide](https://docs.sglang.io/docs/get-started/install) for upstream platform requirements.
 
-## Automated Install
+## Fresh Server Setup
 
-Create and verify a fresh environment from the repository root:
+From the repository root, first install the small core toolchain:
 
 ```bash
-scripts/verify_install_profile.sh core /tmp/serve-optimize-core
-scripts/verify_install_profile.sh telemetry /tmp/serve-optimize-telemetry
-scripts/verify_install_profile.sh vllm /tmp/serve-optimize-vllm
-scripts/verify_install_profile.sh sglang /tmp/serve-optimize-sglang
+uv venv --python python3 .venv
+uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
+.venv/bin/serve-optimize doctor --profile telemetry
 ```
 
-The target directory must not already exist. Each command creates an isolated environment, installs the selected profile, runs dependency checks, and runs `serve-optimize doctor --profile PROFILE`.
+This environment is good for development, telemetry checks, Attach Mode, documentation, and artifact inspection. It is not the recommended environment for managed vLLM or managed SGLang measurements.
 
-## vLLM
+Next create the backend environments.
 
-Manual installation:
+## vLLM Environment
+
+Create a fresh vLLM environment:
 
 ```bash
 uv venv --python python3 .venv-vllm
@@ -45,6 +54,34 @@ uv pip install \
 .venv-vllm/bin/serve-optimize doctor --profile vllm
 ```
 
+Activate it before running vLLM managed work:
+
+```bash
+source .venv-vllm/bin/activate
+serve-optimize doctor --profile vllm
+```
+
+If vLLM is already installed, update the environment to the pinned project profile and recheck it:
+
+```bash
+uv pip install \
+  --python .venv-vllm/bin/python \
+  --upgrade \
+  --torch-backend=auto \
+  -r requirements/profiles/vllm.txt
+.venv-vllm/bin/serve-optimize doctor --profile vllm
+```
+
+Run a small managed dry run:
+
+```bash
+.venv-vllm/bin/serve-optimize optimize Qwen/Qwen3-0.6B \
+  --backend vllm \
+  --workload-profile short \
+  --dry-run \
+  --out results/setup-vllm-dry-run
+```
+
 Pinned and validated stack:
 
 * vLLM `0.23.0`
@@ -53,9 +90,9 @@ Pinned and validated stack:
 * Hugging Face Hub `1.17.0`
 * NVML Python bindings `13.610.43`
 
-## SGLang
+## SGLang Environment
 
-Manual installation:
+Create a fresh SGLang environment:
 
 ```bash
 uv venv --python python3 .venv-sglang
@@ -63,6 +100,33 @@ uv pip install \
   --python .venv-sglang/bin/python \
   -r requirements/profiles/sglang.txt
 .venv-sglang/bin/serve-optimize doctor --profile sglang
+```
+
+Activate it before running SGLang managed work:
+
+```bash
+source .venv-sglang/bin/activate
+serve-optimize doctor --profile sglang
+```
+
+If SGLang is already installed, update the environment to the pinned project profile and recheck it:
+
+```bash
+uv pip install \
+  --python .venv-sglang/bin/python \
+  --upgrade \
+  -r requirements/profiles/sglang.txt
+.venv-sglang/bin/serve-optimize doctor --profile sglang
+```
+
+Run a small managed dry run:
+
+```bash
+.venv-sglang/bin/serve-optimize optimize Qwen/Qwen3-0.6B \
+  --backend sglang \
+  --workload-profile short \
+  --dry-run \
+  --out results/setup-sglang-dry-run
 ```
 
 Pinned profile:
@@ -76,6 +140,41 @@ Pinned profile:
 * NVML Python bindings `13.610.43`
 
 The SGLang wheel stack targets CUDA 13. It no longer requires the old validation host's GCC Toolset 12 path. `scripts/env_base_runtime.sh` is only an optional helper for source builds that need an explicit local CUDA toolkit.
+
+## How Scripts Use Environments
+
+Repository scripts use the active shell environment. They do not activate `.venv-vllm` or `.venv-sglang` internally.
+
+For the overnight campaign, run the same output directory once per backend:
+
+```bash
+output=results/overnight-campaign
+
+source .venv-vllm/bin/activate
+scripts/run_overnight_campaign.sh standard vllm "$output"
+deactivate
+
+source .venv-sglang/bin/activate
+scripts/run_overnight_campaign.sh standard sglang "$output"
+deactivate
+```
+
+Use `scripts/run_overnight_campaign.sh standard all "$output"` only from an environment where both backend commands are intentionally installed and verified. The split environment flow above is the safer default.
+
+Campaign plan scripts follow the same rule. Run each generated backend script in the matching backend environment, then run the generated postprocess script after both backend runs finish.
+
+## Automated Install
+
+Create and verify a fresh environment from the repository root:
+
+```bash
+scripts/verify_install_profile.sh core /tmp/serve-optimize-core
+scripts/verify_install_profile.sh telemetry /tmp/serve-optimize-telemetry
+scripts/verify_install_profile.sh vllm /tmp/serve-optimize-vllm
+scripts/verify_install_profile.sh sglang /tmp/serve-optimize-sglang
+```
+
+The target directory must not already exist. Each command creates an isolated environment, installs the selected profile, runs dependency checks, and runs `serve-optimize doctor --profile PROFILE`.
 
 ## Hugging Face Token
 
@@ -95,16 +194,6 @@ export HF_TOKEN=hf_your_read_token
 ```
 
 Hugging Face Hub uses the saved token by default, and `HF_TOKEN` overrides the saved token when set. Request gated model access from the model page in a browser before launching a campaign.
-
-## Core And Telemetry
-
-For development without a serving backend:
-
-```bash
-uv venv --python python3 .venv
-uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
-.venv/bin/serve-optimize doctor --profile telemetry
-```
 
 ## Current Validation Host
 

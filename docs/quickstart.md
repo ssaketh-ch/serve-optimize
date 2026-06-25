@@ -5,12 +5,14 @@
 ```bash
 uv venv --python python3 .venv
 uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
-serve-optimize --help
-serve-optimize detect
-serve-optimize doctor
+.venv/bin/serve-optimize --help
+.venv/bin/serve-optimize detect
+.venv/bin/serve-optimize doctor
 ```
 
-Use the mutually exclusive pip profiles in `requirements/profiles` for new environments. See [Installation](installation.md).
+Use the mutually exclusive backend profiles in `requirements/profiles` for managed vLLM and managed SGLang. See [Installation](installation.md) for the full setup and update flow.
+
+For a full explanation of how Attach Mode, Managed Mode, evidence, pruning, and recommendations fit together, see [Architecture](architecture.md).
 
 Normal help shows the common path:
 
@@ -52,16 +54,19 @@ Add `--dry-run` first to write a preflight plan without endpoint health checks o
 ## Managed vLLM
 
 ```bash
-# Activate an environment installed from requirements/profiles/vllm.txt
+source .venv-vllm/bin/activate
+serve-optimize doctor --profile vllm
 
 serve-optimize optimize /path/to/model \
+  --backend vllm \
   --out results/managed-vllm
 ```
 
 ## Managed SGLang
 
 ```bash
-# Activate an environment installed from requirements/profiles/sglang.txt
+source .venv-sglang/bin/activate
+serve-optimize doctor --profile sglang
 
 serve-optimize optimize /path/to/model \
   --backend sglang \
@@ -155,11 +160,17 @@ For the ready made overnight model suite with baseline comparisons:
 
 ```bash
 output=results/overnight-campaign
+
+source .venv-vllm/bin/activate
 scripts/run_overnight_campaign.sh standard vllm "$output"
+deactivate
+
+source .venv-sglang/bin/activate
 scripts/run_overnight_campaign.sh standard sglang "$output"
+deactivate
 ```
 
-See [Overnight Model Campaign](overnight_campaign.md) before using gated models.
+The overnight runner uses the active shell environment. See [Overnight Model Campaign](overnight_campaign.md) before using gated models or running both backends into one report.
 
 ## Verify The Repository
 

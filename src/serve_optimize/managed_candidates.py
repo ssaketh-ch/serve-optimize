@@ -69,6 +69,38 @@ def generate_managed_candidates_from_capabilities(
         engine_options={"backend_defaults": True},
     )
     candidates.append(baseline)
+    if context.goal == Goal.PERFORMANCE:
+        for throughput_concurrency in _throughput_concurrency_values(workload_profile):
+            candidates.append(
+                _candidate(
+                    context=context,
+                    model_spec=model_spec,
+                    dtype=dtype,
+                    quantization=allowed_quantizations[0],
+                    max_context_tokens=_bounded_context(model_spec, 2048),
+                    max_batch_size=1,
+                    gpu_memory_utilization=0.9,
+                    workload_concurrency=throughput_concurrency,
+                    source="backend_default_variant",
+                    baseline=False,
+                    engine_options={"backend_defaults": True},
+                )
+            )
+            candidates.append(
+                _candidate(
+                    context=context,
+                    model_spec=model_spec,
+                    dtype=dtype,
+                    quantization=allowed_quantizations[0],
+                    max_context_tokens=_bounded_context(model_spec, 2048),
+                    max_batch_size=throughput_concurrency,
+                    gpu_memory_utilization=0.9,
+                    workload_concurrency=throughput_concurrency,
+                    source="capability_aware",
+                    baseline=False,
+                    engine_options={},
+                )
+            )
 
     for quantization in allowed_quantizations:
         for max_context_tokens, max_batch_size, gpu_memory_utilization, workload_concurrency, engine_options in _candidate_shapes(
@@ -169,6 +201,38 @@ def _generate_sglang_candidates(
         )
     ]
     profile_concurrency = _profile_concurrency(workload_profile)
+    if context.goal == Goal.PERFORMANCE:
+        for throughput_concurrency in _throughput_concurrency_values(workload_profile):
+            candidates.append(
+                _candidate(
+                    context=context,
+                    model_spec=model_spec,
+                    dtype=dtype,
+                    quantization=quantization,
+                    max_context_tokens=primary_context,
+                    max_batch_size=1,
+                    gpu_memory_utilization=0.8 if memory_fraction_supported else 0.0,
+                    workload_concurrency=throughput_concurrency,
+                    source="backend_default_variant",
+                    baseline=False,
+                    engine_options={"backend_defaults": True},
+                )
+            )
+            candidates.append(
+                _candidate(
+                    context=context,
+                    model_spec=model_spec,
+                    dtype=dtype,
+                    quantization=quantization,
+                    max_context_tokens=primary_context,
+                    max_batch_size=throughput_concurrency if running_requests_supported else 1,
+                    gpu_memory_utilization=0.9 if memory_fraction_supported else 0.0,
+                    workload_concurrency=throughput_concurrency,
+                    source="sglang_capability_aware",
+                    baseline=False,
+                    engine_options={},
+                )
+            )
     candidate_batch_size = max(4, profile_concurrency) if running_requests_supported else 1
     shapes = [
         (primary_context, 1, 0.9, profile_concurrency, False),
@@ -204,7 +268,7 @@ def _generate_sglang_candidates(
             _with_profile(config, _profile_payload(context))
             for config in candidates
         ]
-    selected = _dedupe_candidates(candidates)[: max(1, min(limit, 4))]
+    selected = _dedupe_candidates(candidates)[: max(1, limit)]
     source_counts = Counter(str((config.extra or {}).get("candidate_source") or "unknown") for config in selected)
     return ManagedCandidateGenerationResult(
         candidates=selected,
@@ -391,6 +455,16 @@ def _profile_concurrency(profile: WorkloadProfile) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return 1
+
+
+def _throughput_concurrency_values(profile: WorkloadProfile) -> list[int]:
+    base = _profile_concurrency(profile)
+    values = [max(base * 2, 16), max(base * 4, 32)]
+    result: list[int] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
 
 
 def _scale_shapes_for_profile(

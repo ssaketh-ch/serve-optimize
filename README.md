@@ -2,6 +2,18 @@
 
 Serve Optimize measures LLM serving behavior and recommends the best configuration among evaluated candidates for a selected goal.
 
+```text
+   _____                            ____        __  _           _
+  / ___/___  ______   _____        / __ \____  / /_(_)___ ___  (_)___  ___
+  \__ \/ _ \/ ___/ | / / _ \_____/ / / / __ \/ __/ / __ `__ \/ /_  / / _ \
+ ___/ /  __/ /   | |/ /  __/____/ /_/ / /_/ / /_/ / / / / / / / / /_/  __/
+/____/\___/_/    |___/\___/     \____/ .___/\__/_/_/ /_/ /_/_/ /___/\___/
+                                    /_/
+
+Serve Optimize
+Energy aware LLM serving optimization
+```
+
 It supports two product paths:
 
 * Attach Mode benchmarks an already running OpenAI compatible endpoint.
@@ -11,7 +23,7 @@ Measured runtime evidence is the source of truth. AIConfigurator predictions may
 
 ## Current Status
 
-Serve Optimize is a first public release for measured LLM serving configuration optimization.
+Serve Optimize is live on the current GPU server for measured LLM serving configuration optimization. The deployed workflow supports managed vLLM and SGLang measurements, overnight campaigns, runtime evidence, and baseline versus optimized recommendation summaries.
 
 Verified capabilities include:
 
@@ -40,6 +52,7 @@ Validated backend stacks:
 External TGI, LMDeploy, llama.cpp, NIM, and TensorRT LLM endpoints may be measured through Attach Mode when they expose an OpenAI compatible API. Serve Optimize does not own their lifecycle.
 
 See [Compatibility](docs/compatibility.md) for the exact support, evidence, artifact, installation, and exclusion contracts.
+See [Architecture](docs/architecture.md) for the full Attach Mode and Managed Mode flow, including data collection, pruning, evidence reuse, and recommendation scoring.
 
 ## Install
 
@@ -51,6 +64,8 @@ uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
 ```
 
 The backend profiles are pinned to the validated split stacks and must be installed in separate environments.
+
+For managed vLLM and SGLang, install the two backend environments from [Installation](docs/installation.md). Helper scripts use the active shell environment. They do not switch between `.venv-vllm` and `.venv-sglang` automatically.
 
 Do not disable SSL verification to install backend dependencies.
 
@@ -115,9 +130,11 @@ Managed Mode owns process lifecycle through backend adapters.
 ### vLLM
 
 ```bash
-# Activate an environment installed from requirements/profiles/vllm.txt
+source .venv-vllm/bin/activate
+serve-optimize doctor --profile vllm
 
 serve-optimize optimize /path/to/model \
+  --backend vllm \
   --out results/managed-vllm
 ```
 
@@ -168,7 +185,8 @@ Resume reuses only prior completed measured workloads whose candidate id, worklo
 Use the isolated SGLang profile:
 
 ```bash
-# Activate an environment installed from requirements/profiles/sglang.txt
+source .venv-sglang/bin/activate
+serve-optimize doctor --profile sglang
 
 serve-optimize optimize /path/to/model \
   --backend sglang \
@@ -309,8 +327,14 @@ For a ready to run multi family model suite with direct default versus optimized
 
 ```bash
 output=results/overnight-campaign
+
+source .venv-vllm/bin/activate
 scripts/run_overnight_campaign.sh standard vllm "$output"
+deactivate
+
+source .venv-sglang/bin/activate
 scripts/run_overnight_campaign.sh standard sglang "$output"
+deactivate
 ```
 
 See [Overnight Model Campaign](docs/overnight_campaign.md) for the vLLM and SGLang matrix, gated model setup, model tiers, measurement defaults, output tables, and environment overrides.
@@ -379,6 +403,7 @@ The latest recorded result is maintained in [Verification](docs/verification.md)
 
 ## Documentation
 
+* [Architecture](docs/architecture.md)
 * [System design](docs/design.md)
 * [Compatibility contract](docs/compatibility.md)
 * [Installation profiles](docs/installation.md)

@@ -1074,13 +1074,14 @@ def test_vllm_medium_profile_scales_scheduler_capacity(tmp_path) -> None:
             vllm_argument_capabilities=_all_engine_caps(),
             workload_profile=profile,
         ),
-        limit=4,
+        limit=6,
     )
 
     assert result.candidates[0].extra["candidate_source"] == "safe_baseline"
     assert result.candidates[0].extra["workload_concurrency"] == 8
-    assert any(config.extra.get("omit_max_num_seqs") is True for config in result.candidates[1:])
-    assert all(config.max_batch_size >= 8 for config in result.candidates[1:])
+    assert any(config.extra.get("candidate_source") == "backend_default_variant" for config in result.candidates[1:])
+    assert any(config.max_batch_size >= 16 for config in result.candidates[1:])
+    assert any(config.extra["workload_concurrency"] >= 32 for config in result.candidates[1:])
     assert all(config.extra["workload_concurrency"] >= 8 for config in result.candidates[1:])
     assert all(
         config.max_num_batched_tokens is None or config.max_num_batched_tokens >= 8192
@@ -1116,7 +1117,7 @@ def test_sglang_capability_generation_is_bounded_and_excludes_vllm_fields(tmp_pa
         limit=10,
     )
 
-    assert 1 <= len(result.candidates) <= 4
+    assert 1 <= len(result.candidates) <= 5
     assert result.candidates[0].extra["candidate_source"] == "safe_baseline"
     assert result.safe_baseline_added is True
     assert {config.backend for config in result.candidates} == {"sglang"}
@@ -1157,11 +1158,13 @@ def test_sglang_medium_profile_scales_scheduler_capacity(tmp_path) -> None:
             sglang_argument_capabilities=_sglang_caps(),
             workload_profile=profile,
         ),
-        limit=4,
+        limit=6,
     )
 
     assert result.candidates[0].extra["workload_concurrency"] == 8
-    assert any(config.max_batch_size == 1 and config.extra["workload_concurrency"] == 8 for config in result.candidates[1:])
+    assert any(config.extra.get("candidate_source") == "backend_default_variant" for config in result.candidates[1:])
+    assert any(config.max_batch_size >= 16 for config in result.candidates[1:])
+    assert any(config.extra["workload_concurrency"] >= 32 for config in result.candidates[1:])
     assert all(config.max_batch_size >= 8 or config.max_batch_size == 1 for config in result.candidates[1:])
     assert all(config.extra["workload_concurrency"] >= 8 for config in result.candidates[1:])
     assert all("disable_piecewise_cuda_graph" not in config.extra for config in result.candidates[1:])

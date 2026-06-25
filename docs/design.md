@@ -6,6 +6,17 @@ The product owns candidate generation, validation, benchmark execution, telemetr
 
 AIConfigurator is an optional candidate source and prior. It is not the executor, measurement system, or source of truth.
 
+For the complete deployed flow with diagrams, see [Architecture](architecture.md). This page is the shorter design contract.
+
+## Current Deployment
+
+Serve Optimize is deployed for two production style workflows:
+
+* Attach Mode for measuring already running OpenAI compatible endpoints.
+* Managed Mode for launching, measuring, and recommending configurations for vLLM and the detected supported SGLang surface.
+
+Recommendations remain scoped to measured candidates, resumed completed workloads, or exact fresh measured evidence.
+
 ## Product Modes
 
 ### Attach Mode

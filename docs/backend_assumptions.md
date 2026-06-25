@@ -1,6 +1,6 @@
 # Backend Assumptions
 
-This document records backend specific boundaries that remain intentional after vLLM and SGLang first class Managed Mode validation.
+This document records backend specific boundaries for the deployed vLLM and SGLang Managed Mode support.
 
 ## Adapter Ownership
 
@@ -65,4 +65,4 @@ vLLM and SGLang evidence cannot collide as exact matches.
 * Attach Mode serve plan generation may remain backend specific.
 * Generic recommendation tables retain optional vLLM originated columns when absent values are harmless.
 
-No broad backend abstraction refactor is required for the current product phase.
+No broad backend abstraction refactor is required for the current deployed product surface.

@@ -21,6 +21,22 @@ def test_baseline_comparison_reports_directional_improvements() -> None:
     assert comparison["metrics"]["tokens_per_watt"]["improvement_percent"] == 60.0
 
 
+def test_baseline_comparison_uses_matching_backend_default_variant() -> None:
+    recommendation = _recommendation(
+        [
+            _row("baseline", source="safe_baseline", throughput=100.0, concurrency=8),
+            _row("baseline-16", source="backend_default_variant", throughput=150.0, concurrency=16),
+            _row("selected", source="generated", throughput=180.0, concurrency=16),
+        ]
+    )
+
+    comparison = baseline_comparison(recommendation)
+
+    assert comparison["baseline_candidate_id"] == "baseline-16"
+    assert comparison["metrics"]["throughput_tokens_per_sec"]["baseline"] == 150.0
+    assert comparison["metrics"]["throughput_tokens_per_sec"]["improvement_percent"] == 20.0
+
+
 def test_baseline_comparison_explains_missing_baseline() -> None:
     comparison = baseline_comparison(
         _recommendation([_row("selected", source="generated", throughput=120.0)])
@@ -81,10 +97,12 @@ def _row(
     power: float | None = None,
     energy: float | None = None,
     efficiency: float | None = None,
+    concurrency: int | None = None,
 ) -> dict[str, object]:
     return {
         "candidate_id": candidate_id,
         "candidate_source": source,
+        "benchmark_concurrency": concurrency,
         "total_tokens_s": throughput,
         "p95_latency_s": latency,
         "average_power_watts": power,

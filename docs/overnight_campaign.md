@@ -2,21 +2,72 @@
 
 The overnight runner measures each model with the safe backend baseline and generated candidates. Every recommendation summary reports the selected configuration and its percentage change from the baseline for throughput, p95 latency, average power, joules per token, and tokens per watt.
 
-## Run
+## Before You Run
 
-Activate each matching backend profile, then run the backend you want from that environment.
+Install the backend environments first. See [Installation](installation.md) for the full from scratch setup.
+
+The important point is that the overnight runner uses the active shell environment. It does not activate a backend environment internally.
+
+Use this layout on a fresh server:
+
+1. `.venv-vllm` contains Serve Optimize plus vLLM.
+2. `.venv-sglang` contains Serve Optimize plus SGLang.
+3. Both backend runs write into the same campaign output directory.
+
+Check each environment before a long run:
+
+```bash
+source .venv-vllm/bin/activate
+serve-optimize doctor --profile vllm
+deactivate
+
+source .venv-sglang/bin/activate
+serve-optimize doctor --profile sglang
+deactivate
+```
+
+If vLLM or SGLang was already installed, update the environment from the pinned profile first:
+
+```bash
+uv pip install \
+  --python .venv-vllm/bin/python \
+  --upgrade \
+  --torch-backend=auto \
+  -r requirements/profiles/vllm.txt
+
+uv pip install \
+  --python .venv-sglang/bin/python \
+  --upgrade \
+  -r requirements/profiles/sglang.txt
+```
+
+Then rerun the two doctor commands above.
+
+## Run With Separate Backend Environments
+
+Run vLLM and SGLang separately, using one shared output directory:
 
 ```bash
 output=results/overnight-campaign
+
+source .venv-vllm/bin/activate
 scripts/run_overnight_campaign.sh standard vllm "$output"
+deactivate
+
+source .venv-sglang/bin/activate
 scripts/run_overnight_campaign.sh standard sglang "$output"
+deactivate
 ```
 
-Use `all` only in an environment where both backend commands are installed:
+Use `all` only in an environment where both backend commands are installed and verified:
 
 ```bash
 scripts/run_overnight_campaign.sh standard all
 ```
+
+The split environment flow is the safer default because the validated vLLM and SGLang package stacks are intentionally separate.
+
+## Arguments
 
 Arguments are:
 
@@ -28,9 +79,9 @@ Defaults are `standard`, `all`, and a timestamped directory under `results`. `BA
 
 The default goal matrix is:
 
-* `balanced`
-* `throughput`, mapped to the Managed Mode `performance` goal
-* `energy_efficient`, mapped to the Managed Mode `efficient` goal
+1. `balanced`
+2. `throughput`, mapped to the Managed Mode `performance` goal
+3. `energy_efficient`, mapped to the Managed Mode `efficient` goal
 
 Override it with:
 
@@ -58,18 +109,24 @@ Optional gated models live in `configs/overnight_gated_models.tsv`. With `INCLUD
 
 ```bash
 INCLUDE_GATED=1 scripts/run_overnight_campaign.sh quick vllm
-INCLUDE_GATED=0 scripts/run_overnight_campaign.sh standard all
+INCLUDE_GATED=0 scripts/run_overnight_campaign.sh standard vllm
 ```
 
-Set up a read token on this server:
+Set up a read token once on this server. Do it inside each backend environment if you use saved local authentication:
 
 ```bash
-uv pip install huggingface-hub
+source .venv-vllm/bin/activate
 hf auth login
 hf auth whoami
+deactivate
+
+source .venv-sglang/bin/activate
+hf auth login
+hf auth whoami
+deactivate
 ```
 
-For noninteractive shells, export a token before running the campaign:
+For noninteractive shells, export a token before running each backend campaign command:
 
 ```bash
 export HF_TOKEN=hf_your_read_token
@@ -91,24 +148,28 @@ Approval is controlled by the model owner. The runner treats missing approval as
 
 The script uses:
 
-* four evaluated candidates, including the safe default baseline
-* two trials per candidate
-* medium workload profile
-* eight warmup requests
-* five seconds of idle baseline sampling
-* sixty seconds of active soak time
-* fifteen minute backend startup timeout
-* streaming measurements for TTFT and TPOT
+1. six evaluated candidates, including the safe default baseline
+2. two trials per candidate
+3. medium workload profile
+4. eight warmup requests
+5. five seconds of idle baseline sampling
+6. sixty seconds of active soak time
+7. fifteen minute backend startup timeout
+8. fresh measurements by default, so new campaigns build evidence instead of reusing old rows
+9. Hugging Face model prefetch before backend launches when the `hf` CLI is available
+10. streaming measurements for TTFT and TPOT
 
 Override these without editing the script:
 
 ```bash
-LIMIT=6 \
+LIMIT=8 \
 TRIALS=3 \
 WARMUP_REQUESTS=12 \
 IDLE_BASELINE_SECONDS=8 \
 SOAK_SECONDS=120 \
 STARTUP_TIMEOUT=1200 \
+EVIDENCE_FRESHNESS_HOURS=168 \
+PREFETCH_MODELS=0 \
 scripts/run_overnight_campaign.sh standard vllm results/my-campaign
 ```
 
@@ -118,6 +179,6 @@ Use `MODEL_FILE=/path/to/models.tsv` for a custom manifest with the same tab sep
 
 A positive `improvement_percent` always means the selected configuration is better for that metric. The calculation increases with throughput and tokens per watt, and decreases with latency, power, and joules per token.
 
-The quickest human view is `overnight_summary.md`. It lists backend, goal, model, selected versus baseline values, percentage changes, and skipped cells.
+The quickest human view is `overnight_summary.md`. It lists the latest measured comparison for each backend, goal, and model, then lists the latest skipped or unavailable cells. If you reuse an output directory for retries, older attempts are kept in the run artifacts but no longer double count in the headline tables.
 
 The comparison remains scoped to evaluated candidates. It does not claim a globally optimal serving configuration.

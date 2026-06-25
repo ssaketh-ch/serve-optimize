@@ -11,3 +11,5 @@ Repository helper scripts.
 * `plot_pareto.py`: optional plotting helper for generated Pareto artifacts.
 
 Run scripts from the repository root.
+
+Backend scripts inherit the active shell environment. They do not activate backend environments internally. For managed vLLM, activate `.venv-vllm` first. For managed SGLang, activate `.venv-sglang` first. When collecting both backends for one campaign, run the vLLM script and the SGLang script separately with the same output directory.

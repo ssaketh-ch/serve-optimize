@@ -1,10 +1,10 @@
 # Release Engineering
 
-## Phase Eight Status
+## Current Release Gate
 
-Phase Eight defines the local release gate for Serve Optimize.
+Serve Optimize uses a local release gate in this workspace. The CI workflow file is present for hosted use, but local verification remains the source of truth before publishing or deploying changes.
 
-The release gate is intentionally local for this workspace. The CI workflow file is present for hosted use, but local verification remains the source of truth.
+This page records the Phase Eight release engineering gate for the current deployed project surface.
 
 ## Local Release Gate
 
@@ -69,6 +69,6 @@ No database migration command is required for the current evidence schema. Futur
 
 Generated artifacts belong under `results/` or an explicit user supplied output directory. Tests and release checks must not require deleting user artifacts.
 
-## Phase Nine Handoff
+## Research Artifact Policy
 
-After this phase, research packaging should use existing managed run artifacts and must not imply coverage for models, hardware, workloads, or backends that were not present in the supplied evidence.
+Research packaging uses existing managed run artifacts and must not imply coverage for models, hardware, workloads, or backends that were not present in the supplied evidence.

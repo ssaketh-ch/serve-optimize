@@ -11,12 +11,15 @@ model_file=${MODEL_FILE:-$repo_root/configs/overnight_models.tsv}
 gated_model_file=${GATED_MODEL_FILE:-$repo_root/configs/overnight_gated_models.tsv}
 include_gated=${INCLUDE_GATED:-auto}
 goals_csv=${GOALS:-balanced,throughput,energy_efficient}
-limit=${LIMIT:-4}
+limit=${LIMIT:-6}
 trials=${TRIALS:-2}
 warmup_requests=${WARMUP_REQUESTS:-8}
 idle_baseline_seconds=${IDLE_BASELINE_SECONDS:-5}
 soak_seconds=${SOAK_SECONDS:-60}
 startup_timeout=${STARTUP_TIMEOUT:-900}
+evidence_freshness_hours=${EVIDENCE_FRESHNESS_HOURS:-0}
+prefetch_models=${PREFETCH_MODELS:-1}
+prefetch_max_workers=${PREFETCH_MAX_WORKERS:-4}
 
 case "$suite" in
   quick) max_tier=1 ;;
@@ -122,6 +125,10 @@ classify_failure() {
     echo "model_access"
     return
   fi
+  if failure_matches 'Local HF snapshot.*has no files|\.incomplete|snapshot_download|hf_hub_download|huggingface.*download|failed to download|Cannot find any model weights|Unable to find weights' "$log_path" "$run_dir"; then
+    echo "model_download"
+    return
+  fi
   if failure_matches 'SGLANG_GRPC_PORT|server process exited with return code' "$log_path" "$run_dir"; then
     echo "backend_launch"
     return
@@ -135,7 +142,7 @@ classify_failure() {
 
 skip_entire_model_reason() {
   case "$1" in
-    oom|model_access|process_killed_possible_oom) return 0 ;;
+    oom|model_access|model_download|process_killed_possible_oom) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -167,8 +174,8 @@ if should_include_gated; then
     echo "gated model file not found: $gated_model_file" >&2
   fi
 fi
-printf 'suite=%s\nbackends=%s\ngoals=%s\nlimit=%s\ntrials=%s\nwarmup_requests=%s\nidle_baseline_seconds=%s\nsoak_seconds=%s\nstartup_timeout=%s\ninclude_gated=%s\n' \
-  "$suite" "${backends[*]}" "${goals[*]}" "$limit" "$trials" "$warmup_requests" "$idle_baseline_seconds" "$soak_seconds" "$startup_timeout" "$include_gated" \
+printf 'suite=%s\nbackends=%s\ngoals=%s\nlimit=%s\ntrials=%s\nwarmup_requests=%s\nidle_baseline_seconds=%s\nsoak_seconds=%s\nstartup_timeout=%s\nevidence_freshness_hours=%s\nprefetch_models=%s\nprefetch_max_workers=%s\ninclude_gated=%s\n' \
+  "$suite" "${backends[*]}" "${goals[*]}" "$limit" "$trials" "$warmup_requests" "$idle_baseline_seconds" "$soak_seconds" "$startup_timeout" "$evidence_freshness_hours" "$prefetch_models" "$prefetch_max_workers" "$include_gated" \
   >"$output_root/campaign.env"
 failures_path="$output_root/failures.tsv"
 if [[ ! -f "$failures_path" ]]; then
@@ -178,10 +185,69 @@ fi
 failures=0
 declare -A skipped_models=()
 declare -A skipped_model_backends=()
+
+hf_download_command() {
+  if command -v hf >/dev/null 2>&1; then
+    echo "hf"
+    return 0
+  fi
+  if command -v huggingface-cli >/dev/null 2>&1; then
+    echo "huggingface-cli"
+    return 0
+  fi
+  return 1
+}
+
+prefetch_model() {
+  local model=$1
+  local slug=$2
+  case "$prefetch_models" in
+    1|true|yes) ;;
+    0|false|no) return 0 ;;
+    *) echo "PREFETCH_MODELS must be 1 or 0" >&2; exit 2 ;;
+  esac
+  local command_name
+  if ! command_name=$(hf_download_command); then
+    echo "[$(date -u +%FT%TZ)] Hugging Face CLI not found, continuing without prefetch"
+    return 0
+  fi
+  local log_dir="$output_root/logs/prefetch"
+  local log_path="$log_dir/$slug.log"
+  mkdir -p "$log_dir"
+  echo "[$(date -u +%FT%TZ)] prefetching $model" | tee -a "$log_path"
+  "$command_name" download "$model" \
+    --include "*.json" \
+    --include "*.model" \
+    --include "*.txt" \
+    --include "*.tiktoken" \
+    --include "*.safetensors" \
+    --include "*.bin" \
+    --exclude "*.gguf" \
+    --exclude "*.onnx" \
+    --exclude "*.h5" \
+    --max-workers "$prefetch_max_workers" \
+    2>&1 | tee -a "$log_path"
+  local status=${PIPESTATUS[0]}
+  if (( status != 0 )); then
+    local reason="model_download"
+    if grep -Eiq 'gated repo|restricted|not in the authorized list|401 client error|403 client error|authentication' "$log_path"; then
+      reason="model_access"
+    fi
+    failures=$((failures + 1))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "prefetch" "all" "$model" "$status" "$reason" "$log_path" >>"$failures_path"
+    echo "[$(date -u +%FT%TZ)] skipped $model after prefetch failure status=$status reason=$reason" | tee -a "$log_path"
+    skipped_models[$model]=$reason
+    return 1
+  fi
+  echo "[$(date -u +%FT%TZ)] completed prefetch for $model" | tee -a "$log_path"
+  return 0
+}
+
 while IFS=$'\t' read -r tier model family size_class architecture; do
   [[ -z "$tier" || "$tier" == \#* ]] && continue
   (( tier > max_tier )) && continue
   slug=${model//\//--}
+  prefetch_model "$model" "$slug" || continue
   for backend in "${backends[@]}"; do
     if [[ -n "${skipped_models[$model]:-}" ]]; then
       echo "[$(date -u +%FT%TZ)] skipping $model for remaining cells after ${skipped_models[$model]}"
@@ -210,6 +276,7 @@ while IFS=$'\t' read -r tier model family size_class architecture; do
         --soak-seconds "$soak_seconds" \
         --startup-timeout "$startup_timeout" \
         --evidence-db "$output_root/evidence.sqlite" \
+        --evidence-freshness-hours "$evidence_freshness_hours" \
         --out "$run_dir" \
         2>&1 | tee -a "$log_path"
       status=${PIPESTATUS[0]}
