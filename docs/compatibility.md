@@ -1,12 +1,12 @@
 # Compatibility Contract
 
-This document defines the current supported product surface. It is the authority for backend, evidence, artifact, installation, and exclusion claims.
+This document defines the supported product surface. It is the authority for backend, evidence, artifact, installation, and exclusion claims.
 
-The project is currently deployed on the target GPU server. Support claims below describe the live product contract, not a hypothetical roadmap. Historical verification notes remain in [Verification](verification.md).
+Support claims describe the product contract, not a hypothetical roadmap. Historical verification notes remain in [Verification](development/verification.md).
 
 ## Support Levels
 
-* First class: implemented, tested, and validated with real runtime artifacts on the current validation host.
+* First class: implemented, tested, and validated with real runtime artifacts in a documented validation environment.
 * Supported when available: implemented and tested, but dependent on local runtime or hardware availability.
 * Planned: not implemented and must not be presented as available.
 
@@ -24,7 +24,7 @@ The project is currently deployed on the target GPU server. Support claims below
 
 | Backend | Support | Validated runtime | Notes |
 |---|---|---|---|
-| vLLM | First class | vLLM `0.23.0`, Torch `2.11.0+cu130`, Python `3.12.3` | Installed capability detection, canonical rendering, lifecycle, evidence, and recommendation paths are validated on the current Blackwell host. |
+| vLLM | First class | vLLM `0.23.0`, Torch `2.11.0+cu130`, Python `3.12.3` | Installed capability detection, canonical rendering, lifecycle, evidence, and recommendation paths are validated with the pinned profile. |
 | SGLang | First class for the detected supported surface | SGLang `0.5.13.post1`, Torch `2.11.0`, Transformers `5.8.1` | The clean install profile resolves on Python 3.12. Runtime support is bounded by installed capability detection and is validated by a local profile doctor and Qwen smoke run. |
 | TensorRT LLM | Planned only | none | Not in current Managed Mode scope. No adapter, engine build lifecycle, evidence, or recommendation support exists. |
 | TGI, LMDeploy, llama.cpp, NIM | Attach only | none | They may be measured through Attach Mode when they expose a compatible endpoint. Serve Optimize does not own their Managed Mode lifecycle. |
@@ -203,7 +203,7 @@ Validated backend measurements use isolated environments installed from:
 
 Backend extras and requirement profiles are pinned to the validated vLLM and SGLang stacks. The backend profiles are mutually exclusive because their Torch and Transformers requirements conflict.
 
-See `docs/installation.md` for clean uv installation and profile verification commands.
+See [INSTALL.md](../INSTALL.md) for clean uv installation and profile verification commands.
 
 Unvalidated backend versions are not part of the support contract. SSL verification must remain enabled for dependency installation.
 
@@ -237,16 +237,15 @@ Attach Mode and Managed Mode accept JSON workload manifests. Workload fingerprin
 
 Supported SLO guards are TTFT, TPOT, p95 latency, minimum token throughput, and maximum failed request rate. A candidate that violates one of these constraints is ineligible for recommendation.
 
-## Current Validation Baseline
+## Validation Baseline
 
-The deployed validation baseline includes:
+The validation baseline includes:
 
 * clean core, telemetry, vLLM, and SGLang install profile checks
 * managed vLLM measurements with runtime fingerprinted evidence
 * managed SGLang measurements for the detected supported surface
 * exact fresh evidence reuse checks
 * managed resume checks
-* overnight campaign summaries with default baseline comparisons
 * validation campaign and research package artifact generation
 
-Older phase evidence paths remain documented in [Verification](verification.md) as historical audit records. New claims should use the latest managed run artifacts and validation campaign outputs supplied with the current deployment.
+Older phase evidence paths remain documented in [Verification](development/verification.md) as historical audit records. New claims should use managed run artifacts and validation campaign outputs for the target environment.

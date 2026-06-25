@@ -47,7 +47,7 @@ flowchart TB
 | Telemetry | Samples power, memory, temperature, clocks, utilization, and power limits when the local platform exposes them. |
 | Evidence store | Saves measured results with fingerprints so exact reuse is safe and auditable. |
 | Recommendation engine | Scores measured candidates, applies SLO eligibility, builds Pareto views, and writes the selected config. |
-| Campaign tools | Plan or run multi model, multi backend validation and overnight campaigns. |
+| Campaign tools | Plan multi model and multi backend validation campaigns. |
 
 ## Attach Mode
 
@@ -511,10 +511,9 @@ flowchart TD
     D --> E
     E --> F[Validation campaign]
     E --> G[Research package]
-    E --> H[Overnight summary]
 ```
 
-The generated scripts and overnight runner inherit the active shell environment. They do not activate backend environments internally.
+Generated campaign scripts inherit the active shell environment. They do not activate backend environments internally.
 
 ## Failure Model
 
@@ -533,19 +532,19 @@ Managed Mode records failures instead of hiding them.
 
 If a backend handle exists, cleanup runs through the stop path even after a health or benchmark failure.
 
-## Current Deployment Boundaries
+## Product Boundaries
 
-Serve Optimize is live for measured configuration optimization with:
+Serve Optimize supports measured configuration optimization with:
 
 1. Attach Mode for OpenAI compatible endpoints.
 2. Managed Mode for vLLM.
 3. Managed Mode for the detected supported SGLang surface.
 4. Runtime fingerprinted evidence.
 5. Managed resume.
-6. Campaign planning and overnight campaigns.
+6. Campaign planning.
 7. Validation and research packaging from existing artifacts.
 
-Current explicit limits:
+Explicit limits:
 
 1. Recommendations are bounded to evaluated candidates.
 2. The candidate search is not exhaustive.

@@ -1,6 +1,6 @@
 # Paper Outline
 
-This is a planned paper structure. It includes evaluation goals and claims that are not yet implemented or proven. Current product support is defined in `docs/compatibility.md`.
+This is a planned paper structure. It includes evaluation goals and claims that are not yet implemented or proven. Product support is defined in [Compatibility](../compatibility.md).
 
 Working title:
 

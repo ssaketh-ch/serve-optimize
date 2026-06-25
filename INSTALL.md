@@ -8,7 +8,7 @@ The practical rule is simple:
 
 1. Use the vLLM environment when running vLLM commands.
 2. Use the SGLang environment when running SGLang commands.
-3. Use one shared output directory when you want both backend results in the same campaign report.
+3. Run generated campaign scripts from the matching backend environment.
 
 ## Prerequisites
 
@@ -145,22 +145,6 @@ The SGLang wheel stack targets CUDA 13. It no longer requires the old validation
 
 Repository scripts use the active shell environment. They do not activate `.venv-vllm` or `.venv-sglang` internally.
 
-For the overnight campaign, run the same output directory once per backend:
-
-```bash
-output=results/overnight-campaign
-
-source .venv-vllm/bin/activate
-scripts/run_overnight_campaign.sh standard vllm "$output"
-deactivate
-
-source .venv-sglang/bin/activate
-scripts/run_overnight_campaign.sh standard sglang "$output"
-deactivate
-```
-
-Use `scripts/run_overnight_campaign.sh standard all "$output"` only from an environment where both backend commands are intentionally installed and verified. The split environment flow above is the safer default.
-
 Campaign plan scripts follow the same rule. Run each generated backend script in the matching backend environment, then run the generated postprocess script after both backend runs finish.
 
 ## Automated Install
@@ -193,28 +177,9 @@ For noninteractive runs, export the token instead:
 export HF_TOKEN=hf_your_read_token
 ```
 
-Hugging Face Hub uses the saved token by default, and `HF_TOKEN` overrides the saved token when set. Request gated model access from the model page in a browser before launching a campaign.
+Hugging Face Hub uses the saved token by default, and `HF_TOKEN` overrides the saved token when set. Request gated model access from the model page in a browser before launching a managed run.
 
-## Current Validation Host
-
-Recorded on 2026-06-23:
-
-| Component | Value |
-|---|---|
-| OS | Ubuntu 24.04.4 LTS |
-| Python | 3.12.3 |
-| GPU | NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 96 GB |
-| NVIDIA driver | 595.71.05 |
-| Driver CUDA capability | 13.2 |
-| CUDA toolkit | 13.2 |
-| vLLM | 0.23.0 |
-| Torch | 2.11.0+cu130 in the clean vLLM profile environment |
-| Transformers | 5.9.0 |
-| Hugging Face Hub | 1.17.0 |
-| NVML Python bindings | 13.610.43 |
-
-The vLLM profile passes the profile doctor on this host. Runtime launch evidence is recorded in [Verification](verification.md).
-Review [Security Notes](security.md) before production deployment. It records audit commands and the current upstream advisory boundary for optional backend stacks.
+Runtime launch evidence and verification notes are recorded in [Verification](docs/development/verification.md). Review [Security Notes](docs/security.md) before production deployment. It records audit commands and the current upstream advisory boundary for optional backend stacks.
 
 ## Rules
 

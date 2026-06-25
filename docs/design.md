@@ -6,11 +6,11 @@ The product owns candidate generation, validation, benchmark execution, telemetr
 
 AIConfigurator is an optional candidate source and prior. It is not the executor, measurement system, or source of truth.
 
-For the complete deployed flow with diagrams, see [Architecture](architecture.md). This page is the shorter design contract.
+For the complete flow with diagrams, see [Architecture](architecture.md). This page is the shorter design contract.
 
-## Current Deployment
+## Product Workflows
 
-Serve Optimize is deployed for two production style workflows:
+Serve Optimize supports two production style workflows:
 
 * Attach Mode for measuring already running OpenAI compatible endpoints.
 * Managed Mode for launching, measuring, and recommending configurations for vLLM and the detected supported SGLang surface.
@@ -262,7 +262,7 @@ These artifacts explain planned backend, workload, budget, evidence, output, rep
 * Failed and unavailable runs keep diagnostics.
 * Artifact changes should remain backward compatible where practical.
 
-## Current Limits
+## Limits
 
 * vLLM and SGLang require separate installation profiles because their validated runtime stacks conflict.
 * Candidate generation is bounded rather than exhaustive.
@@ -272,4 +272,4 @@ These artifacts explain planned backend, workload, budget, evidence, output, rep
 * TGI, LMDeploy, llama.cpp, and NIM remain external Attach Mode targets unless lifecycle ownership is separately scoped.
 * Managed candidates are evaluated sequentially.
 
-See [Compatibility](compatibility.md) for the precise current contract.
+See [Compatibility](compatibility.md) for the precise support contract.

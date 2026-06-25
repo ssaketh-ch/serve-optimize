@@ -65,4 +65,4 @@ vLLM and SGLang evidence cannot collide as exact matches.
 * Attach Mode serve plan generation may remain backend specific.
 * Generic recommendation tables retain optional vLLM originated columns when absent values are harmless.
 
-No broad backend abstraction refactor is required for the current deployed product surface.
+No broad backend abstraction refactor is required for the supported product surface.

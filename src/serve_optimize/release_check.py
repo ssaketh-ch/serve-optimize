@@ -13,19 +13,20 @@ RELEASE_CHECK_SCHEMA_VERSION = "release-check/v1"
 REQUIRED_FILES = (
     ".github/workflows/ci.yml",
     "CONTRIBUTING.md",
+    "INSTALL.md",
     "LICENSE",
+    "QUICKSTART.md",
     "README.md",
     "SECURITY.md",
     "configs/backends.yaml",
     "configs/serving_engines.yaml",
+    "docs/README.md",
     "docs/compatibility.md",
     "docs/decisions/0003-backend-expansion-scope.md",
     "docs/design.md",
-    "docs/installation.md",
-    "docs/product_readiness.md",
-    "docs/release.md",
+    "docs/development/release.md",
     "docs/support_matrix.md",
-    "docs/verification.md",
+    "docs/development/verification.md",
     "feature_list.json",
     "pyproject.toml",
     "requirements/README.md",
@@ -231,7 +232,7 @@ def _ci_checks(root: Path) -> list[dict[str, Any]]:
 def _support_document_checks(root: Path) -> list[dict[str, Any]]:
     backend_config_text = _read_text(root / "configs/backends.yaml")
     serving_engine_text = _read_text(root / "configs/serving_engines.yaml")
-    release_text = _read_text(root / "docs/release.md")
+    release_text = _read_text(root / "docs/development/release.md")
     requirements_text = _read_text(root / "requirements/README.md")
     support_text = _read_text(root / "docs/support_matrix.md")
     compatibility_text = _read_text(root / "docs/compatibility.md")

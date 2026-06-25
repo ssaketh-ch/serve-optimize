@@ -3,95 +3,64 @@
 Serve Optimize measures LLM serving behavior and recommends the best configuration among evaluated candidates for a selected goal.
 
 ```text
-   _____                            ____        __  _           _
-  / ___/___  ______   _____        / __ \____  / /_(_)___ ___  (_)___  ___
-  \__ \/ _ \/ ___/ | / / _ \_____/ / / / __ \/ __/ / __ `__ \/ /_  / / _ \
- ___/ /  __/ /   | |/ /  __/____/ /_/ / /_/ / /_/ / / / / / / / / /_/  __/
-/____/\___/_/    |___/\___/     \____/ .___/\__/_/_/ /_/ /_/_/ /___/\___/
-                                    /_/
+  ____                             ___        _   _           _
+ / ___|  ___ _ ____   _____       / _ \ _ __ | |_(_)_ __ ___ (_)_______
+ \___ \ / _ \ '__\ \ / / _ \_____| | | | '_ \| __| | '_ ` _ \| |_  / _ \
+  ___) |  __/ |   \ V /  __/_____| |_| | |_) | |_| | | | | | | |/ /  __/
+ |____/ \___|_|    \_/ \___|      \___/| .__/ \__|_|_| |_| |_|_/___\___|
+                                        |_|
 
 Serve Optimize
 Energy aware LLM serving optimization
 ```
 
-It supports two product paths:
+Serve Optimize has two operating modes:
 
 * Attach Mode benchmarks an already running OpenAI compatible endpoint.
 * Managed Mode generates candidates, validates them, launches supported backends, benchmarks their OpenAI compatible endpoints, collects optional telemetry, stops the launched process group, and writes recommendation artifacts.
 
-Measured runtime evidence is the source of truth. AIConfigurator predictions may propose or prioritize candidates, but they never replace measured results or exact fresh measured evidence.
+Measured runtime evidence is the source of truth. AIConfigurator predictions can propose or prioritize candidates, but they never replace measured results or exact fresh measured evidence.
 
-## Current Status
+Recommendations are always scoped to the evaluated set. The correct claim is:
 
-Serve Optimize is live on the current GPU server for measured LLM serving configuration optimization. The deployed workflow supports managed vLLM and SGLang measurements, overnight campaigns, runtime evidence, and baseline versus optimized recommendation summaries.
+```text
+best among evaluated candidates
+```
 
-Verified capabilities include:
+## Quick Start
 
-* NVIDIA GPU and MIG hardware detection
-* synthetic and local functional benchmark paths
-* OpenAI compatible endpoint benchmarking
-* optional NVML and `nvidia-smi` telemetry
-* throughput, latency, power, energy, and efficiency metrics
-* Attach Mode recommendations
-* first class Managed Mode support for vLLM and SGLang
-* capability aware candidate generation and prelaunch validation
-* canonical rendered launch configurations
-* runtime fingerprinted evidence and exact reuse
-* measured recommendation, Pareto, repeatability, and campaign artifacts
-* lifecycle diagnostics for availability, launch, health, benchmark, stop, and interruption failures
-* release readiness checks and research package artifacts
-
-Validated backend stacks:
-
-| Backend | Validated version | Status |
-|---|---|---|
-| vLLM | `0.23.0` | First class Managed Mode, validated on the current Blackwell host |
-| SGLang | `0.5.13.post1` | First class for the supported detected surface; clean profile resolution verified |
-| TensorRT LLM | none | Planned only; Managed Mode is not in current scope |
-
-External TGI, LMDeploy, llama.cpp, NIM, and TensorRT LLM endpoints may be measured through Attach Mode when they expose an OpenAI compatible API. Serve Optimize does not own their lifecycle.
-
-See [Compatibility](docs/compatibility.md) for the exact support, evidence, artifact, installation, and exclusion contracts.
-See [Architecture](docs/architecture.md) for the full Attach Mode and Managed Mode flow, including data collection, pruning, evidence reuse, and recommendation scoring.
-
-## Install
-
-Core development installation:
+Start with the core development and Attach Mode environment:
 
 ```bash
 uv venv --python python3 .venv
 uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
+.venv/bin/serve-optimize --help
+.venv/bin/serve-optimize detect
+.venv/bin/serve-optimize doctor
 ```
 
-The backend profiles are pinned to the validated split stacks and must be installed in separate environments.
+Run the quick workflow guide from [QUICKSTART.md](QUICKSTART.md).
 
-For managed vLLM and SGLang, install the two backend environments from [Installation](docs/installation.md). Helper scripts use the active shell environment. They do not switch between `.venv-vllm` and `.venv-sglang` automatically.
+## Installation
 
-Do not disable SSL verification to install backend dependencies.
+Managed vLLM and Managed SGLang use separate Python environments because their validated backend stacks pin different runtime packages. Install those environments from [INSTALL.md](INSTALL.md) before running Managed Mode measurements.
 
-Reproducible uv profiles are documented in [Installation](docs/installation.md).
-Dependency audit commands and current backend advisory boundaries are documented in [Security Notes](docs/security.md).
+The short rule:
 
-## Basic Checks
-
-```bash
-serve-optimize detect
-serve-optimize doctor
-serve-optimize telemetry-check --telemetry auto --duration 5 --out results/telemetry-check
-```
-
-`telemetry-check` samples telemetry without running inference. It writes raw samples, a summary, capability metadata, and a report.
+* Use `.venv-vllm` for vLLM Managed Mode.
+* Use `.venv-sglang` for SGLang Managed Mode.
+* Keep SSL verification enabled when installing dependencies.
 
 ## Attach Mode
 
-Attach Mode measures the endpoint that is already running:
+Attach Mode measures an endpoint you already started:
 
 ```bash
 serve-optimize recommend /path/to/model \
   --base-url http://127.0.0.1:8000/v1
 ```
 
-For an authenticated endpoint, keep the secret out of artifacts and pass only its environment variable name:
+For authenticated endpoints, keep the secret out of artifacts and pass only its environment variable name:
 
 ```bash
 export SERVE_OPTIMIZE_API_KEY="..."
@@ -102,7 +71,7 @@ serve-optimize endpoint-bench served-model \
 
 The environment variable name is recorded for reproducibility. Its value is read only when requests are sent and is not written to benchmark artifacts.
 
-Preview the same Attach Mode work without touching the endpoint:
+Preview Attach Mode without sending benchmark requests:
 
 ```bash
 serve-optimize recommend /path/to/model \
@@ -111,17 +80,6 @@ serve-optimize recommend /path/to/model \
 ```
 
 Attach Mode can compare candidate metadata and load shapes, but it cannot prove that the running endpoint was started with a proposed serve command.
-
-Important artifacts include:
-
-* `recommendation.json`
-* `scores.jsonl`
-* `pareto_frontier.json`
-* `pareto_frontier.csv`
-* `summary.json`
-* `metadata.json`
-* `report.txt`
-* per candidate benchmark and telemetry artifacts
 
 ## Managed Mode
 
@@ -138,7 +96,18 @@ serve-optimize optimize /path/to/model \
   --out results/managed-vllm
 ```
 
-Add `--dry-run` to write `preflight.json`, `preflight.txt`, rendered launch configs, workload configs, launch groups, and validation failures without launching servers or writing measured evidence.
+### SGLang
+
+```bash
+source .venv-sglang/bin/activate
+serve-optimize doctor --profile sglang
+
+serve-optimize optimize /path/to/model \
+  --backend sglang \
+  --out results/managed-sglang
+```
+
+Add `--dry-run` to write preflight artifacts without launching servers, health checking endpoints, sending benchmark requests, or writing measured evidence.
 
 Managed Mode also accepts workload identity and SLO guards:
 
@@ -149,8 +118,6 @@ serve-optimize optimize /path/to/model \
   --slo-min-throughput-tokens-per-sec 100 \
   --dry-run
 ```
-
-Use `--workload-manifest path/to/workload.json` for a JSON workload manifest. Workload fingerprints include the profile name, token distribution, and SLO constraints.
 
 Measurement quality controls can be added to endpoint or managed benchmarks:
 
@@ -163,82 +130,11 @@ serve-optimize optimize /path/to/model \
   --idle-baseline-seconds 5
 ```
 
-Summaries include gross energy and idle subtracted active energy when an idle baseline is available. Streaming runs also report TTFT and stream chunk TPOT when the endpoint emits timed response chunks. Soak runs extend the active request window and thermal summaries report observed temperature rise, slope, and whether the window is long enough to support a stability claim.
+Summaries include gross energy and idle subtracted active energy when an idle baseline is available. Streaming runs also report TTFT and stream chunk TPOT when the endpoint emits timed response chunks.
 
-Managed recommendations also write optimizer quality artifacts. `optimizer_quality.json` reports bounded evaluated candidate baselines, search regret, metric regret, and candidate policy coverage. `optimizer_failure_cache.json` records artifact backed failure cache entries for failed managed candidates. These artifacts remain scoped to evaluated candidates.
+## Evidence And Resume
 
-`recommendation_summary.json` and `recommendation_summary.txt` compare the selected configuration with the safe default baseline. Positive percentages mean the selected configuration improved that metric. Power and energy comparisons use idle subtracted values when a valid idle baseline is available.
-
-Resume an interrupted or partial managed campaign from completed matching workloads:
-
-```bash
-serve-optimize optimize /path/to/model \
-  --goal balanced \
-  --resume-from results/managed-vllm/managed-run-id \
-  --out results/managed-vllm-resumed
-```
-
-Resume reuses only prior completed measured workloads whose candidate id, workload id, rendered launch identity, and workload identity still match. Drifted, failed, unavailable, or incomplete workloads are measured normally.
-
-### SGLang
-
-Use the isolated SGLang profile:
-
-```bash
-source .venv-sglang/bin/activate
-serve-optimize doctor --profile sglang
-
-serve-optimize optimize /path/to/model \
-  --backend sglang \
-  --out results/managed-sglang
-```
-
-SGLang candidates preserve and fingerprint:
-
-```text
---disable-piecewise-cuda-graph
-```
-
-The option is emitted only when the installed SGLang command surface reports support.
-
-## Managed Lifecycle
-
-A managed evaluation performs:
-
-1. Hardware, model, backend, and capability detection.
-2. Candidate generation and prelaunch validation.
-3. Canonical command rendering.
-4. Runtime fingerprint and evidence compatibility checks.
-5. Exact fresh evidence reuse where allowed.
-6. Completed workload resume where `--resume-from` matches exact launch and workload identity.
-7. Server launch for remaining workloads.
-8. OpenAI compatible health checks and benchmarks.
-9. Optional telemetry collection.
-10. Evidence writes for measured workloads.
-11. Process group shutdown and lifecycle recording.
-12. Recommendation and Pareto artifact generation.
-
-Unsupported backend options are rejected or marked unavailable before launch. They are not silently translated.
-
-## Evidence
-
-Managed evidence is stored in SQLite and remains backend separated.
-
-Exact reuse requires a match across:
-
-* hardware identity
-* backend name and version
-* Torch, CUDA runtime, and Python versions
-* compiler toolchain identity
-* backend capability metadata
-* rendered launch command
-* canonical launch configuration
-* model identity
-* workload identity
-* telemetry compatibility
-* freshness policy
-
-Only exact fresh measured evidence may skip a measurement. Stale, near compatible, legacy, or runtime drifted evidence may be advisory but cannot be used as exact truth.
+Managed evidence is stored in SQLite and remains backend separated. Exact reuse requires matching hardware, backend, runtime, capabilities, rendered command, model identity, workload identity, telemetry requirements, and freshness policy.
 
 Inspect recent evidence:
 
@@ -248,64 +144,18 @@ serve-optimize evidence list \
   --limit 20
 ```
 
-## Managed Artifacts
-
-Every managed run writes inspectable artifacts, including:
-
-* `managed_run.json`
-* `runtime_environment.json`
-* `vllm_argument_capabilities.json` or `sglang_argument_capabilities.json`
-* `rendered_launch_configs.jsonl`
-* `launch_specs.jsonl`
-* `launch_groups.json`
-* `workload_configs.jsonl`
-* `server_lifecycle.jsonl`
-* `candidate_failures.jsonl`
-* `evidence_decisions.jsonl`
-* `candidate_synthesis.json`
-* `prior_candidates.json`
-* `prior_summary.json`
-* `evaluation_rungs.json`
-* `promotion_decisions.jsonl`
-* `managed_recommendation.json`
-* `managed_pareto_frontier.json`
-* `managed_pareto_frontier.csv`
-* `managed_report.txt`
-* `recommendation_summary.json`
-* `recommendation_summary.txt`
-* backend stdout and stderr logs for launched servers
-
-`recommendation_summary.txt` is the primary human facing deployment answer. `managed_recommendation.json` is the detailed automation and audit artifact.
-
-## Recommendation Scope
-
-Recommendations are always scoped to the evaluated set.
-
-The product may state:
-
-```text
-best among evaluated candidates
-```
-
-It must not claim exhaustive coverage unless a separate exhaustive experiment proves that claim.
-
-## Repeatability And Campaign Validation
-
-Compare existing managed runs:
+Resume an interrupted or partial managed run from completed matching workloads:
 
 ```bash
-serve-optimize repeatability RUN_DIR_1 RUN_DIR_2
+serve-optimize optimize /path/to/model \
+  --goal balanced \
+  --resume-from results/managed-vllm/managed-run-id \
+  --out results/managed-vllm-resumed
 ```
 
-Validate a collection of existing managed artifacts:
+Resume reuses only prior completed measured workloads whose candidate id, workload id, rendered launch identity, and workload identity still match.
 
-```bash
-serve-optimize validate-campaign \
-  RUN_DIR_1 RUN_DIR_2 \
-  --out results/validation-campaign
-```
-
-Campaign validation reads existing artifacts. It does not launch servers or create new measured evidence.
+## Campaign Planning
 
 Plan a broader managed validation campaign before collecting evidence:
 
@@ -321,59 +171,51 @@ serve-optimize campaign-plan \
   --out results/campaign-plan
 ```
 
-Campaign plans write a managed run matrix, executable per backend command scripts, a backend dispatcher, and a postprocessing script. Run each backend script in its matching isolated environment. The runners continue after individual failures so later matrix cells still execute. Campaign planning itself does not launch servers or create measured evidence.
+Campaign planning writes a managed run matrix, executable per backend scripts, a dispatcher, and a postprocessing script. Run each backend script in the matching isolated environment. Campaign planning itself does not launch servers or create measured evidence.
 
-For a ready to run multi family model suite with direct default versus optimized comparisons:
-
-```bash
-output=results/overnight-campaign
-
-source .venv-vllm/bin/activate
-scripts/run_overnight_campaign.sh standard vllm "$output"
-deactivate
-
-source .venv-sglang/bin/activate
-scripts/run_overnight_campaign.sh standard sglang "$output"
-deactivate
-```
-
-See [Overnight Model Campaign](docs/overnight_campaign.md) for the vLLM and SGLang matrix, gated model setup, model tiers, measurement defaults, output tables, and environment overrides.
-
-## Release And Research Artifacts
-
-Check release readiness:
+Validate existing managed run artifacts:
 
 ```bash
-serve-optimize release-check --out results/release-check
-```
-
-Package existing managed run artifacts for research analysis:
-
-```bash
-serve-optimize research-package \
+serve-optimize validate-campaign \
   RUN_DIR_1 RUN_DIR_2 \
-  --out results/research-package
+  --out results/validation-campaign
 ```
 
-Research packages write a manifest, methodology, run table, coverage table, and validation campaign summary. They do not launch servers or create new measured evidence.
+## Artifacts
 
-## Telemetry
+Managed runs write inspectable artifacts, including:
 
-Telemetry providers are optional and emit generic capability fields. Missing counters are represented as unavailable, not as zero.
+* `managed_run.json`
+* `runtime_environment.json`
+* backend capability metadata
+* `rendered_launch_configs.jsonl`
+* `launch_specs.jsonl`
+* `launch_groups.json`
+* `workload_configs.jsonl`
+* `server_lifecycle.jsonl`
+* `candidate_failures.jsonl`
+* `evidence_decisions.jsonl`
+* `managed_recommendation.json`
+* `managed_pareto_frontier.json`
+* `managed_pareto_frontier.csv`
+* `managed_report.txt`
+* `recommendation_summary.json`
+* `recommendation_summary.txt`
+* backend stdout and stderr logs for launched servers
 
-Current measured fields may include:
+`recommendation_summary.txt` is the primary human facing answer. `managed_recommendation.json` is the detailed automation and audit artifact.
 
-* power
-* temperature
-* memory usage
-* GPU and memory utilization
-* clocks
-* power limit
-* throttle reasons
+## Supported Surface
 
-Current energy values include gross active window estimates and idle subtracted active energy when an idle baseline is available. Prefill and decode phase attribution is not implemented.
+| Surface | Support |
+|---|---|
+| Attach Mode | First class for OpenAI compatible endpoints |
+| Managed vLLM | First class for the validated vLLM profile |
+| Managed SGLang | First class for the detected supported SGLang surface |
+| TensorRT LLM | Planned only for Managed Mode |
+| TGI, LMDeploy, llama.cpp, NIM | Attach Mode only when they expose an OpenAI compatible API |
 
-Prefill and decode energy attribution is not claimed because the current endpoint and telemetry path does not observe phase boundary markers. The raw power window is real, but assigning that energy to prefill versus decode would require backend phase events or a request trace with defensible phase timestamps.
+See [docs/compatibility.md](docs/compatibility.md) for exact support, evidence, artifact, installation, and exclusion contracts.
 
 ## Verification
 
@@ -384,41 +226,24 @@ ruff check .
 python -m json.tool feature_list.json
 serve-optimize --help
 serve-optimize optimize --help
-serve-optimize optimize --verbose-help
 serve-optimize validate-campaign --help
-serve-optimize release-check --help
-serve-optimize research-package --help
+serve-optimize campaign-plan --help
 ```
 
-The latest recorded result is maintained in [Verification](docs/verification.md).
-
-## Current Limitations
-
-* Managed candidate policies are bounded rather than exhaustive.
-* Workload profiles are not yet complete production trace manifests.
-* Prefill and decode phase attribution is not implemented.
-* Thermal stability claims require a sufficiently long active window. Short runs are reported as limited thermal evidence.
-* TensorRT LLM is planned only and outside current Managed Mode scope. Kubernetes, power limit control, and parallel candidate execution are not implemented.
-* SGLang runtime validation must be repeated on each target GPU environment because its supported command surface and kernels are capability dependent.
+The latest recorded verification notes are maintained in [docs/development/verification.md](docs/development/verification.md).
 
 ## Documentation
 
+* [Quick start](QUICKSTART.md)
+* [Installation](INSTALL.md)
+* [Documentation index](docs/README.md)
 * [Architecture](docs/architecture.md)
 * [System design](docs/design.md)
 * [Compatibility contract](docs/compatibility.md)
-* [Installation profiles](docs/installation.md)
-* [Architecture rules](docs/architecture_rules.md)
-* [Quickstart](docs/quickstart.md)
-* [Verification](docs/verification.md)
-* [Release engineering](docs/release.md)
-* [Product readiness](docs/product_readiness.md)
-* [Contributing](CONTRIBUTING.md)
-* [Security policy](SECURITY.md)
 * [Support matrix](docs/support_matrix.md)
+* [Security notes](docs/security.md)
 * [Research package](docs/research_package.md)
-* [Overnight model campaign](docs/overnight_campaign.md)
-* [Planned experimental methodology](docs/experiments.md)
-* [Literature and landscape](docs/literature-and-landscape.md)
+* [Release engineering](docs/development/release.md)
 
 ## License
 

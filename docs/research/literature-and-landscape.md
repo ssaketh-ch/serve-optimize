@@ -1,6 +1,6 @@
 # Literature And Tooling Landscape
 
-This document maps research and software relevant to Serve Optimize. It is a literature and future integration guide, not a current compatibility statement. Current support is defined in `docs/compatibility.md`.
+This document maps research and software relevant to Serve Optimize. It is a literature and future integration guide, not a current compatibility statement. Current support is defined in [Compatibility](../compatibility.md).
 
 ## Anchor Systems
 

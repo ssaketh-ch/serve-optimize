@@ -35,20 +35,7 @@ bash scripts/verify_full.sh
 * Do not weaken or delete tests to make verification pass.
 * Do not mark hardware, backend, telemetry, or evidence behavior verified without real commands and inspected artifacts.
 * Keep failed and unavailable run artifacts.
-* Record release verification in `docs/verification.md` or a release note.
-
-## Overnight Matrix And CLI Simplification
-
-Recorded on 2026-06-23:
-
-* overnight runner shell syntax passed
-* focused overnight summary and CLI tests passed
-* fast verification passed with 357 tests and 1 skipped test
-* full verification passed with 357 tests and 1 skipped test
-* Ruff passed
-* source distribution and wheel builds passed
-* packaged CLI smoke passed
-* release check passed with 72 checks
+* Record release verification in `docs/development/verification.md` or a release note.
 
 ## Product Readiness Hardening
 
@@ -276,9 +263,9 @@ Recorded on 2026-06-21:
 
 ## Security audit
 
-Latest dependency audit results are recorded in [Security Notes](security.md). The default project environment reported no known vulnerabilities. Optional backend profile advisories remain bounded to upstream vLLM, SGLang, and torch pins with no compatible fixed backend release available at the time of validation.
+Latest dependency audit results are recorded in [Security Notes](../security.md). The default project environment reported no known vulnerabilities. Optional backend profile advisories remain bounded to upstream vLLM, SGLang, and torch pins with no compatible fixed backend release available at the time of validation.
 
-## Current Validation Environment
+## Validation Environment
 
 Recorded on 2026-06-23:
 

@@ -6,10 +6,8 @@ Repository helper scripts.
 * `verify_full.sh`: full local release gate.
 * `verify_install_profile.sh`: creates and validates a fresh install profile.
 * `env_base_runtime.sh`: optional CUDA and compiler setup for source builds.
-* `run_overnight_campaign.sh`: runs the tiered model campaign and compares safe baseline with optimized results.
-* `summarize_overnight.py`: writes campaign baseline comparison tables.
 * `plot_pareto.py`: optional plotting helper for generated Pareto artifacts.
 
 Run scripts from the repository root.
 
-Backend scripts inherit the active shell environment. They do not activate backend environments internally. For managed vLLM, activate `.venv-vllm` first. For managed SGLang, activate `.venv-sglang` first. When collecting both backends for one campaign, run the vLLM script and the SGLang script separately with the same output directory.
+Backend scripts inherit the active shell environment. They do not activate backend environments internally. For managed vLLM, activate `.venv-vllm` first. For managed SGLang, activate `.venv-sglang` first. Generated campaign scripts should be run from the matching backend environment.

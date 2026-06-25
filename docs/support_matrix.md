@@ -1,6 +1,6 @@
 # Support Matrix
 
-This matrix reflects the currently deployed product surface.
+This matrix reflects the supported product surface.
 
 ## Product Modes
 
@@ -16,7 +16,7 @@ This matrix reflects the currently deployed product surface.
 
 | Backend | Status | Validated Runtime | Managed Mode |
 |---|---|---|---|
-| vLLM | First class | `0.23.0` | Runtime validated on the current Blackwell host. |
+| vLLM | First class | `0.23.0` | Runtime validated with the pinned vLLM profile. |
 | SGLang | First class for detected surface | `0.5.13.post1` | Clean profile resolution is verified; managed runtime support is capability detected and must pass local doctor checks. |
 | TensorRT LLM | Planned only | none | Managed Mode is not in current scope; Attach Mode may measure an external compatible endpoint. |
 | TGI | Attach only | none | Not supported. |

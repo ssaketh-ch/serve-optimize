@@ -4,7 +4,7 @@
 
 Serve Optimize uses a local release gate in this workspace. The CI workflow file is present for hosted use, but local verification remains the source of truth before publishing or deploying changes.
 
-This page records the Phase Eight release engineering gate for the current deployed project surface.
+This page records the Phase Eight release engineering gate for the supported project surface.
 
 ## Local Release Gate
 
@@ -63,7 +63,7 @@ The vLLM and SGLang runtime profiles remain separate because their Torch and Tra
 
 Machine readable artifacts carry explicit schema versions. Backward compatibility is preserved by accepting missing optional fields in older artifacts where the product already did so.
 
-No database migration command is required for the current evidence schema. Future migrations must be documented in this file and in `docs/verification.md`.
+No database migration command is required for the current evidence schema. Future migrations must be documented in this file and in `docs/development/verification.md`.
 
 ## Cleanup Policy
 

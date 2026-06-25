@@ -10,9 +10,9 @@ uv pip install --python .venv/bin/python -e ".[dev,telemetry]"
 .venv/bin/serve-optimize doctor
 ```
 
-Use the mutually exclusive backend profiles in `requirements/profiles` for managed vLLM and managed SGLang. See [Installation](installation.md) for the full setup and update flow.
+Use the mutually exclusive backend profiles in `requirements/profiles` for managed vLLM and managed SGLang. See [INSTALL.md](INSTALL.md) for the full setup and update flow.
 
-For a full explanation of how Attach Mode, Managed Mode, evidence, pruning, and recommendations fit together, see [Architecture](architecture.md).
+For a full explanation of how Attach Mode, Managed Mode, evidence, pruning, and recommendations fit together, see [Architecture](docs/architecture.md).
 
 Normal help shows the common path:
 
@@ -156,22 +156,6 @@ serve-optimize campaign-plan \
 
 The plan contains `campaign_plan.json`, `campaign_matrix.csv`, `campaign_commands.sh`, one executable script per backend, `campaign_postprocess.sh`, and a readable summary. Run `campaign_commands.sh vllm` in the vLLM environment and `campaign_commands.sh sglang` in the SGLang environment. Each backend runner continues through failed matrix cells. After all backend scripts finish, run `campaign_postprocess.sh` to analyze the timestamped managed run directories.
 
-For the ready made overnight model suite with baseline comparisons:
-
-```bash
-output=results/overnight-campaign
-
-source .venv-vllm/bin/activate
-scripts/run_overnight_campaign.sh standard vllm "$output"
-deactivate
-
-source .venv-sglang/bin/activate
-scripts/run_overnight_campaign.sh standard sglang "$output"
-deactivate
-```
-
-The overnight runner uses the active shell environment. See [Overnight Model Campaign](overnight_campaign.md) before using gated models or running both backends into one report.
-
 ## Verify The Repository
 
 ```bash
@@ -181,4 +165,4 @@ ruff check .
 python -m json.tool feature_list.json
 ```
 
-See [Compatibility](compatibility.md) before treating an optional backend or metric as supported.
+See [Compatibility](docs/compatibility.md) before treating an optional backend or metric as supported.
