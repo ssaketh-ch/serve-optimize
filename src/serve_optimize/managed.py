@@ -104,6 +104,7 @@ from .validation import CandidateValidationResult, validate_managed_candidate
 from .workloads import slo_note
 
 CandidateProvider = Callable[[], list[ServingConfig]]
+ManagedProgressCallback = Callable[[str, dict[str, Any]], None]
 WORKLOAD_EXTRA_KEYS = {
     "benchmark_duration_s",
     "dataset",
@@ -111,6 +112,7 @@ WORKLOAD_EXTRA_KEYS = {
     "max_new_tokens",
     "num_prompts",
     "num_requests",
+    "num_requests_adjusted_reason",
     "output_length",
     "request_rate",
     "timeout_s",
@@ -129,6 +131,8 @@ WORKLOAD_EXTRA_KEYS = {
     "prior_confidence",
     "prior_notes",
     "prior_source",
+    "requested_num_requests",
+    "requested_rung_num_requests",
     "raw_aiconfigurator_candidate",
     "base_workload_id",
     "measured_or_evidence_source",
@@ -233,6 +237,7 @@ def run_managed_evaluation(
     stream: bool = False,
     resume_from: Path | None = None,
     allow_remote_model_config_download: bool = False,
+    progress_callback: ManagedProgressCallback | None = None,
 ) -> ManagedRunSummary:
     backend = normalize_managed_backend_name(backend)
     _validate_run_inputs(backend, limit, trials, startup_timeout_s, cooldown_s)
@@ -240,6 +245,15 @@ def run_managed_evaluation(
     run_id = make_run_id(prefix="managed")
     run_dir = out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    _progress(
+        progress_callback,
+        "run_created",
+        run_id=run_id,
+        run_dir=str(run_dir),
+        backend=backend,
+        model=model,
+        goal=goal.value,
+    )
     resume_state = _load_managed_resume_state(
         resume_from,
         backend=backend,
@@ -294,6 +308,13 @@ def run_managed_evaluation(
         backend_name=backend,
         backend_version=_optional_str(backend_metadata.get("version")),
     ).to_artifact()
+    _progress(
+        progress_callback,
+        "environment_collected",
+        backend=backend,
+        backend_version=_optional_str(backend_metadata.get("version")),
+        runtime_fingerprint=_optional_str(runtime_environment.get("environment_fingerprint")),
+    )
     write_json(runtime_environment_path, runtime_environment)
     if vllm_argument_capabilities is not None:
         write_json(vllm_argument_capabilities_path, vllm_argument_capabilities.to_artifact())
@@ -302,6 +323,14 @@ def run_managed_evaluation(
     evidence_store, evidence_warnings = _open_evidence_store(
         evidence_db_path=evidence_db_path,
         evidence_write=evidence_write,
+    )
+    _progress(
+        progress_callback,
+        "evidence_ready",
+        db_path=str(evidence_db_path) if evidence_db_path is not None else None,
+        write_enabled=evidence_write and evidence_db_path is not None,
+        freshness_hours=evidence_freshness_hours,
+        warning_count=len(evidence_warnings),
     )
     if evidence_store is not None:
         try:
@@ -355,6 +384,13 @@ def run_managed_evaluation(
         model,
         allow_remote_download=allow_remote_model_config_download,
     )
+    _progress(
+        progress_callback,
+        "model_metadata",
+        metadata_known=model_metadata.metadata_known,
+        config_path=model_metadata.config_path,
+        quantization_method=model_metadata.quantization_method,
+    )
     candidate_generation = _provided_candidate_generation()
     if candidate_provider is not None:
         candidate_pool = candidate_provider()
@@ -392,6 +428,12 @@ def run_managed_evaluation(
             soak_duration_s=soak_duration_s,
             stream=stream,
         )
+    _progress(
+        progress_callback,
+        "candidates_generated",
+        candidate_count=len(candidate_pool),
+        source_counts=candidate_generation.candidate_source_counts,
+    )
     valid_candidates, validation_rejections = _validate_managed_candidate_pool(
         candidate_pool,
         backend=backend,
@@ -410,6 +452,12 @@ def run_managed_evaluation(
     )
     valid_candidates = canonical_candidates
     validation_rejections.extend(canonical_rejections)
+    _progress(
+        progress_callback,
+        "candidates_validated",
+        valid_count=len(valid_candidates),
+        rejected_count=len(validation_rejections),
+    )
     synthesis_summary = _empty_synthesis_summary()
     if candidate_provider is None:
         synthesis_summary = _synthesize_managed_candidates(
@@ -438,6 +486,12 @@ def run_managed_evaluation(
         valid_candidates = list(synthesis_summary.pop("_valid_candidates"))
         validation_rejections = list(synthesis_summary.pop("_validation_rejections"))
         rendered_launch_rows = list(synthesis_summary.pop("_rendered_launch_rows"))
+        _progress(
+            progress_callback,
+            "candidates_synthesized",
+            valid_count=len(valid_candidates),
+            rejected_count=len(validation_rejections),
+        )
     _append_jsonl(rendered_launch_configs_path, rendered_launch_rows)
     valid_candidate_count_before_prior_pruning = len(valid_candidates)
     rejected_candidate_count_before_prior_pruning = len(validation_rejections)
@@ -462,6 +516,12 @@ def run_managed_evaluation(
     )
     exact_fresh_ids = set(preflight["exact_fresh_ids"])
     evidence_priors = list(preflight["evidence_priors"])
+    _progress(
+        progress_callback,
+        "evidence_preflight",
+        exact_fresh_count=len(exact_fresh_ids),
+        evidence_prior_count=len(evidence_priors),
+    )
     synthesis_summary["final_preflight"] = {
         "exact_fresh_candidate_ids": sorted(exact_fresh_ids),
         "evidence_prior_count": len(evidence_priors),
@@ -492,6 +552,13 @@ def run_managed_evaluation(
         policy=prior_policy,
     )
     valid_candidates = pruning.candidates
+    _progress(
+        progress_callback,
+        "prior_pruning",
+        remaining_count=len(valid_candidates),
+        pruned_count=pruning.candidates_pruned_by_prior,
+        prior_sources_used=pruning.prior_sources_used,
+    )
     all_prior_candidates = [prior for result in prior_results for prior in result.candidates] + evidence_priors
     write_json(prior_candidates_path, all_prior_candidates)
     write_json(
@@ -547,6 +614,13 @@ def run_managed_evaluation(
         state.failures.append(failure)
         _append_jsonl(failures_path, [failure])
         state.candidate_results.append(_rejected_result(config, failure))
+        _progress(
+            progress_callback,
+            "candidate_rejected",
+            candidate_id=config.id,
+            stage="validation",
+            reason=failure.error,
+        )
 
     if staged_evaluation:
         active_candidates = valid_candidates
@@ -571,6 +645,15 @@ def run_managed_evaluation(
             )
             launch_groups = [_rung_launch_group(group, rung) for group in launch_groups]
             _append_jsonl(workload_configs_path, [workload for group in launch_groups for workload in group.workload_configs])
+            _progress(
+                progress_callback,
+                "rung_start",
+                rung=rung.name,
+                rung_index=rung.index,
+                candidate_count=len(rung_configs),
+                launch_group_count=len(launch_groups),
+                workload_count=sum(len(group.workload_configs) for group in launch_groups),
+            )
             _evaluate_launch_groups(
                 state=state,
                 launch_groups=launch_groups,
@@ -601,6 +684,7 @@ def run_managed_evaluation(
                 failures_path=failures_path,
                 launch_specs_path=launch_specs_path,
                 resume_state=resume_state,
+                progress_callback=progress_callback,
             )
             next_rung = active_rungs[index + 1] if index + 1 < len(active_rungs) else None
             if next_rung is None:
@@ -618,6 +702,14 @@ def run_managed_evaluation(
             promotion_decisions_by_rung[rung.name] = decisions
             _append_jsonl(promotion_decisions_path, decisions)
             promoted_ids = {decision.candidate_id for decision in decisions if decision.promoted}
+            _progress(
+                progress_callback,
+                "promotion",
+                from_rung=rung.name,
+                to_rung=next_rung.name,
+                promoted_count=len(promoted_ids),
+                candidate_count=len(decisions),
+            )
             active_candidates = [config for config in active_candidates if config.id in promoted_ids]
     else:
         rung = active_rungs[0]
@@ -639,6 +731,15 @@ def run_managed_evaluation(
         )
         launch_groups = [_rung_launch_group(group, rung) for group in launch_groups]
         _append_jsonl(workload_configs_path, [workload for group in launch_groups for workload in group.workload_configs])
+        _progress(
+            progress_callback,
+            "rung_start",
+            rung=rung.name,
+            rung_index=rung.index,
+            candidate_count=len(rung_configs),
+            launch_group_count=len(launch_groups),
+            workload_count=sum(len(group.workload_configs) for group in launch_groups),
+        )
         _evaluate_launch_groups(
             state=state,
             launch_groups=launch_groups,
@@ -669,6 +770,7 @@ def run_managed_evaluation(
             failures_path=failures_path,
             launch_specs_path=launch_specs_path,
             resume_state=resume_state,
+            progress_callback=progress_callback,
         )
 
     promotion_summary = summarize_promotions(
@@ -681,6 +783,11 @@ def run_managed_evaluation(
     synthesis_summary = _apply_synthesis_execution_status(synthesis_summary, state.candidate_results)
     write_json(candidate_synthesis_path, synthesis_summary)
     write_json(launch_groups_path, state.launch_group_rows)
+    _progress(
+        progress_callback,
+        "recommendation_start",
+        measured_row_count=len(state.rung_results),
+    )
     managed_recommendation = _write_managed_recommendation_artifacts(
         run_id=run_id,
         run_dir=run_dir,
@@ -702,6 +809,14 @@ def run_managed_evaluation(
         vllm_argument_capabilities=vllm_argument_capabilities,
         sglang_argument_capabilities=sglang_argument_capabilities,
         runtime_environment=runtime_environment,
+    )
+    _progress(
+        progress_callback,
+        "recommendation_complete",
+        status=managed_recommendation.status,
+        selected_config_id=managed_recommendation.selected_config_id,
+        confidence=managed_recommendation.recommendation_confidence,
+        reason=managed_recommendation.reason,
     )
     optimizer_failure_cache = _write_optimizer_failure_cache(
         optimizer_failure_cache_path,
@@ -822,6 +937,15 @@ def run_managed_evaluation(
         resume_warnings=resume_state.warnings if resume_state is not None else [],
     )
     write_json(run_dir / "managed_run.json", summary)
+    _progress(
+        progress_callback,
+        "run_complete",
+        status=summary.status,
+        completed_candidate_count=summary.completed_candidate_count,
+        candidate_count=summary.candidate_count,
+        failed_candidate_count=summary.failed_candidate_count,
+        run_dir=str(run_dir),
+    )
     return summary
 
 
@@ -1068,6 +1192,9 @@ def _configs_for_rung(
         num_requests = max(rung.min_num_requests, int(base_workload.num_requests * rung.num_requests_scale))
         if rung.max_num_requests is not None:
             num_requests = min(num_requests, rung.max_num_requests)
+        requested_rung_num_requests = num_requests
+        minimum_rung_requests = base_workload.concurrency + base_workload.warmup_requests
+        num_requests = max(num_requests, minimum_rung_requests)
         trial_count = max(1, rung.trials if rung.trials is not None else base_workload.trials)
         extra = dict(config.extra or {})
         extra.update(
@@ -1083,6 +1210,9 @@ def _configs_for_rung(
                 "trials": trial_count,
             }
         )
+        if requested_rung_num_requests < minimum_rung_requests:
+            extra["requested_rung_num_requests"] = requested_rung_num_requests
+            extra["num_requests_adjusted_reason"] = "raised_to_match_concurrency"
         rung_configs.append(replace(config, extra=extra))
     return rung_configs
 
@@ -1318,9 +1448,17 @@ def _evaluate_launch_groups(
     failures_path: Path,
     launch_specs_path: Path,
     resume_state: _ManagedResumeState | None = None,
+    progress_callback: ManagedProgressCallback | None = None,
 ) -> None:
     del telemetry
     for group in launch_groups:
+        _progress(
+            progress_callback,
+            "launch_group_start",
+            group_id=group.group_id,
+            rung=_group_rung(group),
+            workload_count=len(group.workload_configs),
+        )
         group_metadata: list[dict[str, object]] = []
         pending_workloads: list[tuple[ServingConfig, WorkloadConfig, object]] = []
         handle: ServerHandle | None = None
@@ -1365,6 +1503,14 @@ def _evaluate_launch_groups(
                                 details={**metadata, "group_id": group.group_id},
                             )
                         ],
+                    )
+                    _progress(
+                        progress_callback,
+                        "resume_hit",
+                        candidate_id=workload.candidate_id,
+                        workload_id=workload.workload_id,
+                        rung=workload.rung,
+                        summary_path=resume_record.summary_path,
                     )
                     continue
                 evidence_context = build_evidence_request_context(
@@ -1415,6 +1561,16 @@ def _evaluate_launch_groups(
                             "measurement_id": lookup.measurement.get("measurement_id") if lookup.measurement else None,
                         }
                         group_metadata.append(metadata)
+                        _progress(
+                            progress_callback,
+                            "evidence_lookup",
+                            candidate_id=workload.candidate_id,
+                            workload_id=workload.workload_id,
+                            rung=workload.rung,
+                            hit_type=lookup.hit_type.value,
+                            classification=decision.classification.value,
+                            used_as_exact=decision.used_as_exact,
+                        )
                         _append_jsonl(
                             lifecycle_path,
                             [
@@ -1451,10 +1607,26 @@ def _evaluate_launch_groups(
                                     **_workload_result_fields(workload, source="evidence"),
                                 )
                             )
+                            _progress(
+                                progress_callback,
+                                "evidence_hit",
+                                candidate_id=workload.candidate_id,
+                                workload_id=workload.workload_id,
+                                rung=workload.rung,
+                                evidence_key=evidence_context.evidence_key,
+                                measurement_id=lookup.measurement.get("measurement_id") if lookup.measurement else None,
+                            )
                             continue
                     except Exception as exc:
                         warning = f"Evidence DB lookup failed for {workload.candidate_id}: {exc.__class__.__name__}: {exc}"
                         evidence_warnings.append(warning)
+                        _progress(
+                            progress_callback,
+                            "warning",
+                            candidate_id=workload.candidate_id,
+                            workload_id=workload.workload_id,
+                            message=warning,
+                        )
                         group_metadata.append(
                             {
                                 "candidate_id": workload.candidate_id,
@@ -1488,9 +1660,25 @@ def _evaluate_launch_groups(
                         )
                     ],
                 )
+                _progress(
+                    progress_callback,
+                    "launch_skipped",
+                    group_id=group.group_id,
+                    rung=_group_rung(group),
+                    status=status,
+                    message=message,
+                    workload_count=len(group.workload_configs),
+                )
                 continue
 
             if not adapter.is_available():
+                _progress(
+                    progress_callback,
+                    "backend_unavailable",
+                    backend=backend,
+                    group_id=group.group_id,
+                    pending_workload_count=len(pending_workloads),
+                )
                 for config, workload, _evidence_context in pending_workloads:
                     failure = _candidate_failure(run_id, workload.candidate_id, "availability", f"Managed backend '{backend}' is not available.", details={"group_id": group.group_id, "rung": workload.rung})
                     state.failures.append(failure)
@@ -1502,9 +1690,28 @@ def _evaluate_launch_groups(
             spec = adapter.build_launch_spec(launch_config, host=host, port=port, log_dir=run_dir / "logs")
             _append_jsonl(launch_specs_path, [spec])
             _append_jsonl(lifecycle_path, [_lifecycle(run_id, group.group_id, backend, "launch_spec", "ok", details={"base_url": spec.base_url, "group_id": group.group_id, "rung": _group_rung(group)})])
+            _progress(
+                progress_callback,
+                "launch_start",
+                group_id=group.group_id,
+                rung=_group_rung(group),
+                base_url=spec.base_url,
+                command=" ".join(spec.command),
+                stdout_log_path=spec.stdout_log_path,
+                stderr_log_path=spec.stderr_log_path,
+                pending_workload_count=len(pending_workloads),
+            )
 
             handle = adapter.launch_server(spec)
             state.cold_launch_count += 1
+            _progress(
+                progress_callback,
+                "launch_started",
+                group_id=group.group_id,
+                pid=handle.pid,
+                pgid=handle.pgid,
+                base_url=handle.base_url,
+            )
             _append_jsonl(
                 lifecycle_path,
                 [
@@ -1522,8 +1729,24 @@ def _evaluate_launch_groups(
                 ],
             )
 
+            _progress(
+                progress_callback,
+                "health_wait",
+                group_id=group.group_id,
+                base_url=handle.base_url,
+                timeout_s=startup_timeout_s,
+            )
             health = adapter.wait_for_health(handle, model=model, timeout_s=startup_timeout_s, request_fn=request_fn)
             _append_jsonl(lifecycle_path, [_lifecycle(run_id, group.group_id, backend, "health", "ok" if health.healthy else "failed", details={**to_dict(health), "group_id": group.group_id, "rung": _group_rung(group)})])
+            _progress(
+                progress_callback,
+                "health_result",
+                group_id=group.group_id,
+                healthy=health.healthy,
+                status=health.status,
+                attempts=health.attempts,
+                error=health.error,
+            )
             if not health.healthy:
                 for config, workload, _evidence_context in pending_workloads:
                     failure = _candidate_failure(run_id, workload.candidate_id, "health", health.error or health.status, details={**to_dict(health), "group_id": group.group_id, "rung": workload.rung})
@@ -1533,6 +1756,18 @@ def _evaluate_launch_groups(
                 continue
 
             for config, workload, evidence_context in pending_workloads:
+                _progress(
+                    progress_callback,
+                    "workload_start",
+                    candidate_id=workload.candidate_id,
+                    workload_id=workload.workload_id,
+                    rung=workload.rung,
+                    concurrency=workload.concurrency,
+                    num_requests=workload.num_requests,
+                    warmup_requests=workload.warmup_requests,
+                    trials=workload.trials,
+                    max_new_tokens=workload.max_new_tokens,
+                )
                 benchmark_run_dirs: list[str] = []
                 summary_paths: list[str] = []
                 trial_summaries: list[EndpointBenchmarkSummary] = []
@@ -1544,6 +1779,15 @@ def _evaluate_launch_groups(
                         base_url=handle.base_url,
                         model=model,
                         trial=trial,
+                    )
+                    _progress(
+                        progress_callback,
+                        "trial_start",
+                        candidate_id=workload.candidate_id,
+                        workload_id=workload.workload_id,
+                        rung=workload.rung,
+                        trial=trial + 1,
+                        trials=workload.trials,
                     )
                     benchmark = run_endpoint_benchmark(
                         config=benchmark_config,
@@ -1558,6 +1802,17 @@ def _evaluate_launch_groups(
                     benchmark_run_dirs.append(str(benchmark.run_dir))
                     summary_paths.append(str(benchmark.run_dir / "summary.json"))
                     state.workload_measurement_count += 1
+                    _progress(
+                        progress_callback,
+                        "trial_complete",
+                        candidate_id=workload.candidate_id,
+                        workload_id=workload.workload_id,
+                        rung=workload.rung,
+                        trial=trial + 1,
+                        trials=workload.trials,
+                        run_dir=str(benchmark.run_dir),
+                        **_summary_progress_fields(benchmark.summary),
+                    )
 
                 if trial_summaries:
                     last_summary = aggregate_benchmark_summaries(workload.workload_id, trial_summaries)
@@ -1594,6 +1849,15 @@ def _evaluate_launch_groups(
                             )
                             evidence_store.insert_measurement(measurement)
                             measurement_id = measurement.measurement_id
+                            _progress(
+                                progress_callback,
+                                "evidence_write",
+                                candidate_id=workload.candidate_id,
+                                workload_id=workload.workload_id,
+                                status="ok",
+                                evidence_key=evidence_context.evidence_key,
+                                measurement_id=measurement.measurement_id,
+                            )
                             _append_jsonl(
                                 lifecycle_path,
                                 [
@@ -1617,6 +1881,14 @@ def _evaluate_launch_groups(
                         except Exception as exc:
                             warning = f"Evidence DB measurement write failed for {workload.candidate_id}: {exc.__class__.__name__}: {exc}"
                             evidence_warnings.append(warning)
+                            _progress(
+                                progress_callback,
+                                "evidence_write",
+                                candidate_id=workload.candidate_id,
+                                workload_id=workload.workload_id,
+                                status="failed",
+                                message=warning,
+                            )
                             _append_jsonl(lifecycle_path, [_lifecycle(run_id, workload.candidate_id, backend, "evidence_write", "failed", message=warning, details={"group_id": group.group_id, "rung": workload.rung})])
 
                 state.completed += 1
@@ -1643,6 +1915,16 @@ def _evaluate_launch_groups(
                     )
                 )
                 _append_jsonl(lifecycle_path, [_lifecycle(run_id, workload.candidate_id, backend, "benchmark", "ok", details={"trials": workload.trials, "group_id": group.group_id, "workload_id": workload.workload_id, "rung": workload.rung})])
+                _progress(
+                    progress_callback,
+                    "workload_complete",
+                    candidate_id=workload.candidate_id,
+                    workload_id=workload.workload_id,
+                    rung=workload.rung,
+                    summary_path=summary_paths[-1] if summary_paths else None,
+                    evidence_measurement_id=measurement_id,
+                    **_summary_progress_fields(last_summary),
+                )
         except KeyboardInterrupt as exc:
             failed_workloads = pending_workloads or [
                 (configs_by_id[candidate_id], workload, None)
@@ -1685,6 +1967,14 @@ def _evaluate_launch_groups(
             )
             raise
         except Exception as exc:
+            _progress(
+                progress_callback,
+                "launch_group_failed",
+                group_id=group.group_id,
+                rung=_group_rung(group),
+                stage="launch" if handle is None else "benchmark",
+                error=f"{exc.__class__.__name__}: {exc}",
+            )
             failed_workloads = pending_workloads or [(configs_by_id[candidate_id], workload, None) for candidate_id in group.original_config_ids for workload in group.workload_configs if workload.candidate_id == candidate_id]
             for config, workload, _evidence_context in failed_workloads:
                 failure = _candidate_failure(run_id, workload.candidate_id, "launch" if handle is None else "benchmark", f"{exc.__class__.__name__}: {exc}", details={"group_id": group.group_id, "rung": workload.rung})
@@ -1707,8 +1997,58 @@ def _evaluate_launch_groups(
                 except Exception as exc:
                     stop_record = _lifecycle(run_id, group.group_id, backend, "stop", "failed", message=f"{exc.__class__.__name__}: {exc}", pid=handle.pid, pgid=handle.pgid)
                 _append_jsonl(lifecycle_path, [stop_record])
+                _progress(
+                    progress_callback,
+                    "server_stop",
+                    group_id=group.group_id,
+                    status=stop_record.status,
+                    returncode=stop_record.returncode,
+                )
                 if cooldown_s > 0:
+                    _progress(
+                        progress_callback,
+                        "cooldown",
+                        group_id=group.group_id,
+                        seconds=cooldown_s,
+                    )
                     time.sleep(cooldown_s)
+
+
+def _progress(
+    progress_callback: ManagedProgressCallback | None,
+    event: str,
+    **details: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        event,
+        {
+            "event": event,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **details,
+        },
+    )
+
+
+def _summary_progress_fields(summary: object | None) -> dict[str, object]:
+    if summary is None:
+        return {}
+    measurement_quality = getattr(summary, "measurement_quality", None)
+    if not isinstance(measurement_quality, dict):
+        measurement_quality = {}
+    measured_requests = getattr(summary, "measured_requests", None)
+    if measured_requests is None:
+        measured_requests = getattr(summary, "total_requests", None)
+    return {
+        "throughput_tokens_per_sec": _optional_float(getattr(summary, "total_tokens_s", None)),
+        "request_rate": _optional_float(getattr(summary, "request_rate_req_s", None)),
+        "p95_latency_s": _optional_float(getattr(summary, "p95_latency_s", None)),
+        "failed_requests": _optional_int(getattr(summary, "failed_requests", None)),
+        "measured_requests": _optional_int(measured_requests),
+        "successful_requests": _optional_int(getattr(summary, "successful_requests", None)),
+        "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
+    }
 
 
 def _rung_result_from_summary(
@@ -2106,6 +2446,9 @@ def _managed_measured_metrics(metrics: dict[str, Any]) -> dict[str, float | int 
         "total_requests": _optional_int(metrics.get("total_requests")),
         "successful_requests": _optional_int(metrics.get("successful_requests")),
         "failed_requests": _optional_int(metrics.get("failed_requests")) or 0,
+        "configured_concurrency": _optional_int(metrics.get("configured_concurrency")),
+        "effective_concurrency_limit": _optional_int(metrics.get("effective_concurrency_limit")),
+        "concurrency_coverage": _optional_str(metrics.get("concurrency_coverage")),
     }
 
 
@@ -2233,6 +2576,7 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
     row = to_dict(summary)
     if not isinstance(row, dict):
         row = {}
+    measurement_quality = row.get("measurement_quality") if isinstance(row.get("measurement_quality"), dict) else {}
     throughput = _optional_float(row.get("total_tokens_s"))
     request_rate = _optional_float(row.get("request_rate_req_s"))
     stable_rates = _stable_rates_from_request_latencies(row) if row.get("measurement_duration_s") is None else None
@@ -2271,6 +2615,9 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
             if row.get("measured_failed_requests") is not None
             else _optional_int(row.get("failed_requests"))
         ),
+        "configured_concurrency": _optional_int(measurement_quality.get("configured_concurrency")),
+        "effective_concurrency_limit": _optional_int(measurement_quality.get("effective_concurrency_limit")),
+        "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
     }
 
 
@@ -2299,6 +2646,7 @@ def _stable_rates_from_request_latencies(row: dict[str, Any]) -> dict[str, float
 def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int | str | None]:
     raw_json = measurement.get("raw_json") if isinstance(measurement.get("raw_json"), dict) else {}
     raw_summary = raw_json.get("summary") if isinstance(raw_json.get("summary"), dict) else {}
+    measurement_quality = raw_summary.get("measurement_quality") if isinstance(raw_summary.get("measurement_quality"), dict) else {}
     throughput = _optional_float(measurement.get("throughput_tokens_per_sec"))
     request_rate = _optional_float(measurement.get("requests_per_sec"))
     stable_rates = _stable_rates_from_request_latencies(raw_summary) if raw_summary.get("measurement_duration_s") is None else None
@@ -2349,6 +2697,9 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
             if raw_summary.get("measured_failed_requests") is not None
             else _optional_int(raw_summary.get("failed_requests"))
         ),
+        "configured_concurrency": _optional_int(measurement_quality.get("configured_concurrency")),
+        "effective_concurrency_limit": _optional_int(measurement_quality.get("effective_concurrency_limit")),
+        "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
     }
 
 
@@ -2467,16 +2818,23 @@ def serving_config_to_workload_config(
 ) -> WorkloadConfig:
     extra = dict(config.extra or {})
     profile = _workload_profile_payload(extra.get("workload_profile"))
-    concurrency = _positive_int(
-        profile.get("concurrency") or extra.get("workload_concurrency"),
-        default=max(1, config.max_batch_size),
-    )
+    profile_concurrency = _positive_int(profile.get("concurrency"), default=0)
+    candidate_concurrency = _positive_int(extra.get("workload_concurrency"), default=0)
+    concurrency = max(profile_concurrency, candidate_concurrency)
+    if concurrency <= 0:
+        concurrency = max(1, config.max_batch_size)
     max_new_tokens = _positive_int(
         profile.get("max_new_tokens") or profile.get("output_tokens") or extra.get("max_new_tokens") or extra.get("output_length"),
         default=128,
     )
-    num_requests = _positive_int(extra.get("num_requests") or profile.get("num_requests"), default=max(128, 2 * concurrency))
+    warmup_requests = _positive_int(extra.get("warmup_requests"), default=0)
+    requested_num_requests = _positive_int(extra.get("num_requests") or profile.get("num_requests"), default=max(128, 2 * concurrency))
+    minimum_num_requests = concurrency + warmup_requests
+    num_requests = max(requested_num_requests, minimum_num_requests)
     workload_extra = dict(extra.get("workload_extra") or {}) if isinstance(extra.get("workload_extra"), dict) else {}
+    if requested_num_requests < minimum_num_requests:
+        workload_extra["requested_num_requests"] = requested_num_requests
+        workload_extra["num_requests_adjusted_reason"] = "raised_to_match_concurrency"
     if profile and profile.get("profile_name") != "default":
         workload_extra["workload_profile"] = profile
     elif profile and (profile.get("token_distribution") or profile.get("slo_constraints")):
@@ -2497,7 +2855,7 @@ def serving_config_to_workload_config(
         dataset=_optional_str(extra.get("dataset")) or _optional_str(profile.get("dataset")),
         warmup_duration_s=_optional_float(extra.get("warmup_duration_s")),
         benchmark_duration_s=_optional_float(extra.get("benchmark_duration_s")),
-        warmup_requests=_positive_int(extra.get("warmup_requests"), default=0),
+        warmup_requests=warmup_requests,
         idle_baseline_duration_s=_positive_float(extra.get("idle_baseline_duration_s"), default=0.0),
         idle_power_watts=_optional_float(extra.get("idle_power_watts")),
         soak_duration_s=_optional_float(extra.get("soak_duration_s")),

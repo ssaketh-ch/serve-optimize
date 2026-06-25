@@ -48,6 +48,58 @@ def test_throughput_goal_prefers_highest_measured_tokens() -> None:
     assert scores[0].candidate_id == "c2"
 
 
+def test_undercovered_concurrency_is_not_eligible_for_recommendation() -> None:
+    inputs = [
+        _input(
+            "undercovered",
+            concurrency=8,
+            total_requests=4,
+            successful_requests=4,
+            concurrency_coverage="insufficient",
+            total_tokens_s=200.0,
+            p95_latency_s=0.8,
+        ),
+        _input(
+            "covered",
+            concurrency=4,
+            total_requests=4,
+            successful_requests=4,
+            concurrency_coverage="complete",
+            total_tokens_s=150.0,
+            p95_latency_s=1.0,
+        ),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+
+    undercovered_score = next(score for score in scores if score.candidate_id == "undercovered")
+    undercovered_row = next(row for row in result.candidate_table if row["candidate_id"] == "undercovered")
+    assert result.recommended_candidate_id == "covered"
+    assert undercovered_score.final_score is None
+    assert "insufficient_concurrency_coverage" in undercovered_score.disqualifiers
+    assert undercovered_row["concurrency_coverage"] == "insufficient"
+
+
+def test_candidate_table_uses_benchmark_plan_concurrency() -> None:
+    _, result = score_recommendation_inputs(
+        [
+            _input(
+                "floored",
+                candidate_concurrency=2,
+                concurrency=8,
+                total_requests=8,
+                successful_requests=8,
+                concurrency_coverage="complete",
+                total_tokens_s=100.0,
+                p95_latency_s=1.0,
+            )
+        ],
+        goal=RecommendationGoal.THROUGHPUT,
+    )
+
+    assert result.candidate_table[0]["benchmark_concurrency"] == 8
+
+
 def test_evaluated_set_fidelity_selected_rank_one() -> None:
     inputs = [
         _input("c1", total_tokens_s=100.0, p95_latency_s=1.0, tokens_per_second_per_watt=1.0),
@@ -803,6 +855,7 @@ def _input(
     p95_latency_s: float | None,
     source: str = "test",
     concurrency: int = 16,
+    candidate_concurrency: int | None = None,
     request_rate: float = 10.0,
     successful_requests: int = 4,
     failed_requests: int = 0,
@@ -811,6 +864,7 @@ def _input(
     joules_per_token: float | None = None,
     telemetry_quality: str | None = None,
     telemetry_capabilities: dict[str, object] | None = None,
+    concurrency_coverage: str | None = None,
     warnings: list[str] | None = None,
     raw: dict[str, object] | None = None,
 ) -> RecommendationInput:
@@ -820,7 +874,7 @@ def _input(
         source=source,
         model="model-path",
         backend="vllm",
-        concurrency=concurrency,
+        concurrency=candidate_concurrency if candidate_concurrency is not None else concurrency,
         request_rate=request_rate,
         predicted_tokens_s=100.0,
         predicted_request_latency_ms=1000.0,
@@ -851,7 +905,7 @@ def _input(
             base_url="http://127.0.0.1:8080/v1",
             model="model-path",
             concurrency=concurrency,
-            num_requests=128,
+            num_requests=max(128, 2 * concurrency),
             max_tokens=8,
             expected_input_tokens=32,
             expected_output_tokens=8,
@@ -869,6 +923,7 @@ def _input(
             "total_tokens_s": total_tokens_s,
             "avg_latency_s": p95_latency_s,
             "p95_latency_s": p95_latency_s,
+            "concurrency_coverage": concurrency_coverage,
         },
         telemetry_metrics={
             "tokens_per_second_per_watt": tokens_per_second_per_watt,

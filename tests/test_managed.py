@@ -36,6 +36,7 @@ from serve_optimize.cli import main
 from serve_optimize.evidence import launch_config_hash, workload_config_hash
 from serve_optimize.managed import (
     _generate_managed_candidates,
+    _managed_measured_metrics,
     _managed_telemetry_metrics,
     _measurement_metrics,
     _summary_metrics,
@@ -189,6 +190,46 @@ def test_evidence_metrics_preserve_recorded_power_quality() -> None:
     )
 
     assert metrics["telemetry_quality"] == "poor"
+
+
+def test_managed_metrics_preserve_concurrency_coverage() -> None:
+    summary_metrics = _summary_metrics(
+        {
+            "total_tokens_s": 100.0,
+            "request_rate_req_s": 4.0,
+            "total_requests": 2,
+            "successful_requests": 2,
+            "failed_requests": 0,
+            "measurement_quality": {
+                "configured_concurrency": 4,
+                "effective_concurrency_limit": 2,
+                "concurrency_coverage": "insufficient",
+            },
+        }
+    )
+    evidence_metrics = _measurement_metrics(
+        {
+            "throughput_tokens_per_sec": 100.0,
+            "requests_per_sec": 4.0,
+            "raw_json": {
+                "summary": {
+                    "total_requests": 2,
+                    "successful_requests": 2,
+                    "failed_requests": 0,
+                    "measurement_quality": {
+                        "configured_concurrency": 4,
+                        "effective_concurrency_limit": 2,
+                        "concurrency_coverage": "insufficient",
+                    },
+                }
+            },
+        }
+    )
+
+    assert summary_metrics["concurrency_coverage"] == "insufficient"
+    assert evidence_metrics["concurrency_coverage"] == "insufficient"
+    assert _managed_measured_metrics(summary_metrics)["concurrency_coverage"] == "insufficient"
+    assert _managed_measured_metrics(evidence_metrics)["configured_concurrency"] == 4
 
 
 def test_sglang_capability_detection_unavailable_nonfatal(monkeypatch) -> None:
@@ -785,6 +826,47 @@ def test_benchmark_failure_records_reason_and_stops_server(tmp_path, monkeypatch
     assert failures[0]["stage"] == "benchmark"
     assert "benchmark failed" in failures[0]["error"]
     assert adapter.stop_count == 1
+
+
+def test_managed_progress_callback_reports_launch_and_benchmark_steps(tmp_path) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def progress(event: str, payload: dict[str, object]) -> None:
+        events.append((event, payload))
+
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=_SuccessAdapter(),
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(extra={"num_requests": 2})],
+        evidence_write=False,
+        progress_callback=progress,
+    )
+
+    event_names = [event for event, _payload in events]
+    assert summary.status == "success"
+    assert "run_created" in event_names
+    assert "launch_start" in event_names
+    assert "health_result" in event_names
+    assert "workload_start" in event_names
+    assert "trial_complete" in event_names
+    assert "workload_complete" in event_names
+    assert "recommendation_complete" in event_names
+    trial = next(payload for event, payload in events if event == "trial_complete")
+    complete = next(payload for event, payload in events if event == "workload_complete")
+    assert trial["candidate_id"] == "cfg-test"
+    assert trial["throughput_tokens_per_sec"] is not None
+    assert complete["summary_path"]
 
 
 def test_stop_failure_is_recorded_without_losing_measurement(tmp_path) -> None:
@@ -2042,7 +2124,36 @@ def test_managed_evaluate_cli_prints_recommended_command(tmp_path, monkeypatch, 
     summary_txt_path.write_text("summary", encoding="utf-8")
 
     def fake_run_managed_evaluation(**kwargs):
-        del kwargs
+        progress_callback = kwargs["progress_callback"]
+        progress_callback("run_created", {"run_id": "managed-test", "run_dir": str(run_dir)})
+        progress_callback(
+            "launch_start",
+            {
+                "group_id": "cfg-test-measure",
+                "base_url": "http://127.0.0.1:8000/v1",
+                "stdout_log_path": str(run_dir / "logs" / "stdout.log"),
+                "stderr_log_path": str(run_dir / "logs" / "stderr.log"),
+            },
+        )
+        progress_callback(
+            "trial_complete",
+            {
+                "candidate_id": "cfg-test",
+                "trial": 1,
+                "trials": 1,
+                "throughput_tokens_per_sec": 9125.02,
+                "p95_latency_s": 0.05484,
+                "failed_requests": 0,
+            },
+        )
+        progress_callback(
+            "recommendation_complete",
+            {
+                "status": "success",
+                "selected_config_id": "cfg-test",
+                "confidence": "high",
+            },
+        )
         return ManagedRunSummary(
             run_id="managed-test",
             created_at="2026-01-01T00:00:00+00:00",
@@ -2058,6 +2169,10 @@ def test_managed_evaluate_cli_prints_recommended_command(tmp_path, monkeypatch, 
             status="success",
             artifacts={
                 "run_dir": str(run_dir),
+                "server_lifecycle_jsonl": str(run_dir / "server_lifecycle.jsonl"),
+                "candidate_failures_jsonl": str(run_dir / "candidate_failures.jsonl"),
+                "launch_specs_jsonl": str(run_dir / "launch_specs.jsonl"),
+                "logs_dir": str(run_dir / "logs"),
                 "recommendation_summary_txt": str(summary_txt_path),
                 "recommendation_summary_json": str(summary_json_path),
             },
@@ -2072,6 +2187,12 @@ def test_managed_evaluate_cli_prints_recommended_command(tmp_path, monkeypatch, 
     main(["managed-evaluate", "--model", "model-path", "--no-evidence-write"])
 
     output = capsys.readouterr().out
+    assert "Managed evaluation starting" in output
+    assert "run created: managed-test" in output
+    assert "launching server: cfg-test-measure" in output
+    assert "trial 1/1 complete: cfg-test" in output
+    assert "Debug artifacts:" in output
+    assert f"server lifecycle: {run_dir / 'server_lifecycle.jsonl'}" in output
     assert "Recommended configuration:" in output
     assert "vllm serve model-path --dtype bf16 --max-model-len 2048" in output
     assert "Confidence: HIGH" in output
@@ -2110,8 +2231,24 @@ def test_managed_evaluate_cli_prints_unavailable_recommendation(monkeypatch, cap
 
 
 def test_launch_config_hash_ignores_workload_only_fields() -> None:
-    first = _config(config_id="cfg-a", extra={"workload_concurrency": 1, "num_requests": 8})
-    second = _config(config_id="cfg-b", extra={"workload_concurrency": 4, "num_requests": 16})
+    first = _config(
+        config_id="cfg-a",
+        extra={
+            "workload_concurrency": 1,
+            "num_requests": 8,
+            "requested_rung_num_requests": 1,
+            "num_requests_adjusted_reason": "raised_to_match_concurrency",
+        },
+    )
+    second = _config(
+        config_id="cfg-b",
+        extra={
+            "workload_concurrency": 4,
+            "num_requests": 16,
+            "requested_rung_num_requests": 2,
+            "num_requests_adjusted_reason": "other",
+        },
+    )
 
     assert launch_config_hash(serving_config_to_launch_config(first)) == launch_config_hash(serving_config_to_launch_config(second))
 
@@ -2121,6 +2258,21 @@ def test_workload_config_hash_changes_when_workload_fields_change() -> None:
     second = serving_config_to_workload_config(_config(extra={"workload_concurrency": 2}), trials=1, request_timeout_s=30.0, telemetry="none")
 
     assert workload_config_hash(first) != workload_config_hash(second)
+
+
+def test_workload_config_raises_request_count_to_cover_concurrency() -> None:
+    workload = serving_config_to_workload_config(
+        _config(extra={"workload_concurrency": 8, "num_requests": 2, "warmup_requests": 4}),
+        trials=1,
+        request_timeout_s=30.0,
+        telemetry="none",
+    )
+
+    assert workload.concurrency == 8
+    assert workload.num_requests == 12
+    assert workload.warmup_requests == 4
+    assert workload.extra["requested_num_requests"] == 2
+    assert workload.extra["num_requests_adjusted_reason"] == "raised_to_match_concurrency"
 
 
 def test_workload_profile_affects_workload_fingerprint_when_non_default() -> None:
@@ -2178,7 +2330,7 @@ def test_workload_profile_preserves_dataset_distribution_and_slos() -> None:
 
 
 def test_named_workload_profile_controls_load_across_candidates() -> None:
-    workload = serving_config_to_workload_config(
+    low_candidate_workload = serving_config_to_workload_config(
         _config(
             extra={
                 "workload_concurrency": 2,
@@ -2194,9 +2346,26 @@ def test_named_workload_profile_controls_load_across_candidates() -> None:
         request_timeout_s=30.0,
         telemetry="none",
     )
+    high_candidate_workload = serving_config_to_workload_config(
+        _config(
+            extra={
+                "workload_concurrency": 32,
+                "max_new_tokens": 128,
+                "workload_profile": {
+                    "profile_name": "medium",
+                    "concurrency": 8,
+                    "max_new_tokens": 256,
+                },
+            }
+        ),
+        trials=1,
+        request_timeout_s=30.0,
+        telemetry="none",
+    )
 
-    assert workload.concurrency == 8
-    assert workload.max_new_tokens == 256
+    assert low_candidate_workload.concurrency == 8
+    assert high_candidate_workload.concurrency == 32
+    assert low_candidate_workload.max_new_tokens == 256
 
 
 def test_same_launch_different_workloads_form_one_group() -> None:

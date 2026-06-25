@@ -70,6 +70,41 @@ def test_summary_metric_calculation_and_failure_accounting() -> None:
     assert summary.p99_latency_s == pytest.approx(2.98)
 
 
+def test_summary_flags_insufficient_concurrency_coverage() -> None:
+    records = [
+        RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30),
+        RequestRecord(1, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30),
+    ]
+
+    summary = summarize_requests(
+        "run-undercovered",
+        records,
+        wall_time_s=1.0,
+        configured_concurrency=4,
+        configured_num_requests=2,
+    )
+
+    assert summary.measurement_quality["configured_concurrency"] == 4
+    assert summary.measurement_quality["effective_concurrency_limit"] == 2
+    assert summary.measurement_quality["concurrency_coverage"] == "insufficient"
+    assert any("lower than concurrency" in warning for warning in summary.warnings)
+
+    warmup_summary = summarize_requests(
+        "run-undercovered-warmup",
+        [
+            RequestRecord(index, float(index), float(index) + 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30)
+            for index in range(5)
+        ],
+        wall_time_s=5.0,
+        warmup_requests=2,
+        configured_concurrency=4,
+        configured_num_requests=5,
+    )
+
+    assert warmup_summary.measurement_quality["effective_concurrency_limit"] == 3
+    assert warmup_summary.measurement_quality["concurrency_coverage"] == "insufficient"
+
+
 def test_summary_includes_stream_timing_metrics() -> None:
     records = [
         RequestRecord(

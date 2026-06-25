@@ -231,6 +231,8 @@ Important launch artifacts:
 
 A workload describes how the endpoint is measured. It includes concurrency, request count, prompt, generated token limit, timeout, stream mode, warmup, steady state window, soak time, and idle baseline policy.
 
+For managed candidates, workload profile concurrency is a floor. Candidate specific concurrency can go higher for throughput exploration. Request counts are raised when needed so the measured window still covers the configured concurrency after warmup.
+
 ```mermaid
 flowchart TD
     A[Workload profile or manifest] --> B[Workload config]

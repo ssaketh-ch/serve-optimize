@@ -1,5 +1,9 @@
-from serve_optimize.managed_summary import baseline_comparison, format_recommendation_summary_text
-from serve_optimize.schemas import RecommendationResult
+from serve_optimize.managed_summary import (
+    baseline_comparison,
+    build_recommendation_summary,
+    format_recommendation_summary_text,
+)
+from serve_optimize.schemas import EndpointBenchmarkPlan, RecommendationResult, ServingConfig
 
 
 def test_baseline_comparison_reports_directional_improvements() -> None:
@@ -74,6 +78,49 @@ def test_summary_text_includes_baseline_comparison() -> None:
 
     assert "Default baseline comparison:" in text
     assert "throughput_tokens_per_sec: +20.00%" in text
+
+
+def test_selected_summary_uses_measured_benchmark_concurrency() -> None:
+    config = ServingConfig(
+        id="selected",
+        backend="vllm",
+        model_id="model",
+        dtype="bf16",
+        quantization="none",
+        max_batch_size=1,
+        max_context_tokens=2048,
+        kv_cache_policy="paged",
+        scheduler="continuous-batching",
+        extra={"workload_concurrency": 2},
+    )
+    recommendation = RecommendationResult(
+        recommended_candidate_id="selected",
+        goal="balanced",
+        selected_score=None,
+        selected_config=None,
+        selected_serve_command=None,
+        selected_benchmark_plan=EndpointBenchmarkPlan(
+            candidate_id="selected",
+            base_url="managed",
+            model="model",
+            concurrency=8,
+            num_requests=96,
+            max_tokens=128,
+            expected_input_tokens=None,
+            expected_output_tokens=128,
+        ),
+        candidate_table=[_row("selected", source="generated", throughput=120.0, concurrency=8)],
+    )
+
+    payload = build_recommendation_summary(
+        recommendation=recommendation,
+        selected_config=config,
+        selected_source="managed_measured",
+        reason=None,
+        artifacts={},
+    )
+
+    assert payload["selected"]["benchmark_concurrency"] == 8
 
 
 def _recommendation(rows: list[dict[str, object]]) -> RecommendationResult:

@@ -101,6 +101,8 @@ def run_endpoint_benchmark(
         soak_duration_s=config.soak_duration_s,
         idle_power_watts=idle_power_watts,
         idle_sample_count=len(idle_samples),
+        configured_concurrency=config.concurrency,
+        configured_num_requests=config.num_requests,
     )
     write_json(run_dir / "summary.json", summary)
     if config.telemetry != "none":
@@ -308,6 +310,8 @@ def summarize_requests(
     soak_duration_s: float | None = None,
     idle_power_watts: float | None = None,
     idle_sample_count: int = 0,
+    configured_concurrency: int | None = None,
+    configured_num_requests: int | None = None,
 ) -> EndpointBenchmarkSummary:
     power_samples = power_samples or []
     telemetry = telemetry or TelemetryCapture(provider=None, samples=[], warnings=[])
@@ -330,6 +334,10 @@ def summarize_requests(
         power_samples,
         measured_records,
         window_applied=measurement_window_applied,
+    )
+    concurrency_coverage = _concurrency_coverage(
+        configured_concurrency=configured_concurrency,
+        measured_request_count=len(measured_records),
     )
     telemetry_summary = summarize_telemetry(
         measurement_power_samples,
@@ -356,6 +364,14 @@ def summarize_requests(
         "measured_requests": len(measured_records),
         "measured_successful_requests": len(measured_successful),
         "measured_failed_requests": len(measured_records) - len(measured_successful),
+        "configured_concurrency": configured_concurrency,
+        "configured_num_requests": configured_num_requests,
+        "effective_concurrency_limit": _effective_concurrency_limit(
+            configured_concurrency,
+            configured_num_requests,
+            warmup_requests=warmup_requests,
+        ),
+        "concurrency_coverage": concurrency_coverage,
         "idle_power_watts": _round_or_none(idle_power_watts),
         "idle_sample_count": idle_sample_count,
         "soak_requested_duration_s": soak_duration_s,
@@ -369,6 +385,11 @@ def summarize_requests(
         "stability_classification": "single_trial",
     }
     token_warnings = _token_count_warnings(measured_successful)
+    concurrency_warnings = _concurrency_warnings(
+        configured_concurrency=configured_concurrency,
+        configured_num_requests=configured_num_requests,
+        measured_request_count=len(measured_records),
+    )
     return EndpointBenchmarkSummary(
         run_id=run_id,
         total_requests=len(records),
@@ -435,7 +456,7 @@ def summarize_requests(
         telemetry_quality=telemetry_summary.telemetry_quality,
         telemetry_notes=telemetry_summary.telemetry_notes,
         telemetry_summary=to_dict(telemetry_summary),
-        warnings=sorted({*telemetry_summary.telemetry_warnings, *token_warnings}),
+        warnings=sorted({*telemetry_summary.telemetry_warnings, *token_warnings, *concurrency_warnings}),
         measurement_duration_s=_round_or_none(measurement_duration),
         measured_requests=len(measured_records),
         measured_successful_requests=len(measured_successful),
@@ -687,6 +708,44 @@ def _measurement_power_samples(
     start = min(record.start_time for record in records)
     end = max(record.end_time for record in records)
     return [sample for sample in samples if start <= sample.timestamp_s <= end]
+
+
+def _effective_concurrency_limit(
+    configured_concurrency: int | None,
+    configured_num_requests: int | None,
+    *,
+    warmup_requests: int = 0,
+) -> int | None:
+    if configured_concurrency is None:
+        return None
+    if configured_num_requests is None:
+        return max(1, configured_concurrency)
+    measured_request_budget = max(0, configured_num_requests - max(0, warmup_requests))
+    return max(0, min(configured_concurrency, measured_request_budget))
+
+
+def _concurrency_coverage(configured_concurrency: int | None, measured_request_count: int) -> str | None:
+    if configured_concurrency is None:
+        return None
+    if configured_concurrency <= 1:
+        return "complete"
+    return "complete" if measured_request_count >= configured_concurrency else "insufficient"
+
+
+def _concurrency_warnings(
+    *,
+    configured_concurrency: int | None,
+    configured_num_requests: int | None,
+    measured_request_count: int,
+) -> list[str]:
+    if configured_concurrency is None or configured_concurrency <= 1:
+        return []
+    warnings = []
+    if configured_num_requests is not None and configured_num_requests < configured_concurrency:
+        warnings.append("Configured request count is lower than concurrency, so the run cannot exercise the requested concurrency.")
+    if measured_request_count < configured_concurrency:
+        warnings.append("Measured request count is lower than concurrency, so throughput for this candidate is undercovered.")
+    return warnings
 
 
 def _active_power(average_power_watts: float | None, idle_power_watts: float | None) -> float | None:

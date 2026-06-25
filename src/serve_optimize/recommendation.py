@@ -1543,6 +1543,9 @@ def _measured_metrics(summary: EndpointBenchmarkSummary) -> dict[str, float | in
         "tpot_sample_count": summary.tpot_sample_count,
         "timing_source": summary.timing_source,
         "token_count_source": summary.token_count_source,
+        "configured_concurrency": summary.measurement_quality.get("configured_concurrency"),
+        "effective_concurrency_limit": summary.measurement_quality.get("effective_concurrency_limit"),
+        "concurrency_coverage": summary.measurement_quality.get("concurrency_coverage"),
     }
 
 
@@ -1617,6 +1620,8 @@ def _disqualifiers(item: RecommendationInput, goal: RecommendationGoal, has_any_
         disqualifiers.append("missing_latency_metric")
     if goal == RecommendationGoal.BALANCED and _latency_value(item) is None:
         disqualifiers.append("missing_latency_metric")
+    if _insufficient_concurrency_coverage(item):
+        disqualifiers.append("insufficient_concurrency_coverage")
     if goal == RecommendationGoal.EFFICIENCY and not _usable_power_telemetry(item):
         disqualifiers.append(
             "poor_power_telemetry"
@@ -1714,6 +1719,24 @@ def _latency_value(item: RecommendationInput) -> float | None:
     return p95 if p95 is not None else _optional_float(item.measured_metrics.get("avg_latency_s"))
 
 
+def _insufficient_concurrency_coverage(item: RecommendationInput) -> bool:
+    coverage = item.measured_metrics.get("concurrency_coverage")
+    if coverage is not None:
+        return str(coverage).lower() == "insufficient"
+    if item.benchmark_plan is not None and item.benchmark_plan.num_requests < item.benchmark_plan.concurrency:
+        return True
+    return False
+
+
+def _concurrency_coverage_label(item: RecommendationInput) -> str | None:
+    coverage = item.measured_metrics.get("concurrency_coverage")
+    if coverage is not None:
+        return str(coverage)
+    if item.benchmark_plan is not None and item.benchmark_plan.num_requests < item.benchmark_plan.concurrency:
+        return "insufficient"
+    return None
+
+
 def _weighted_sum(parts: tuple[tuple[float | None, float], ...]) -> float | None:
     total = 0.0
     weight_sum = 0.0
@@ -1761,6 +1784,8 @@ def _missing_metric_penalties(item: RecommendationInput, goal: RecommendationGoa
         penalties.append("missing_power_telemetry")
     if goal == RecommendationGoal.EFFICIENCY and not _usable_power_telemetry(item):
         penalties.append("missing_efficiency_metric")
+    if _insufficient_concurrency_coverage(item):
+        penalties.append("insufficient_concurrency_coverage")
     return penalties
 
 
@@ -1915,6 +1940,9 @@ def _candidate_table(
             "candidate_id": item.candidate_id,
             "source": item.candidate_source,
             "concurrency": item.benchmark_plan.concurrency if item.benchmark_plan else None,
+            "measured_requests": _optional_int(item.measured_metrics.get("total_requests")),
+            "successful_requests": _optional_int(item.measured_metrics.get("successful_requests")),
+            "concurrency_coverage": _concurrency_coverage_label(item),
             "total_tokens_s": _optional_float(item.measured_metrics.get("total_tokens_s")),
             "p95_latency_s": _optional_float(item.measured_metrics.get("p95_latency_s")),
             "average_power_watts": _optional_float(item.telemetry_metrics.get("average_power_watts")),
@@ -1949,7 +1977,7 @@ def _candidate_engine_fields(item: RecommendationInput) -> dict[str, float | int
         "gpu_memory_utilization": _optional_float(raw.get("gpu_memory_utilization")),
         "max_num_seqs": _optional_int(item.candidate.batch_size),
         "tensor_parallel_size": _optional_int(item.candidate.tp),
-        "benchmark_concurrency": _optional_int(item.candidate.concurrency),
+        "benchmark_concurrency": _optional_int(item.benchmark_plan.concurrency if item.benchmark_plan else item.candidate.concurrency),
         "block_size": _optional_int(raw.get("block_size")),
         "kv_cache_dtype": _optional_str(raw.get("kv_cache_dtype")),
         "enforce_eager": _optional_bool(raw.get("enforce_eager")),
@@ -2008,6 +2036,9 @@ def _pareto_frontier(
             "candidate_id": item.candidate_id,
             "source": item.candidate_source,
             "concurrency": item.benchmark_plan.concurrency if item.benchmark_plan else None,
+            "measured_requests": _optional_int(item.measured_metrics.get("total_requests")),
+            "successful_requests": _optional_int(item.measured_metrics.get("successful_requests")),
+            "concurrency_coverage": _concurrency_coverage_label(item),
             "total_tokens_s": _optional_float(item.measured_metrics.get("total_tokens_s")),
             "p95_latency_s": _optional_float(item.measured_metrics.get("p95_latency_s")),
             "failed_requests": _optional_int(item.measured_metrics.get("failed_requests")),

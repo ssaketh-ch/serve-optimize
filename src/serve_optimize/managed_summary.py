@@ -162,7 +162,7 @@ def selected_summary(recommendation: RecommendationResult, config: ServingConfig
         "gpu_memory_utilization": config.gpu_memory_utilization if config else None,
         "max_num_seqs": config.max_batch_size if config else None,
         "tensor_parallel_size": config.tensor_parallelism if config else None,
-        "benchmark_concurrency": _optional_int(extra.get("workload_concurrency")) if config else None,
+        "benchmark_concurrency": _selected_benchmark_concurrency(recommendation, config),
         "backend_defaults": extra.get("backend_defaults") is True if config else False,
     }
     if config is not None:
@@ -381,6 +381,13 @@ def _artifact_name(value: str | None, default: str) -> str:
 def _add_if_present(row: dict[str, Any], key: str, value: object) -> None:
     if value is not None:
         row[key] = value
+
+
+def _selected_benchmark_concurrency(recommendation: RecommendationResult, config: ServingConfig | None) -> int | None:
+    if recommendation.selected_benchmark_plan is not None:
+        return _optional_int(recommendation.selected_benchmark_plan.concurrency)
+    extra = dict(config.extra or {}) if config else {}
+    return _optional_int(extra.get("workload_concurrency"))
 
 
 def _selected_optional_lines(selected: dict[str, Any]) -> list[str]:

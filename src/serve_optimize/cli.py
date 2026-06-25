@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1190,6 +1191,7 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
             )
             _print_preflight(run.payload)
             return
+        _print_managed_start(args)
         summary = run_managed_evaluation(
             backend=args.backend,
             model=args.model,
@@ -1215,6 +1217,7 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
             stream=args.stream,
             resume_from=args.resume_from,
             allow_remote_model_config_download=True,
+            progress_callback=_managed_progress_printer(),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1235,9 +1238,218 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
     for warning in summary.evidence_warnings:
         print(f"  evidence warning: {warning}")
     print(f"  artifacts: {summary.artifacts['run_dir']}")
+    _print_managed_debug_summary(summary)
     _print_managed_recommendation_summary(summary)
     if summary.status == "failed":
         raise SystemExit(1)
+
+
+def _print_managed_start(args: argparse.Namespace) -> None:
+    print("Managed evaluation starting", flush=True)
+    print(f"  backend: {args.backend}", flush=True)
+    print(f"  model: {args.model}", flush=True)
+    print(f"  goal: {args.goal}", flush=True)
+    print(f"  limit: {args.limit}", flush=True)
+    print(f"  trials: {args.trials}", flush=True)
+    print(f"  telemetry: {args.telemetry}", flush=True)
+    print(f"  workload profile: {args.workload_profile}", flush=True)
+    print(f"  output root: {args.out}", flush=True)
+    if args.resume_from:
+        print(f"  resume from: {args.resume_from}", flush=True)
+    if args.evidence_db and not args.no_evidence_write:
+        print(f"  evidence db: {args.evidence_db}", flush=True)
+
+
+def _managed_progress_printer():
+    def emit(event: str, payload: dict[str, Any]) -> None:
+        message = _managed_progress_message(event, payload)
+        if not message:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{timestamp}] {message}", flush=True)
+
+    return emit
+
+
+def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None:
+    if event == "run_created":
+        return f"run created: {payload.get('run_id')} at {payload.get('run_dir')}"
+    if event == "environment_collected":
+        version = _display_text(payload.get("backend_version"))
+        fingerprint = _short_text(payload.get("runtime_fingerprint"), 12)
+        return f"environment ready: backend version {version}, runtime {fingerprint}"
+    if event == "evidence_ready":
+        enabled = "yes" if payload.get("write_enabled") else "no"
+        return f"evidence ready: db {_display_text(payload.get('db_path'))}, write {enabled}, freshness {payload.get('freshness_hours')}h"
+    if event == "model_metadata":
+        known = "known" if payload.get("metadata_known") else "limited"
+        quantization = _display_text(payload.get("quantization_method"))
+        return f"model metadata: {known}, quantization {quantization}"
+    if event == "candidates_generated":
+        sources = _compact_mapping(payload.get("source_counts"))
+        suffix = f" from {sources}" if sources else ""
+        return f"candidates generated: {payload.get('candidate_count')}{suffix}"
+    if event == "candidates_validated":
+        return f"candidates validated: {payload.get('valid_count')} valid, {payload.get('rejected_count')} rejected"
+    if event == "candidates_synthesized":
+        return f"candidate synthesis complete: {payload.get('valid_count')} valid, {payload.get('rejected_count')} rejected"
+    if event == "evidence_preflight":
+        return f"evidence preflight: {payload.get('exact_fresh_count')} exact hits, {payload.get('evidence_prior_count')} priors"
+    if event == "prior_pruning":
+        sources = _compact_sequence(payload.get("prior_sources_used"))
+        suffix = f", sources {sources}" if sources else ""
+        return f"prior pruning: {payload.get('remaining_count')} remaining, {payload.get('pruned_count')} pruned{suffix}"
+    if event == "candidate_rejected":
+        return f"candidate rejected: {payload.get('candidate_id')}, {payload.get('reason')}"
+    if event == "rung_start":
+        return (
+            f"rung {payload.get('rung')} starting: {payload.get('candidate_count')} candidates, "
+            f"{payload.get('launch_group_count')} launch groups, {payload.get('workload_count')} workloads"
+        )
+    if event == "promotion":
+        return f"promotion: {payload.get('promoted_count')}/{payload.get('candidate_count')} candidates from {payload.get('from_rung')} to {payload.get('to_rung')}"
+    if event == "launch_group_start":
+        return f"launch group {payload.get('group_id')} starting: {payload.get('workload_count')} workloads, rung {payload.get('rung')}"
+    if event == "resume_hit":
+        return f"resume hit: {payload.get('candidate_id')} workload {payload.get('workload_id')}"
+    if event == "evidence_lookup":
+        return (
+            f"evidence lookup: {payload.get('candidate_id')} "
+            f"{payload.get('hit_type')} {payload.get('classification')}"
+        )
+    if event == "evidence_hit":
+        return f"evidence hit: {payload.get('candidate_id')} measurement {_short_text(payload.get('measurement_id'), 12)}"
+    if event == "launch_skipped":
+        return f"launch skipped: {payload.get('group_id')}, {payload.get('message')}"
+    if event == "backend_unavailable":
+        return f"backend unavailable: {payload.get('backend')}, {payload.get('pending_workload_count')} workloads marked failed"
+    if event == "launch_start":
+        logs = _managed_log_paths(payload)
+        command = payload.get("command")
+        command_text = f", command {command}" if command else ""
+        return f"launching server: {payload.get('group_id')} at {payload.get('base_url')}{logs}{command_text}"
+    if event == "launch_started":
+        return f"server started: {payload.get('group_id')} pid {payload.get('pid')} at {payload.get('base_url')}"
+    if event == "health_wait":
+        return f"waiting for health: {payload.get('base_url')}, timeout {payload.get('timeout_s')}s"
+    if event == "health_result":
+        if payload.get("healthy"):
+            return f"health ok: {payload.get('group_id')}, attempts {payload.get('attempts')}"
+        return f"health failed: {payload.get('group_id')}, {payload.get('status')}, {payload.get('error')}"
+    if event == "workload_start":
+        return (
+            f"benchmark workload: {payload.get('candidate_id')}, concurrency {payload.get('concurrency')}, "
+            f"requests {payload.get('num_requests')}, warmup {payload.get('warmup_requests')}, trials {payload.get('trials')}"
+        )
+    if event == "trial_start":
+        return f"trial {payload.get('trial')}/{payload.get('trials')} starting: {payload.get('candidate_id')}"
+    if event == "trial_complete":
+        return (
+            f"trial {payload.get('trial')}/{payload.get('trials')} complete: {payload.get('candidate_id')}, "
+            f"throughput {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
+            f"p95 {_format_metric(_latency_ms(payload.get('p95_latency_s')), ' ms', decimals=1)}, "
+            f"failed {payload.get('failed_requests')}"
+        )
+    if event == "evidence_write":
+        status = payload.get("status")
+        measurement = _short_text(payload.get("measurement_id"), 12)
+        detail = f", measurement {measurement}" if measurement != "n/a" else ""
+        return f"evidence write {status}: {payload.get('candidate_id')}{detail}"
+    if event == "workload_complete":
+        coverage = _display_text(payload.get("concurrency_coverage"))
+        return (
+            f"workload complete: {payload.get('candidate_id')}, "
+            f"throughput {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
+            f"coverage {coverage}, summary {payload.get('summary_path')}"
+        )
+    if event == "launch_group_failed":
+        return f"launch group failed: {payload.get('group_id')}, {payload.get('stage')}, {payload.get('error')}"
+    if event == "server_stop":
+        return f"server stopped: {payload.get('group_id')}, status {payload.get('status')}, return code {_display_text(payload.get('returncode'))}"
+    if event == "cooldown":
+        return f"cooldown: {payload.get('seconds')}s after {payload.get('group_id')}"
+    if event == "recommendation_start":
+        return f"scoring recommendation: {payload.get('measured_row_count')} measured rows"
+    if event == "recommendation_complete":
+        if payload.get("selected_config_id"):
+            return (
+                f"recommendation complete: selected {payload.get('selected_config_id')}, "
+                f"confidence {_display_text(payload.get('confidence'))}"
+            )
+        return f"recommendation unavailable: {_display_text(payload.get('reason'))}"
+    if event == "run_complete":
+        return (
+            f"managed run complete: {payload.get('status')}, "
+            f"{payload.get('completed_candidate_count')}/{payload.get('candidate_count')} completed, "
+            f"{payload.get('failed_candidate_count')} failed"
+        )
+    if event == "warning":
+        return f"warning: {payload.get('message')}"
+    return None
+
+
+def _print_managed_debug_summary(summary) -> None:
+    artifacts = summary.artifacts or {}
+    useful_paths = [
+        ("server lifecycle", artifacts.get("server_lifecycle_jsonl")),
+        ("candidate failures", artifacts.get("candidate_failures_jsonl")),
+        ("launch specs", artifacts.get("launch_specs_jsonl")),
+        ("rendered launches", artifacts.get("rendered_launch_configs_jsonl")),
+        ("workloads", artifacts.get("workload_configs_jsonl")),
+        ("evidence decisions", artifacts.get("evidence_decisions_jsonl")),
+        ("logs", artifacts.get("logs_dir")),
+        ("recommendation json", artifacts.get("managed_recommendation_json")),
+        ("summary json", artifacts.get("recommendation_summary_json")),
+    ]
+    available_paths = [(label, path) for label, path in useful_paths if path]
+    if available_paths:
+        print("")
+        print("Debug artifacts:")
+        for label, path in available_paths:
+            print(f"  {label}: {path}")
+    failed = [candidate for candidate in summary.candidates if candidate.status not in {"completed", "evidence_hit", "resumed"}]
+    if failed:
+        print("")
+        print("Failed candidates:")
+        for candidate in failed[:5]:
+            stage = candidate.failure_stage or candidate.status
+            print(f"  {candidate.config_id}: {stage}, {_display_text(candidate.error)}")
+        if len(failed) > 5:
+            print(f"  and {len(failed) - 5} more")
+
+
+def _managed_log_paths(payload: dict[str, Any]) -> str:
+    paths = [
+        path
+        for path in (payload.get("stdout_log_path"), payload.get("stderr_log_path"))
+        if path
+    ]
+    return "" if not paths else f", logs {', '.join(str(path) for path in paths)}"
+
+
+def _latency_ms(value: object) -> float | None:
+    number = _optional_float(value)
+    return None if number is None else number * 1000.0
+
+
+def _short_text(value: object, length: int) -> str:
+    text = _display_text(value)
+    if len(text) <= length:
+        return text
+    return text[:length]
+
+
+def _compact_mapping(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts = [f"{key}:{value[key]}" for key in sorted(value) if value[key]]
+    return ", ".join(parts)
+
+
+def _compact_sequence(value: object) -> str:
+    if not isinstance(value, (list, tuple, set)):
+        return ""
+    return ", ".join(str(item) for item in value)
 
 
 def _validate_measurement_quality_args(args: argparse.Namespace) -> None:
