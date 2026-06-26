@@ -1230,6 +1230,12 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
     print(f"  cold launches: {summary.cold_launch_count}")
     print(f"  workload measurements: {summary.workload_measurement_count}")
     print(f"  evidence hits: {summary.evidence_hit_candidate_count}")
+    client_saturation = summary.client_saturation or {}
+    if client_saturation:
+        print(f"  client saturation: {_display_text(client_saturation.get('classification'))}")
+    load_sufficiency = summary.load_sufficiency or {}
+    if load_sufficiency:
+        print(f"  load sufficiency: {_display_text(load_sufficiency.get('classification'))}")
     if summary.resume_from_run_dir:
         print(f"  resumed from: {summary.resume_from_run_dir}")
         print(f"  resume skips: {summary.resume_skipped_candidate_count}")
@@ -1327,7 +1333,11 @@ def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None
         logs = _managed_log_paths(payload)
         command = payload.get("command")
         command_text = f", command {command}" if command else ""
-        return f"launching server: {payload.get('group_id')} at {payload.get('base_url')}{logs}{command_text}"
+        version = _display_text(payload.get("backend_version"))
+        version_text = f", backend version {version}" if version != "n/a" else ""
+        effective = _compact_mapping(payload.get("effective_values"))
+        effective_text = f", effective values {effective}" if effective else ""
+        return f"launching server: {payload.get('group_id')} at {payload.get('base_url')}{logs}{command_text}{version_text}{effective_text}"
     if event == "launch_started":
         return f"server started: {payload.get('group_id')} pid {payload.get('pid')} at {payload.get('base_url')}"
     if event == "health_wait":
@@ -1344,11 +1354,13 @@ def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None
     if event == "trial_start":
         return f"trial {payload.get('trial')}/{payload.get('trials')} starting: {payload.get('candidate_id')}"
     if event == "trial_complete":
+        client_cpu = _format_metric(payload.get("client_cpu_utilization_percent"), '% client CPU', decimals=1)
+        client_text = f", {client_cpu}" if client_cpu != "n/a" else ""
         return (
             f"trial {payload.get('trial')}/{payload.get('trials')} complete: {payload.get('candidate_id')}, "
             f"throughput {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
             f"p95 {_format_metric(_latency_ms(payload.get('p95_latency_s')), ' ms', decimals=1)}, "
-            f"failed {payload.get('failed_requests')}"
+            f"failed {payload.get('failed_requests')}{client_text}"
         )
     if event == "evidence_write":
         status = payload.get("status")
@@ -1368,6 +1380,19 @@ def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None
         return f"server stopped: {payload.get('group_id')}, status {payload.get('status')}, return code {_display_text(payload.get('returncode'))}"
     if event == "cooldown":
         return f"cooldown: {payload.get('seconds')}s after {payload.get('group_id')}"
+    if event == "client_saturation":
+        return (
+            f"client saturation: {_display_text(payload.get('classification'))}, "
+            f"configs {payload.get('candidate_count')}, "
+            f"max client CPU {_format_metric(payload.get('max_client_cpu_utilization_percent'), '%', decimals=1)}"
+        )
+    if event == "load_sufficiency":
+        return (
+            f"load sufficiency: {_display_text(payload.get('classification'))}, "
+            f"levels {payload.get('concurrency_level_count')}, "
+            f"max GPU {_format_metric(payload.get('max_gpu_util_percent'), '%', decimals=1)}, "
+            f"pressure {_format_metric(payload.get('pressure_growth_ratio'), 'x', decimals=2)}"
+        )
     if event == "recommendation_start":
         return f"scoring recommendation: {payload.get('measured_row_count')} measured rows"
     if event == "recommendation_complete":
@@ -1397,6 +1422,8 @@ def _print_managed_debug_summary(summary) -> None:
         ("rendered launches", artifacts.get("rendered_launch_configs_jsonl")),
         ("workloads", artifacts.get("workload_configs_jsonl")),
         ("evidence decisions", artifacts.get("evidence_decisions_jsonl")),
+        ("client saturation", artifacts.get("client_saturation_json")),
+        ("load sufficiency", artifacts.get("load_sufficiency_json")),
         ("logs", artifacts.get("logs_dir")),
         ("recommendation json", artifacts.get("managed_recommendation_json")),
         ("summary json", artifacts.get("recommendation_summary_json")),
@@ -1442,7 +1469,7 @@ def _short_text(value: object, length: int) -> str:
 def _compact_mapping(value: object) -> str:
     if not isinstance(value, dict):
         return ""
-    parts = [f"{key}:{value[key]}" for key in sorted(value) if value[key]]
+    parts = [f"{key}:{value[key]}" for key in sorted(value) if value[key] not in (None, "", [], {})]
     return ", ".join(parts)
 
 
@@ -1631,7 +1658,10 @@ def _print_managed_recommendation_summary(summary) -> None:
     print(f"  p95 latency: {_format_metric(metrics.get('p95_latency_ms'), ' ms', decimals=1)}")
     print(f"  avg power: {_format_metric(metrics.get('average_power_w'), ' W', decimals=1)}")
     print(f"  energy/token: {_format_metric(metrics.get('joules_per_token'), ' J/token', decimals=4)}")
+    print(f"  energy/generated token: {_format_metric(metrics.get('joules_per_generated_token'), ' J/token', decimals=4)}")
     print(f"  efficiency: {_format_metric(metrics.get('tokens_per_watt'), ' tok/W', decimals=1)}")
+    print(f"  tokens/joule: {_format_metric(metrics.get('tokens_per_joule'), ' tok/J', decimals=1)}")
+    print(f"  energy accounting: {_display_text(metrics.get('energy_accounting'))}")
     if baseline.get("available") is True:
         baseline_metrics = baseline.get("metrics", {}) if isinstance(baseline.get("metrics"), dict) else {}
         throughput = baseline_metrics.get("throughput_tokens_per_sec", {})

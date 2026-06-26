@@ -238,7 +238,19 @@ class VllmAdapter:
             process = self._processes.get(handle.pid)
             if process is not None and process.poll() is not None:
                 last_error = f"server process exited with return code {process.returncode}"
-                break
+                ended_at = datetime.now(timezone.utc)
+                return HealthCheckResult(
+                    config_id=handle.config_id,
+                    backend=handle.backend,
+                    base_url=handle.base_url,
+                    healthy=False,
+                    status="process_exited",
+                    attempts=attempts,
+                    started_at=started_at.isoformat(),
+                    ended_at=ended_at.isoformat(),
+                    error=last_error,
+                    details={"process_returncode": process.returncode},
+                )
             request_start = time.perf_counter()
             record = _health_request(handle, model, request_fn)
             latency_s = time.perf_counter() - request_start

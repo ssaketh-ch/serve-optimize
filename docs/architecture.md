@@ -231,7 +231,7 @@ Important launch artifacts:
 
 A workload describes how the endpoint is measured. It includes concurrency, request count, prompt, generated token limit, timeout, stream mode, warmup, steady state window, soak time, and idle baseline policy.
 
-For managed candidates, workload profile concurrency is a floor. Candidate specific concurrency can go higher for throughput exploration. Request counts are raised when needed so the measured window still covers the configured concurrency after warmup.
+For managed candidates, workload profile concurrency is a floor. Candidate specific concurrency can go higher for throughput exploration. Throughput mode includes progressively higher candidate concurrency levels so the run can look for server saturation. Request counts are raised when needed so the measured window still covers the configured concurrency after warmup.
 
 ```mermaid
 flowchart TD
@@ -265,12 +265,14 @@ sequenceDiagram
     participant Telemetry as Telemetry collector
     participant Disk as Run artifacts
 
+    Runner->>Telemetry: sample idle baseline when requested
     Runner->>Telemetry: start active sampling
     Runner->>Server: send chat completion requests
     Server-->>Runner: responses or stream chunks
     Runner->>Telemetry: stop sampling
     Runner->>Disk: requests jsonl
     Runner->>Disk: power samples jsonl
+    Runner->>Disk: idle, warmup, and measurement power sample jsonl files when present
     Runner->>Disk: summary json
     Runner->>Disk: telemetry summary json
 ```
@@ -285,6 +287,7 @@ For every request, Serve Optimize records:
 6. Prompt tokens, completion tokens, and total tokens when the endpoint returns usage.
 7. TTFT and chunk cadence TPOT when streaming chunks are observed.
 8. Timing and token count source metadata.
+9. Client submit time, client start time, and client queue delay when the shared client runner owns request scheduling.
 
 For telemetry, it records what the provider exposes:
 
@@ -299,6 +302,8 @@ For telemetry, it records what the provider exposes:
 
 Missing telemetry fields are recorded as unavailable, not as zero.
 
+When telemetry is enabled, idle baseline samples are collected before the active run when requested. Active power samples are phase tagged into warmup and measurement windows when those windows are configured, and the benchmark writes separate idle, warmup, and measurement sample artifacts when those samples exist.
+
 ## Metric Computation
 
 Request records and telemetry samples are summarized into benchmark metrics.
@@ -309,14 +314,18 @@ flowchart TD
     A --> C[Throughput metrics]
     A --> D[Failure counts]
     A --> E[Stream timing metrics]
-    F[Power samples] --> G[Power and energy metrics]
-    H[Idle samples] --> I[Idle baseline]
-    I --> G
-    B --> J[Summary]
-    C --> J
-    D --> J
-    E --> J
-    G --> J
+    A --> F[Client CPU and queue metrics]
+    A --> M[Load pressure metrics]
+    G[Power samples] --> H[Power and energy metrics]
+    I[Idle samples] --> J[Idle baseline]
+    J --> H
+    B --> K[Summary]
+    C --> K
+    D --> K
+    E --> K
+    F --> K
+    M --> K
+    H --> K
 ```
 
 The summary includes:
@@ -328,10 +337,15 @@ The summary includes:
 5. TTFT and TPOT when streaming is available.
 6. Gross active energy.
 7. Idle subtracted active energy when an idle baseline exists.
-8. Joules per token.
-9. Tokens per watt.
-10. Temperature rise and thermal stability classification.
-11. Trial statistics and confidence intervals for repeated trials.
+8. Energy accounting mode, either raw or idle subtracted.
+9. Joules per token from the measurement window.
+10. Joules per generated token.
+11. Tokens per joule.
+12. Tokens per watt.
+13. Warmup and measurement power sample counts and averages.
+14. Temperature rise and thermal stability classification.
+15. Trial statistics and confidence intervals for repeated trials.
+16. Client issue rate, request backlog, token backlog, GPU saturation signal, and run level load sufficiency classification for throughput pressure checks.
 
 Prefill and decode energy attribution is not claimed. The current endpoint and telemetry path does not expose defensible phase boundary markers.
 
@@ -496,6 +510,8 @@ flowchart TB
     A --> J[recommendation_summary txt and json]
     A --> K[managed_pareto_frontier csv and json]
     A --> L[optimizer_quality json]
+    A --> M[client_saturation json]
+    A --> N[load_sufficiency json]
 ```
 
 Human readers should start with `recommendation_summary.txt`. Automation should use the JSON and JSONL artifacts.
@@ -533,6 +549,8 @@ Managed Mode records failures instead of hiding them.
 | Interruption | Operator stops the run. |
 
 If a backend handle exists, cleanup runs through the stop path even after a health or benchmark failure.
+
+Candidate failure records keep the broad lifecycle stage and a machine readable `details.reason` taxonomy. Current reasons include `invalid_config`, `out_of_memory`, `backend_failed_to_start`, `backend_crashed_during_load`, `benchmark_timeout`, `request_timeout`, `unavailable_model`, `unavailable_gated_access`, and `backend_unavailable`. Intentional non measurement paths such as dry run, resume reuse, and exact evidence reuse are recorded separately and are the only paths represented as skipped launch work.
 
 ## Product Boundaries
 

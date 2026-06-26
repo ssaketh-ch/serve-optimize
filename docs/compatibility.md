@@ -86,7 +86,7 @@ Measured evidence records include:
 * canonical launch configuration hash
 * workload configuration hash
 * runtime fingerprint
-* measured throughput, latency, stream timing, power, energy, thermal, and efficiency fields when available
+* measured throughput, latency, stream timing, power, measurement window energy, thermal, and efficiency fields when available
 
 The runtime fingerprint includes:
 
@@ -121,7 +121,7 @@ The following cannot be exact hits:
 
 Runtime drift is recorded explicitly in `evidence_decisions.jsonl`.
 
-TTFT and TPOT evidence is available only when the benchmark uses streaming and observes response chunks. Non streaming responses do not provide these metrics. Current energy evidence covers gross and idle subtracted active windows only. Prefill and decode energy attribution is unavailable without backend phase markers or equivalent request trace events.
+TTFT and TPOT evidence is available only when the benchmark uses streaming and observes response chunks. Non streaming responses do not provide these metrics. Current energy evidence uses measurement window power samples and records raw and idle subtracted accounting when an idle baseline is available. Prefill and decode energy attribution is unavailable without backend phase markers or equivalent request trace events.
 
 ## Managed Resume
 
@@ -152,6 +152,8 @@ Every managed run initializes:
 * `server_lifecycle.jsonl`
 * `candidate_failures.jsonl`
 * `evidence_decisions.jsonl`
+* `client_saturation.json`
+* `load_sufficiency.json`
 * prior, synthesis, rung, and promotion artifacts
 * optimizer quality and failure cache artifacts
 * recommendation, Pareto, report, and summary artifacts
@@ -159,6 +161,8 @@ Every managed run initializes:
 Launched backends also receive stdout and stderr log paths.
 
 Unavailable or failed runs preserve diagnostics. They must not create a misleading successful recommendation.
+
+Managed candidate failures preserve both stage and reason. The reason taxonomy distinguishes `out_of_memory` from `invalid_config`, `backend_failed_to_start` from `backend_crashed_during_load`, `benchmark_timeout` from request level `request_timeout`, and `unavailable_model` from `unavailable_gated_access`. Launch work is marked skipped only when measurement was intentionally not attempted, such as dry run planning, resume reuse, or exact evidence reuse.
 
 ## Recommendation Contract
 
@@ -186,7 +190,7 @@ Missing fields mean unavailable unless a provider explicitly measured zero.
 
 Telemetry failure does not fail a benchmark by default. It lowers confidence, prevents poor power samples from affecting efficiency scoring, and may prevent exact reuse for a power aware goal.
 
-Energy metrics include gross active window estimates. When an idle baseline is supplied or sampled, summaries also include idle subtracted active energy and efficiency. Recommendation scoring prefers idle subtracted metrics when they are available. Prefill and decode attribution remains unavailable because the endpoint path has no defensible phase boundary markers.
+Energy metrics include measurement window estimates. When an idle baseline is supplied or sampled before the run, summaries also include idle subtracted active energy and efficiency. Warmup and measurement power samples are stored separately when available. Summaries report the energy accounting mode, tokens per joule, and joules per generated token. Recommendation scoring prefers idle subtracted metrics when they are available. Prefill and decode attribution remains unavailable because the endpoint path has no defensible phase boundary markers.
 
 ## Installation Contract
 

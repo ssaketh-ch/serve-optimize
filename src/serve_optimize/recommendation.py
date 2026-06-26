@@ -1413,7 +1413,10 @@ def _write_pareto_csv(path: Path, rows: list[dict[str, float | int | str | None]
         "failed_requests",
         "average_power_watts",
         "joules_per_token",
+        "joules_per_generated_token",
         "tokens_per_second_per_watt",
+        "tokens_per_joule",
+        "energy_accounting",
         "score",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1560,22 +1563,39 @@ def _telemetry_metrics(summary: EndpointBenchmarkSummary) -> dict[str, Any]:
         "power_sampling_duration_s": summary.power_sampling_duration_s,
         "power_sampling_rate_hz": summary.power_sampling_rate_hz,
         "energy_joules": summary.energy_joules,
+        "energy_accounting": summary.energy_accounting
+        or ("idle_subtracted" if summary.active_joules_per_token is not None else "raw"),
         "gross_joules_per_token": summary.joules_per_token,
         "active_joules_per_token": summary.active_joules_per_token,
+        "raw_joules_per_generated_token": summary.joules_per_generated_token,
+        "active_joules_per_generated_token": summary.active_joules_per_generated_token,
         "gross_tokens_per_second_per_watt": summary.tokens_per_second_per_watt,
         "active_tokens_per_second_per_watt": summary.active_tokens_per_second_per_watt,
+        "raw_tokens_per_joule": summary.tokens_per_joule,
+        "active_tokens_per_joule": summary.active_tokens_per_joule,
         "tokens_per_second_per_watt": (
             summary.active_tokens_per_second_per_watt
             if summary.active_tokens_per_second_per_watt is not None
             else summary.tokens_per_second_per_watt
+        ),
+        "tokens_per_joule": (
+            summary.active_tokens_per_joule
+            if summary.active_tokens_per_joule is not None
+            else summary.tokens_per_joule
         ),
         "joules_per_token": (
             summary.active_joules_per_token
             if summary.active_joules_per_token is not None
             else summary.joules_per_token
         ),
-        "energy_accounting": "idle_subtracted" if summary.active_joules_per_token is not None else "gross",
+        "joules_per_generated_token": (
+            summary.active_joules_per_generated_token
+            if summary.active_joules_per_generated_token is not None
+            else summary.joules_per_generated_token
+        ),
         "power_sample_count": summary.power_sample_count,
+        "warmup_power_sample_count": summary.warmup_power_sample_count,
+        "measurement_power_sample_count": summary.measurement_power_sample_count,
         "observed_memory_mb": summary.observed_memory_mb,
         "average_gpu_util_percent": summary.average_gpu_util_percent,
         "max_gpu_util_percent": summary.max_gpu_util_percent,
@@ -1949,9 +1969,22 @@ def _candidate_table(
             "power_stddev_watts": _optional_float(item.telemetry_metrics.get("power_stddev_watts")),
             "power_sampling_rate_hz": _optional_float(item.telemetry_metrics.get("power_sampling_rate_hz")),
             "joules_per_token": _optional_float(item.telemetry_metrics.get("joules_per_token")),
+            "joules_per_generated_token": _optional_float(item.telemetry_metrics.get("joules_per_generated_token")),
             "tokens_per_second_per_watt": _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")),
+            "tokens_per_joule": _optional_float(item.telemetry_metrics.get("tokens_per_joule")),
+            "energy_accounting": _optional_str(item.telemetry_metrics.get("energy_accounting")),
             "telemetry_quality": str(item.telemetry_metrics.get("telemetry_quality") or "unavailable"),
+            "warmup_power_sample_count": _optional_int(item.telemetry_metrics.get("warmup_power_sample_count")),
+            "measurement_power_sample_count": _optional_int(item.telemetry_metrics.get("measurement_power_sample_count")),
             "failed_requests": _optional_int(item.measured_metrics.get("failed_requests")),
+            "client_cpu_utilization_percent": _optional_float(item.measured_metrics.get("client_cpu_utilization_percent")),
+            "p95_client_queue_s": _optional_float(item.measured_metrics.get("p95_client_queue_s")),
+            "client_saturation_signal": _optional_str(item.measured_metrics.get("client_saturation_signal")),
+            "client_issue_rate_req_s": _optional_float(item.measured_metrics.get("client_issue_rate_req_s")),
+            "max_request_backlog": _optional_float(item.measured_metrics.get("max_request_backlog")),
+            "max_token_backlog": _optional_float(item.measured_metrics.get("max_token_backlog")),
+            "load_saturation_signal": _optional_str(item.measured_metrics.get("load_saturation_signal")),
+            "max_gpu_util_percent": _optional_float(item.telemetry_metrics.get("max_gpu_util_percent")),
             "throughput_score": score.throughput_score if score else None,
             "latency_score": score.latency_score if score else None,
             "efficiency_score": score.efficiency_score if score else None,
@@ -2042,11 +2075,22 @@ def _pareto_frontier(
             "total_tokens_s": _optional_float(item.measured_metrics.get("total_tokens_s")),
             "p95_latency_s": _optional_float(item.measured_metrics.get("p95_latency_s")),
             "failed_requests": _optional_int(item.measured_metrics.get("failed_requests")),
+            "client_cpu_utilization_percent": _optional_float(item.measured_metrics.get("client_cpu_utilization_percent")),
+            "p95_client_queue_s": _optional_float(item.measured_metrics.get("p95_client_queue_s")),
+            "client_saturation_signal": _optional_str(item.measured_metrics.get("client_saturation_signal")),
+            "client_issue_rate_req_s": _optional_float(item.measured_metrics.get("client_issue_rate_req_s")),
+            "max_request_backlog": _optional_float(item.measured_metrics.get("max_request_backlog")),
+            "max_token_backlog": _optional_float(item.measured_metrics.get("max_token_backlog")),
+            "load_saturation_signal": _optional_str(item.measured_metrics.get("load_saturation_signal")),
+            "max_gpu_util_percent": _optional_float(item.telemetry_metrics.get("max_gpu_util_percent")),
             "average_power_watts": _optional_float(item.telemetry_metrics.get("average_power_watts")),
             "power_stddev_watts": _optional_float(item.telemetry_metrics.get("power_stddev_watts")),
             "power_sampling_rate_hz": _optional_float(item.telemetry_metrics.get("power_sampling_rate_hz")),
             "joules_per_token": _optional_float(item.telemetry_metrics.get("joules_per_token")),
+            "joules_per_generated_token": _optional_float(item.telemetry_metrics.get("joules_per_generated_token")),
             "tokens_per_second_per_watt": _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")),
+            "tokens_per_joule": _optional_float(item.telemetry_metrics.get("tokens_per_joule")),
+            "energy_accounting": _optional_str(item.telemetry_metrics.get("energy_accounting")),
             "telemetry_quality": str(item.telemetry_metrics.get("telemetry_quality") or "unavailable"),
             "score": score_by_id[item.candidate_id].final_score,
         }

@@ -196,7 +196,10 @@ def metrics_summary(recommendation: RecommendationResult) -> dict[str, Any]:
         "p95_latency_ms": _seconds_to_ms(measured.get("p95_latency_s")),
         "average_power_w": _optional_float(telemetry.get("average_power_watts")),
         "joules_per_token": _optional_float(telemetry.get("joules_per_token")),
+        "joules_per_generated_token": _optional_float(telemetry.get("joules_per_generated_token")),
         "tokens_per_watt": _optional_float(telemetry.get("tokens_per_second_per_watt")),
+        "tokens_per_joule": _optional_float(telemetry.get("tokens_per_joule")),
+        "energy_accounting": telemetry.get("energy_accounting"),
         "failed_requests": _optional_int(measured.get("failed_requests")),
     }
 
@@ -338,7 +341,10 @@ def format_recommendation_summary_text(payload: dict[str, Any]) -> str:
                 f"  p95_latency: {_metric(metrics.get('p95_latency_ms'), ' ms')}",
                 f"  average_power: {_metric(metrics.get('average_power_w'), ' W')}",
                 f"  joules_per_token: {_metric(metrics.get('joules_per_token'), '')}",
+                f"  joules_per_generated_token: {_metric(metrics.get('joules_per_generated_token'), '')}",
                 f"  tokens_per_watt: {_metric(metrics.get('tokens_per_watt'), '')}",
+                f"  tokens_per_joule: {_metric(metrics.get('tokens_per_joule'), '')}",
+                f"  energy_accounting: {_display(metrics.get('energy_accounting'))}",
                 "",
                 "Default baseline comparison:",
             ]

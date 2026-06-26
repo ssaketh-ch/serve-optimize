@@ -35,7 +35,9 @@ from serve_optimize.backends.vllm import (
 from serve_optimize.cli import main
 from serve_optimize.evidence import launch_config_hash, workload_config_hash
 from serve_optimize.managed import (
+    _client_saturation_summary,
     _generate_managed_candidates,
+    _load_sufficiency_summary,
     _managed_measured_metrics,
     _managed_telemetry_metrics,
     _measurement_metrics,
@@ -61,6 +63,7 @@ from serve_optimize.schemas import (
     PriorResult,
     PriorSource,
     RequestRecord,
+    RungResult,
     ServerHandle,
     ServerLaunchSpec,
     ServingConfig,
@@ -168,6 +171,13 @@ def test_managed_metrics_preserve_power_quality_and_active_efficiency() -> None:
         "active_joules_per_token": 0.5,
         "tokens_per_second_per_watt": 0.5,
         "active_tokens_per_second_per_watt": 2.0,
+        "joules_per_generated_token": 3.0,
+        "active_joules_per_generated_token": 0.75,
+        "tokens_per_joule": 0.5,
+        "active_tokens_per_joule": 2.0,
+        "energy_accounting": "idle_subtracted",
+        "warmup_power_sample_count": 2,
+        "measurement_power_sample_count": 5,
         "telemetry_quality": "poor",
     }
 
@@ -176,7 +186,11 @@ def test_managed_metrics_preserve_power_quality_and_active_efficiency() -> None:
 
     assert telemetry["joules_per_token"] == 0.5
     assert telemetry["tokens_per_second_per_watt"] == 2.0
+    assert telemetry["joules_per_generated_token"] == 0.75
+    assert telemetry["tokens_per_joule"] == 2.0
     assert telemetry["energy_accounting"] == "idle_subtracted"
+    assert telemetry["warmup_power_sample_count"] == 2
+    assert telemetry["measurement_power_sample_count"] == 5
     assert telemetry["telemetry_quality"] == "poor"
 
 
@@ -230,6 +244,145 @@ def test_managed_metrics_preserve_concurrency_coverage() -> None:
     assert evidence_metrics["concurrency_coverage"] == "insufficient"
     assert _managed_measured_metrics(summary_metrics)["concurrency_coverage"] == "insufficient"
     assert _managed_measured_metrics(evidence_metrics)["configured_concurrency"] == 4
+
+
+def test_managed_metrics_preserve_client_saturation_fields() -> None:
+    summary_metrics = _summary_metrics(
+        {
+            "total_tokens_s": 100.0,
+            "request_rate_req_s": 4.0,
+            "total_requests": 2,
+            "successful_requests": 2,
+            "failed_requests": 0,
+            "client_cpu_time_s": 0.9,
+            "client_cpu_utilization_percent": 92.0,
+            "client_queue_sample_count": 2,
+            "avg_client_queue_s": 0.01,
+            "p95_client_queue_s": 0.02,
+            "client_issue_rate_req_s": 12.0,
+            "avg_request_backlog": 4.0,
+            "max_request_backlog": 8.0,
+            "avg_token_backlog": 400.0,
+            "max_token_backlog": 800.0,
+            "load_saturation_signal": "gpu_saturated",
+            "average_gpu_util_percent": 84.0,
+            "max_gpu_util_percent": 91.0,
+            "load_sufficiency": {"schema_version": "load-sufficiency-trial/v1"},
+            "measurement_quality": {"client_saturation_signal": "cpu_saturated"},
+        }
+    )
+    measured = _managed_measured_metrics(summary_metrics)
+
+    assert measured["client_cpu_utilization_percent"] == pytest.approx(92.0)
+    assert measured["client_queue_sample_count"] == 2
+    assert measured["p95_client_queue_s"] == pytest.approx(0.02)
+    assert measured["client_saturation_signal"] == "cpu_saturated"
+    assert measured["client_issue_rate_req_s"] == pytest.approx(12.0)
+    assert measured["max_request_backlog"] == pytest.approx(8.0)
+    assert measured["max_token_backlog"] == pytest.approx(800.0)
+    assert measured["load_saturation_signal"] == "gpu_saturated"
+    assert measured["max_gpu_util_percent"] == pytest.approx(91.0)
+    assert measured["load_sufficiency"]["schema_version"] == "load-sufficiency-trial/v1"
+
+
+def test_client_saturation_summary_marks_flat_cpu_saturated_runs_client_limited() -> None:
+    results = [
+        RungResult(
+            candidate_id=f"cfg-{index}",
+            workload_id=f"workload-{index}",
+            rung="measure",
+            rung_index=0,
+            status="completed",
+            measured_or_evidence_source="measured",
+            metrics={
+                "throughput_tokens_per_sec": throughput,
+                "client_cpu_utilization_percent": 94.0,
+                "p95_client_queue_s": 0.02,
+                "client_saturation_signal": "cpu_saturated",
+            },
+        )
+        for index, throughput in enumerate([1000.0, 1010.0, 995.0], start=1)
+    ]
+
+    summary = _client_saturation_summary(results)
+
+    assert summary["classification"] == "client_limited"
+    assert summary["flat_throughput"] is True
+    assert summary["client_saturated"] is True
+    assert summary["candidate_count"] == 3
+
+
+def test_load_sufficiency_summary_marks_plateau_with_pressure() -> None:
+    results = [
+        RungResult(
+            candidate_id=f"cfg-{index}",
+            workload_id=f"workload-{index}",
+            rung="measure",
+            rung_index=0,
+            status="completed",
+            measured_or_evidence_source="measured",
+            metrics={
+                "throughput_tokens_per_sec": throughput,
+                "configured_concurrency": concurrency,
+                "client_issue_rate_req_s": float(concurrency),
+                "max_request_backlog": float(concurrency),
+                "max_token_backlog": float(concurrency * 100),
+                "load_saturation_signal": "not_saturated",
+            },
+        )
+        for index, (concurrency, throughput) in enumerate(
+            [(16, 1000.0), (32, 1010.0), (64, 995.0)],
+            start=1,
+        )
+    ]
+
+    summary = _load_sufficiency_summary(
+        results,
+        goal=Goal.PERFORMANCE,
+        client_saturation={"classification": "not_client_limited"},
+    )
+
+    assert summary["classification"] == "load_sufficient_throughput_plateau"
+    assert summary["flat_throughput"] is True
+    assert summary["pressure_applied"] is True
+    assert summary["zero_change_pressure_check"]["load_generator_applied_pressure"] is True
+    assert summary["concurrency_levels"] == [16, 32, 64]
+
+
+def test_load_sufficiency_summary_marks_flat_runs_without_pressure_growth() -> None:
+    results = [
+        RungResult(
+            candidate_id=f"cfg-{index}",
+            workload_id=f"workload-{index}",
+            rung="measure",
+            rung_index=0,
+            status="completed",
+            measured_or_evidence_source="measured",
+            metrics={
+                "throughput_tokens_per_sec": throughput,
+                "configured_concurrency": concurrency,
+                "client_issue_rate_req_s": 10.0,
+                "max_request_backlog": 1.0,
+                "max_token_backlog": 100.0,
+                "load_saturation_signal": "not_saturated",
+            },
+        )
+        for index, (concurrency, throughput) in enumerate(
+            [(16, 1000.0), (18, 1005.0), (19, 995.0)],
+            start=1,
+        )
+    ]
+
+    summary = _load_sufficiency_summary(
+        results,
+        goal=Goal.PERFORMANCE,
+        client_saturation={"classification": "not_client_limited"},
+    )
+
+    assert summary["classification"] == "load_insufficient_pressure"
+    assert summary["flat_throughput"] is True
+    assert summary["pressure_applied"] is False
+    assert summary["zero_change_pressure_check"]["load_generator_applied_pressure"] is False
 
 
 def test_sglang_capability_detection_unavailable_nonfatal(monkeypatch) -> None:
@@ -667,6 +820,20 @@ def test_health_check_success_and_failure() -> None:
     assert failed.error == "not ready"
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_backend_health_reports_process_exit_as_crash_during_load(backend) -> None:
+    adapter = VllmAdapter() if backend == "vllm" else SglangAdapter(argument_capabilities=_sglang_caps())
+    process = _FakeProcess(pid=321)
+    process.returncode = 1
+    adapter._processes[321] = process
+
+    result = adapter.wait_for_health(_handle(pid=321, pgid=321), model="model-path", timeout_s=0.01, request_fn=_failed_request)
+
+    assert result.healthy is False
+    assert result.status == "process_exited"
+    assert result.details["process_returncode"] == 1
+
+
 def test_stop_only_kills_launched_process_group() -> None:
     calls: list[tuple[int, int]] = []
     process = _FakeProcess(pid=111)
@@ -719,7 +886,77 @@ def test_failed_launch_records_candidate_failure_and_continues(tmp_path) -> None
     assert (run_dir / "server_lifecycle.jsonl").exists()
     assert failures[0]["config_id"] == "cfg-test"
     assert failures[0]["stage"] == "launch"
+    assert failures[0]["details"]["reason"] == "backend_failed_to_start"
     assert "boom" in failures[0]["error"]
+
+
+def test_launch_oom_records_out_of_memory_reason(tmp_path) -> None:
+    class OomLaunchAdapter(_LaunchFailAdapter):
+        def launch_server(self, spec):
+            del spec
+            raise RuntimeError("CUDA out of memory while loading weights")
+
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=OomLaunchAdapter(),
+        candidate_provider=lambda: [_config()],
+        evidence_write=False,
+    )
+
+    run_dir = tmp_path / summary.run_id
+    failures = _jsonl_rows(run_dir / "candidate_failures.jsonl")
+    failure_cache = json.loads((run_dir / "optimizer_failure_cache.json").read_text(encoding="utf-8"))
+
+    assert summary.status == "failed"
+    assert failures[0]["stage"] == "launch"
+    assert failures[0]["details"]["reason"] == "out_of_memory"
+    assert failure_cache["summary"]["reason_counts"]["out_of_memory"] == 1
+
+
+def test_launch_value_error_is_recorded_as_invalid_config(tmp_path) -> None:
+    class InvalidConfigAdapter(_SuccessAdapter):
+        def build_launch_spec(self, config, *, host, port, log_dir):
+            del config, host, port, log_dir
+            raise ValueError("backend rejected flag")
+
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=InvalidConfigAdapter(),
+        candidate_provider=lambda: [_config()],
+        evidence_write=False,
+    )
+
+    run_dir = tmp_path / summary.run_id
+    failures = [
+        json.loads(line)
+        for line in (run_dir / "candidate_failures.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert summary.status == "failed"
+    assert failures[0]["stage"] == "launch"
+    assert failures[0]["details"]["reason"] == "invalid_config"
+    assert "backend rejected flag" in failures[0]["error"]
 
 
 def test_health_failure_records_reason_and_stops_server(tmp_path) -> None:
@@ -778,10 +1015,99 @@ def test_health_failure_records_reason_and_stops_server(tmp_path) -> None:
     assert summary.status == "failed"
     assert summary.workload_measurement_count == 0
     assert failures[0]["stage"] == "health"
+    assert failures[0]["details"]["reason"] == "backend_failed_to_start"
     assert failures[0]["error"] == "server did not become ready"
     assert adapter.stop_count == 1
     assert any(record["event"] == "health" and record["status"] == "failed" for record in lifecycle)
     assert any(record["event"] == "stop" and record["status"] == "stopped" for record in lifecycle)
+
+
+def test_health_process_exit_records_backend_crashed_during_load(tmp_path) -> None:
+    class CrashDuringLoadAdapter(_SuccessAdapter):
+        def wait_for_health(self, handle, *, model, timeout_s, request_fn=None):
+            del model, timeout_s, request_fn
+            return HealthCheckResult(
+                config_id=handle.config_id,
+                backend=handle.backend,
+                base_url=handle.base_url,
+                healthy=False,
+                status="process_exited",
+                attempts=1,
+                started_at=datetime.now(timezone.utc).isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+                error="server process exited with return code 1",
+                details={"process_returncode": 1},
+            )
+
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=CrashDuringLoadAdapter(),
+        candidate_provider=lambda: [_config()],
+        evidence_write=False,
+    )
+
+    failures = _jsonl_rows(tmp_path / summary.run_id / "candidate_failures.jsonl")
+
+    assert summary.status == "failed"
+    assert failures[0]["stage"] == "health"
+    assert failures[0]["details"]["reason"] == "backend_crashed_during_load"
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "expected_reason"),
+    [
+        ("http_404", "model not found", "unavailable_model"),
+        ("http_403", "gated model requires authentication", "unavailable_gated_access"),
+    ],
+)
+def test_health_model_access_failures_have_distinct_reasons(tmp_path, status, error, expected_reason) -> None:
+    class ModelAccessFailAdapter(_SuccessAdapter):
+        def wait_for_health(self, handle, *, model, timeout_s, request_fn=None):
+            del model, timeout_s, request_fn
+            return HealthCheckResult(
+                config_id=handle.config_id,
+                backend=handle.backend,
+                base_url=handle.base_url,
+                healthy=False,
+                status=status,
+                attempts=1,
+                started_at=datetime.now(timezone.utc).isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+                error=error,
+            )
+
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=ModelAccessFailAdapter(),
+        candidate_provider=lambda: [_config()],
+        evidence_write=False,
+    )
+
+    failures = _jsonl_rows(tmp_path / summary.run_id / "candidate_failures.jsonl")
+
+    assert summary.status == "failed"
+    assert failures[0]["stage"] == "health"
+    assert failures[0]["details"]["reason"] == expected_reason
 
 
 def test_benchmark_failure_records_reason_and_stops_server(tmp_path, monkeypatch) -> None:
@@ -825,6 +1151,45 @@ def test_benchmark_failure_records_reason_and_stops_server(tmp_path, monkeypatch
     assert summary.status == "failed"
     assert failures[0]["stage"] == "benchmark"
     assert "benchmark failed" in failures[0]["error"]
+    assert adapter.stop_count == 1
+
+
+def test_benchmark_timeout_records_distinct_reason(tmp_path, monkeypatch) -> None:
+    class TrackingAdapter(_SuccessAdapter):
+        def __init__(self) -> None:
+            self.stop_count = 0
+
+        def stop_server(self, handle, *, timeout_s=30.0):
+            self.stop_count += 1
+            return super().stop_server(handle, timeout_s=timeout_s)
+
+    def timeout_benchmark(**_kwargs):
+        raise TimeoutError("benchmark timed out")
+
+    monkeypatch.setattr("serve_optimize.managed.run_endpoint_benchmark", timeout_benchmark)
+    adapter = TrackingAdapter()
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=adapter,
+        candidate_provider=lambda: [_config()],
+        evidence_write=False,
+    )
+
+    failures = _jsonl_rows(tmp_path / summary.run_id / "candidate_failures.jsonl")
+
+    assert summary.status == "failed"
+    assert failures[0]["stage"] == "benchmark"
+    assert failures[0]["details"]["reason"] == "benchmark_timeout"
     assert adapter.stop_count == 1
 
 
@@ -1037,6 +1402,7 @@ def test_managed_rejects_unrenderable_engine_field_before_launch(tmp_path) -> No
     assert summary.cold_launch_count == 0
     assert summary.failed_candidate_count == 1
     assert failures[0]["stage"] == "validation"
+    assert failures[0]["details"]["reason"] == "invalid_config"
     assert "max_cudagraph_capture_size requires installed vLLM support" in failures[0]["error"]
     assert launch_specs == []
 
@@ -2538,6 +2904,14 @@ def test_managed_measured_candidate_writes_recommendation_artifacts(tmp_path) ->
     assert managed_run["optimizer_quality"]["scope"] == "evaluated_candidates_only"
     assert managed_run["artifacts"]["optimizer_quality_json"].endswith("optimizer_quality.json")
     assert (run_dir / "optimizer_quality.json").exists()
+    assert managed_run["artifacts"]["client_saturation_json"].endswith("client_saturation.json")
+    assert managed_run["client_saturation"]["classification"] == "insufficient_evidence"
+    assert recommendation["client_saturation"]["classification"] == "insufficient_evidence"
+    assert (run_dir / "client_saturation.json").exists()
+    assert managed_run["artifacts"]["load_sufficiency_json"].endswith("load_sufficiency.json")
+    assert managed_run["load_sufficiency"]["classification"] == "not_evaluated_non_throughput_goal"
+    assert recommendation["load_sufficiency"]["classification"] == "not_evaluated_non_throughput_goal"
+    assert (run_dir / "load_sufficiency.json").exists()
     assert managed_run["backend_metadata"]["adapter"] == "vllm"
     assert managed_run["runtime_environment"]["backend_name"] == "vllm"
     assert managed_run["runtime_environment"]["torch_version"]
@@ -2574,6 +2948,75 @@ def test_managed_measured_candidate_writes_recommendation_artifacts(tmp_path) ->
     assert "best among evaluated candidates only" in summary_text
     assert argument_caps["detection_status"] == "success"
     assert argument_caps["supported_flags"]["--block-size"] is True
+
+
+def test_vllm_trial_summary_records_backend_launch_provenance(tmp_path) -> None:
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "runs",
+        telemetry="none",
+        adapter=_SuccessAdapter(),
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(block_size=16, extra={"num_requests": 2})],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+    )
+
+    run_dir = tmp_path / "runs" / summary.run_id
+    trial_summary = json.loads((run_dir / "per_candidate" / "cfg-test-measure" / "summary.json").read_text(encoding="utf-8"))
+    launch_specs = [
+        json.loads(line)
+        for line in (run_dir / "launch_specs.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert trial_summary["backend_name"] == "vllm"
+    assert trial_summary["backend_version"] == "test-vllm"
+    assert trial_summary["backend_launch_command"] == launch_specs[0]["command"]
+    assert trial_summary["backend_launch_command_hash"]
+    assert trial_summary["backend_effective_values"]["block_size"] == 16
+    assert trial_summary["backend_applied_configuration"]["backend"] == "vllm"
+    assert trial_summary["backend_omitted_values"]["kv_cache_dtype"] == "not set"
+
+
+def test_sglang_trial_summary_records_backend_launch_provenance(tmp_path) -> None:
+    summary = run_managed_evaluation(
+        backend="sglang",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "runs",
+        telemetry="none",
+        adapter=_SuccessSglangAdapter(),
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(backend="sglang", max_batch_size=2, extra={"num_requests": 2})],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+    )
+
+    run_dir = tmp_path / "runs" / summary.run_id
+    trial_summary = json.loads((run_dir / "per_candidate" / "cfg-test-measure" / "summary.json").read_text(encoding="utf-8"))
+
+    assert trial_summary["backend_name"] == "sglang"
+    assert trial_summary["backend_version"] == "test-sglang"
+    assert trial_summary["backend_launch_command"][:3] == ["python", "-m", "sglang.launch_server"]
+    assert trial_summary["backend_launch_command_hash"]
+    assert trial_summary["backend_effective_values"]["max_running_requests"] == 2
+    assert trial_summary["backend_effective_values"]["gpu_memory_utilization"] == 0.9
+    assert trial_summary["backend_applied_configuration"]["backend"] == "sglang"
 
 
 def test_managed_candidate_table_uses_canonical_cuda_graph_alias(tmp_path) -> None:
@@ -3398,12 +3841,23 @@ def test_candidates_not_promoted_are_not_measured_in_later_rungs(tmp_path) -> No
         for line in (run_dir / "workload_configs.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    decisions = [
+        json.loads(line)
+        for line in (run_dir / "promotion_decisions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     rungs_by_candidate: dict[str, list[str]] = {}
     for workload in workloads:
         rungs_by_candidate.setdefault(workload["candidate_id"], []).append(workload["rung"])
+    not_promoted_from_probe = [
+        decision["candidate_id"]
+        for decision in decisions
+        if decision["from_rung"] == "probe" and not decision["promoted"]
+    ]
 
     assert summary.pruned_after_probe_count >= 1
-    assert rungs_by_candidate["cfg-c"] == ["probe"]
+    assert not_promoted_from_probe
+    assert all(rungs_by_candidate[candidate_id] == ["probe"] for candidate_id in not_promoted_from_probe)
 
 
 def test_staged_launch_group_launches_once_per_rung_group(tmp_path) -> None:
@@ -3707,6 +4161,10 @@ def _model_dir(tmp_path, payload: dict[str, object]):
     return model_dir
 
 
+def _jsonl_rows(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def _managed_hardware(name: str = "Generic CUDA GPU") -> HardwareSnapshot:
     return HardwareSnapshot(
         hostname="host",
@@ -3816,8 +4274,17 @@ class _SuccessAdapter:
     def argument_capabilities(self) -> VLLMArgumentCapabilities:
         return _all_engine_caps()
 
+    def backend_metadata(self) -> dict[str, object]:
+        return {
+            "adapter": "vllm",
+            "version": "test-vllm",
+            "argument_detection_status": "success",
+            "argument_capabilities_help_hash": "vllm-help-hash",
+        }
+
     def build_launch_spec(self, config, *, host, port, log_dir) -> ServerLaunchSpec:
         del port
+        rendered = render_vllm_launch(config, host=host, port=8000, capabilities=self.argument_capabilities())
         return ServerLaunchSpec(
             config_id=config.id,
             backend="vllm",
@@ -3825,9 +4292,10 @@ class _SuccessAdapter:
             host=host,
             port=8000,
             base_url="http://127.0.0.1:8000/v1",
-            command=vllm_command(config, host=host, port=8000, capabilities=self.argument_capabilities()),
+            command=rendered.command,
             stdout_log_path=str(log_dir / config.id / "stdout.log"),
             stderr_log_path=str(log_dir / config.id / "stderr.log"),
+            metadata={"rendered_launch": rendered.to_metadata(), **self.backend_metadata()},
         )
 
     def launch_server(self, spec):

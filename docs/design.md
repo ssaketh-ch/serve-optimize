@@ -235,6 +235,8 @@ Managed Mode records:
 * stop failures
 * operator interruption
 
+Managed candidate failures also include `details.reason` so analysis can separate invalid configuration, out of memory, backend failed to start, backend crashed during load, benchmark timeout, request timeout, unavailable model, gated access, and unavailable backend cases without parsing free text.
+
 If a server handle exists, cleanup runs through the stop path even after health, benchmark, or interruption failures.
 
 Managed Mode can resume from a previous run directory with `--resume-from`. Resume reuses only completed measured workloads when candidate id, workload id, launch configuration hash, and workload configuration hash still match the current plan. Reused workloads are recorded as `resume_skip` lifecycle events and enter recommendations as measured resume results. Failed, unavailable, incomplete, or drifted workloads are not reused.

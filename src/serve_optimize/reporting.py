@@ -278,7 +278,10 @@ class PlainTextReporter:
             ("peak power", _fmt_metric(result.telemetry_metrics.get("peak_power_watts"), "W")),
             ("energy", _fmt_metric(result.telemetry_metrics.get("energy_joules"), "J")),
             ("joules/token", _fmt_metric(result.telemetry_metrics.get("joules_per_token"), "J/token")),
+            ("joules/generated token", _fmt_metric(result.telemetry_metrics.get("joules_per_generated_token"), "J/token")),
             ("tokens/sec/watt", _fmt_metric(result.telemetry_metrics.get("tokens_per_second_per_watt"), "tokens/s/W")),
+            ("tokens/joule", _fmt_metric(result.telemetry_metrics.get("tokens_per_joule"), "tokens/J")),
+            ("energy accounting", str(result.telemetry_metrics.get("energy_accounting") or "n/a")),
         ]
         for label, value in rows:
             lines.append(f"{label:<24} {value}")
@@ -603,7 +606,10 @@ class RichReporter:
             ("peak power", _fmt_metric(result.telemetry_metrics.get("peak_power_watts"), "W")),
             ("energy", _fmt_metric(result.telemetry_metrics.get("energy_joules"), "J")),
             ("joules/token", _fmt_metric(result.telemetry_metrics.get("joules_per_token"), "J/token")),
+            ("joules/generated token", _fmt_metric(result.telemetry_metrics.get("joules_per_generated_token"), "J/token")),
             ("tokens/sec/watt", _fmt_metric(result.telemetry_metrics.get("tokens_per_second_per_watt"), "tokens/s/W")),
+            ("tokens/joule", _fmt_metric(result.telemetry_metrics.get("tokens_per_joule"), "tokens/J")),
+            ("energy accounting", str(result.telemetry_metrics.get("energy_accounting") or "n/a")),
         ]
         for row in rows:
             table.add_row(*row)

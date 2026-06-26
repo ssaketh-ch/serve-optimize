@@ -105,6 +105,39 @@ def test_summary_flags_insufficient_concurrency_coverage() -> None:
     assert warmup_summary.measurement_quality["concurrency_coverage"] == "insufficient"
 
 
+def test_summary_records_client_cpu_and_queue_metrics() -> None:
+    records = [
+        RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30, client_queue_s=0.01),
+        RequestRecord(1, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30, client_queue_s=0.03),
+        RequestRecord(2, 0.0, 1.0, 1.0, "error", error="boom", client_queue_s=0.05),
+    ]
+
+    summary = summarize_requests(
+        "run-client",
+        records,
+        wall_time_s=1.0,
+        client_cpu_time_s=0.95,
+        client_cpu_utilization_percent=95.0,
+    )
+
+    assert summary.client_cpu_time_s == pytest.approx(0.95)
+    assert summary.client_cpu_utilization_percent == pytest.approx(95.0)
+    assert summary.client_queue_sample_count == 3
+    assert summary.avg_client_queue_s == pytest.approx(0.03)
+    assert summary.p95_client_queue_s == pytest.approx(0.048)
+    assert summary.max_client_queue_s == pytest.approx(0.05)
+    assert summary.measurement_quality["client_saturation_signal"] == "cpu_saturated"
+    assert summary.client_issue_rate_req_s == pytest.approx(3.0)
+    assert summary.avg_request_backlog == pytest.approx(3.0)
+    assert summary.max_request_backlog == pytest.approx(3.0)
+    assert summary.avg_token_backlog == pytest.approx(60.0)
+    assert summary.max_token_backlog == pytest.approx(60.0)
+    assert summary.load_saturation_signal == "unknown_without_gpu_utilization"
+    assert summary.load_sufficiency["client_issue_rate_req_s"] == pytest.approx(3.0)
+    assert summary.measurement_quality["load_sufficiency"]["max_token_backlog"] == pytest.approx(60.0)
+    assert any("Client CPU utilization was high" in warning for warning in summary.warnings)
+
+
 def test_summary_includes_stream_timing_metrics() -> None:
     records = [
         RequestRecord(
@@ -171,7 +204,13 @@ def test_summary_metric_calculation_with_power_fields() -> None:
     assert summary.peak_power_watts == pytest.approx(140.0)
     assert summary.energy_joules == pytest.approx(240.0)
     assert summary.joules_per_token == pytest.approx(240.0 / 70.0)
+    assert summary.joules_per_generated_token == pytest.approx(240.0 / 50.0)
     assert summary.tokens_per_second_per_watt == pytest.approx(round(35.0 / 120.0, 6))
+    assert summary.tokens_per_joule == pytest.approx(round(70.0 / 240.0, 6))
+    assert summary.energy_accounting == "raw"
+    assert summary.measurement_power_sample_count == 5
+    assert summary.warmup_power_sample_count == 0
+    assert summary.measurement_average_power_watts == pytest.approx(120.0)
     assert summary.telemetry_provider == "nvml"
     assert summary.telemetry_quality == "good"
     assert summary.average_gpu_util_percent == pytest.approx(74.0)
@@ -209,8 +248,15 @@ def test_summary_idle_subtraction_fields() -> None:
     assert summary.active_power_watts == pytest.approx(20.0)
     assert summary.active_energy_joules == pytest.approx(40.0)
     assert summary.active_joules_per_token == pytest.approx(40.0 / 70.0)
+    assert summary.joules_per_generated_token == pytest.approx(240.0 / 50.0)
+    assert summary.active_joules_per_generated_token == pytest.approx(40.0 / 50.0)
     assert summary.active_tokens_per_second_per_watt == pytest.approx(35.0 / 20.0)
+    assert summary.tokens_per_joule == pytest.approx(round(70.0 / 240.0, 6))
+    assert summary.active_tokens_per_joule == pytest.approx(70.0 / 40.0)
+    assert summary.energy_accounting == "idle_subtracted"
     assert summary.measurement_quality["energy_accounting"] == "idle_subtracted"
+    assert summary.measurement_quality["tokens_per_joule"] == pytest.approx(round(70.0 / 240.0, 6))
+    assert summary.measurement_quality["active_joules_per_generated_token"] == pytest.approx(40.0 / 50.0)
 
 
 def test_summary_warmup_and_steady_state_window() -> None:
@@ -269,8 +315,16 @@ def test_measurement_window_filters_failures_and_power_with_the_same_boundaries(
     assert summary.measured_requests == 1
     assert summary.measured_failed_requests == 0
     assert summary.average_power_watts == pytest.approx(100.0)
+    assert summary.warmup_power_sample_count == 1
+    assert summary.measurement_power_sample_count == 1
+    assert summary.warmup_average_power_watts == pytest.approx(200.0)
+    assert summary.measurement_average_power_watts == pytest.approx(100.0)
     assert summary.energy_joules == pytest.approx(100.0)
     assert summary.joules_per_token == pytest.approx(100.0 / 30.0)
+    assert summary.joules_per_generated_token == pytest.approx(100.0 / 20.0)
+    assert summary.tokens_per_joule == pytest.approx(30.0 / 100.0)
+    assert summary.energy_accounting == "raw"
+    assert summary.measurement_quality["energy_window"] == "measurement"
 
 
 def test_all_warmup_requests_leave_the_measurement_window_empty() -> None:
@@ -298,11 +352,15 @@ def test_aggregate_benchmark_summaries_adds_trial_statistics_and_confidence() ->
         "trial-1",
         [RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30)],
         wall_time_s=1.0,
+        client_cpu_time_s=0.5,
+        client_cpu_utilization_percent=50.0,
     )
     second = summarize_requests(
         "trial-2",
-        [RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=26, total_tokens=36)],
+        [RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=26, total_tokens=36, client_queue_s=0.02)],
         wall_time_s=1.0,
+        client_cpu_time_s=0.7,
+        client_cpu_utilization_percent=70.0,
     )
 
     aggregate = aggregate_benchmark_summaries("aggregate", [first, second])
@@ -315,6 +373,10 @@ def test_aggregate_benchmark_summaries_adds_trial_statistics_and_confidence() ->
     assert aggregate.stability_classification == "mostly_stable"
     assert aggregate.measurement_quality["measured_requests"] == 2
     assert aggregate.measurement_quality["measurement_duration_s"] == pytest.approx(2.0)
+    assert aggregate.client_cpu_time_s == pytest.approx(1.2)
+    assert aggregate.client_cpu_utilization_percent == pytest.approx(60.0)
+    assert aggregate.client_queue_sample_count == 1
+    assert aggregate.avg_client_queue_s == pytest.approx(0.02)
 
 
 def test_telemetry_summary_with_full_fields_is_good() -> None:
@@ -664,6 +726,35 @@ def test_streaming_response_without_output_is_a_failed_request(monkeypatch: pyte
     assert record.error == "Streaming response contained no output content."
 
 
+def test_request_timeout_is_recorded_separately_from_generic_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(_http_request, timeout):
+        del timeout
+        raise TimeoutError("request timed out")
+
+    times = iter([0.0, 1.5])
+    monkeypatch.setattr(endpoint_benchmark.time, "time", lambda: next(times))
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", fake_urlopen)
+    config = EndpointBenchmarkConfig(
+        run_id="run-request-timeout",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=1.0,
+    )
+
+    record = send_chat_completion_request(config, request_id=0)
+    summary = summarize_requests("run-request-timeout", [record], wall_time_s=1.5)
+
+    assert record.status == "request_timeout"
+    assert "TimeoutError" in str(record.error)
+    assert summary.successful_requests == 0
+    assert summary.failed_requests == 1
+    assert summary.total_tokens_s == 0.0
+
+
 @pytest.mark.parametrize("base_url", ["file:///tmp/model", "ftp://example.com/v1", "example.com/v1"])
 def test_endpoint_url_rejects_non_http_schemes(base_url: str) -> None:
     with pytest.raises(ValueError, match="must use http or https"):
@@ -711,6 +802,7 @@ def test_endpoint_auth_reads_secret_from_environment_without_storing_it(monkeypa
     )
 
     record = send_chat_completion_request(config, request_id=0)
+    monkeypatch.setattr(endpoint_benchmark.time, "time", lambda: 1.0)
     run = run_endpoint_benchmark(
         config,
         tmp_path,
@@ -812,9 +904,15 @@ def test_mocked_endpoint_benchmark_writes_artifacts_and_request_jsonl(tmp_path) 
         "prompt_tokens",
         "completion_tokens",
         "total_tokens",
+        "client_submit_time",
+        "client_start_time",
+        "client_queue_s",
     }
     assert run.summary.total_requests == 3
     assert run.summary.failed_requests == 0
+    assert run.summary.client_cpu_time_s is not None
+    assert run.summary.client_cpu_utilization_percent is not None
+    assert run.summary.client_queue_sample_count == 3
     assert run.comparison is not None
 
 
@@ -864,15 +962,27 @@ def test_mocked_endpoint_benchmark_with_telemetry_writes_power_artifacts(tmp_pat
 
     run_dir = run.run_dir
     assert (run_dir / "power_samples.jsonl").exists()
+    assert (run_dir / "measurement_power_samples.jsonl").exists()
     assert (run_dir / "telemetry_summary.json").exists()
     assert (run_dir / "telemetry_capabilities.json").exists()
+    measurement_samples = [
+        json.loads(line)
+        for line in (run_dir / "measurement_power_samples.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(measurement_samples) == 5
+    assert {sample["phase"] for sample in measurement_samples} == {"measurement"}
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["power_sample_count"] == 5
+    assert summary["measurement_power_sample_count"] == 5
     assert summary["average_power_watts"] == pytest.approx(120.0)
     assert summary["peak_power_watts"] == pytest.approx(140.0)
     assert summary["energy_joules"] is not None
     assert summary["joules_per_token"] is not None
+    assert summary["joules_per_generated_token"] is not None
     assert summary["tokens_per_second_per_watt"] is not None
+    assert summary["tokens_per_joule"] is not None
+    assert summary["energy_accounting"] == "raw"
     assert summary["telemetry_provider"] == "nvml"
     assert summary["telemetry_quality"] == "good"
     assert summary["average_gpu_util_percent"] == pytest.approx(74.0)
@@ -880,6 +990,63 @@ def test_mocked_endpoint_benchmark_with_telemetry_writes_power_artifacts(tmp_pat
     capabilities = json.loads((run_dir / "telemetry_capabilities.json").read_text(encoding="utf-8"))
     assert capabilities["provider"] == "nvml"
     assert "power" in capabilities["available_fields"]
+
+
+def test_endpoint_benchmark_records_pre_run_idle_power_samples(tmp_path) -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="run-idle-artifacts",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        telemetry="nvml",
+        idle_baseline_duration_s=0.01,
+    )
+    captures = iter(
+        [
+            TelemetryCapture(
+                provider="nvml",
+                samples=[PowerSampleRecord(0.0, "measured", 90.0, "nvml", provider="nvml")],
+                warnings=[],
+            ),
+            TelemetryCapture(
+                provider="nvml",
+                samples=[PowerSampleRecord(0.0, "measured", 120.0, "nvml", provider="nvml")],
+                warnings=[],
+            ),
+        ]
+    )
+
+    run = run_endpoint_benchmark(
+        config,
+        tmp_path,
+        request_fn=lambda _config, request_id: RequestRecord(
+            request_id=request_id,
+            start_time=0.0,
+            end_time=0.2,
+            latency_s=0.2,
+            status="ok",
+            prompt_tokens=4,
+            completion_tokens=8,
+            total_tokens=12,
+        ),
+        telemetry_collector_factory=lambda telemetry, device_index, interval_s: _FakeCollector(next(captures)),
+    )
+
+    idle_samples = [
+        json.loads(line)
+        for line in (run.run_dir / "idle_power_samples.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    summary = json.loads((run.run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert len(idle_samples) == 1
+    assert idle_samples[0]["phase"] == "idle"
+    assert summary["idle_power_watts"] == pytest.approx(90.0)
+    assert summary["measurement_quality"]["idle_baseline_source"] == "sampled_pre_run"
+    assert summary["energy_accounting"] == "idle_subtracted"
 
 
 def test_mocked_endpoint_benchmark_telemetry_failure_adds_warnings(tmp_path) -> None:

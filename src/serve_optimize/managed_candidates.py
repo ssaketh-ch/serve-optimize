@@ -459,7 +459,7 @@ def _profile_concurrency(profile: WorkloadProfile) -> int:
 
 def _throughput_concurrency_values(profile: WorkloadProfile) -> list[int]:
     base = _profile_concurrency(profile)
-    values = [max(base * 2, 16), max(base * 4, 32)]
+    values = [max(base * 2, 16), max(base * 4, 32), max(base * 8, 64)]
     result: list[int] = []
     for value in values:
         if value not in result:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import socket
 import statistics
 import time
 import uuid
@@ -30,6 +31,9 @@ from .schemas import (
 from .telemetry import TelemetryCapture, make_telemetry_collector, summarize_telemetry
 
 DEFAULT_ENDPOINT_PROMPT = "GPU optimization " * 100
+CLIENT_CPU_SATURATION_THRESHOLD_PERCENT = 90.0
+CLIENT_CPU_WARNING_MIN_DURATION_S = 1.0
+LOAD_GPU_SATURATION_THRESHOLD_PERCENT = 85.0
 
 
 RequestFn = Callable[[EndpointBenchmarkConfig, int], RequestRecord]
@@ -77,18 +81,32 @@ def run_endpoint_benchmark(
 
     sampler = telemetry_collector_factory(config.telemetry, config.device_index, 0.2)
     sampler.start()
+    cpu_start = time.process_time()
     wall_start = time.perf_counter()
     records = _run_requests(config, request_fn)
     wall_time_s = max(time.perf_counter() - wall_start, 0.0)
+    client_cpu_time_s = max(time.process_time() - cpu_start, 0.0)
+    client_cpu_utilization_percent = (client_cpu_time_s / wall_time_s * 100.0) if wall_time_s > 0 else None
     telemetry = sampler.stop()
-    power_samples = [replace(sample, phase="active") for sample in telemetry.samples]
 
     records = sorted(records, key=lambda item: item.request_id)
+    power_samples = _phase_power_samples(
+        [replace(sample, phase="active") for sample in telemetry.samples],
+        records,
+        warmup_requests=config.warmup_requests,
+        steady_state_duration_s=config.steady_state_duration_s,
+    )
+    warmup_power_samples = [sample for sample in power_samples if sample.phase == "warmup"]
+    measurement_power_samples = [sample for sample in power_samples if sample.phase == "measurement"]
     write_jsonl(run_dir / "requests.jsonl", records)
     if config.telemetry != "none":
         write_jsonl(run_dir / "power_samples.jsonl", [*idle_samples, *power_samples])
         if idle_samples:
             write_jsonl(run_dir / "idle_power_samples.jsonl", idle_samples)
+        if warmup_power_samples:
+            write_jsonl(run_dir / "warmup_power_samples.jsonl", warmup_power_samples)
+        if measurement_power_samples:
+            write_jsonl(run_dir / "measurement_power_samples.jsonl", measurement_power_samples)
 
     summary = summarize_requests(
         config.run_id,
@@ -103,6 +121,19 @@ def run_endpoint_benchmark(
         idle_sample_count=len(idle_samples),
         configured_concurrency=config.concurrency,
         configured_num_requests=config.num_requests,
+        backend_name=config.backend_name,
+        backend_version=config.backend_version,
+        backend_launch_command=config.backend_launch_command,
+        backend_launch_command_hash=config.backend_launch_command_hash,
+        backend_effective_values=config.backend_effective_values,
+        backend_applied_configuration=config.backend_applied_configuration,
+        backend_omitted_values=config.backend_omitted_values,
+        backend_unsupported_values=config.backend_unsupported_values,
+        backend_unavailable_values=config.backend_unavailable_values,
+        backend_flag_aliases=config.backend_flag_aliases,
+        backend_capabilities_help_hash=config.backend_capabilities_help_hash,
+        client_cpu_time_s=client_cpu_time_s,
+        client_cpu_utilization_percent=client_cpu_utilization_percent,
     )
     write_json(run_dir / "summary.json", summary)
     if config.telemetry != "none":
@@ -133,13 +164,16 @@ def _run_requests(config: EndpointBenchmarkConfig, request_fn: RequestFn) -> lis
     with ThreadPoolExecutor(max_workers=workers) as executor:
         while True:
             request_count = config.num_requests if next_request_id == 0 else workers
-            futures = {
-                executor.submit(request_fn, config, request_id): request_id
-                for request_id in range(next_request_id, next_request_id + request_count)
-            }
+            futures = {}
+            for request_id in range(next_request_id, next_request_id + request_count):
+                submit_time = time.time()
+                futures[executor.submit(_timed_request, config, request_fn, request_id, submit_time)] = (
+                    request_id,
+                    submit_time,
+                )
             next_request_id += request_count
             for future in as_completed(futures):
-                request_id = futures[future]
+                request_id, submit_time = futures[future]
                 try:
                     records.append(future.result())
                 except Exception as exc:
@@ -152,6 +186,8 @@ def _run_requests(config: EndpointBenchmarkConfig, request_fn: RequestFn) -> lis
                             latency_s=0.0,
                             status="error",
                             error=f"{exc.__class__.__name__}: {exc}",
+                            client_submit_time=submit_time,
+                            client_queue_s=max(0.0, now - submit_time),
                         )
                     )
             if config.soak_duration_s is None or config.soak_duration_s <= 0:
@@ -159,6 +195,38 @@ def _run_requests(config: EndpointBenchmarkConfig, request_fn: RequestFn) -> lis
             if time.perf_counter() - soak_started >= config.soak_duration_s:
                 break
     return records
+
+
+def _timed_request(
+    config: EndpointBenchmarkConfig,
+    request_fn: RequestFn,
+    request_id: int,
+    submit_time: float,
+) -> RequestRecord:
+    client_start = time.time()
+    client_queue_s = max(0.0, client_start - submit_time)
+    try:
+        record = request_fn(config, request_id)
+    except Exception as exc:
+        end = time.time()
+        status = _request_exception_status(exc)
+        return RequestRecord(
+            request_id=request_id,
+            start_time=client_start,
+            end_time=end,
+            latency_s=max(0.0, end - client_start),
+            status=status,
+            error=f"{exc.__class__.__name__}: {exc}",
+            client_submit_time=submit_time,
+            client_start_time=client_start,
+            client_queue_s=client_queue_s,
+        )
+    return replace(
+        record,
+        client_submit_time=submit_time,
+        client_start_time=client_start,
+        client_queue_s=client_queue_s,
+    )
 
 
 def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: int) -> RequestRecord:
@@ -220,7 +288,7 @@ def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: in
             start_time=start,
             end_time=end,
             latency_s=end - start,
-            status="error",
+            status=_request_exception_status(exc),
             error=f"{exc.__class__.__name__}: {exc}",
         )
 
@@ -299,6 +367,23 @@ def _choice_has_stream_content(choice: dict[str, object]) -> bool:
     return isinstance(message, dict) and bool(message.get("content"))
 
 
+def _request_exception_status(exc: Exception) -> str:
+    if _is_request_timeout(exc):
+        return "request_timeout"
+    return "error"
+
+
+def _is_request_timeout(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError | socket.timeout):
+        return True
+    if isinstance(exc, error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError | socket.timeout):
+            return True
+        return "timed out" in str(reason).lower()
+    return "timed out" in str(exc).lower()
+
+
 def summarize_requests(
     run_id: str,
     records: list[RequestRecord],
@@ -312,6 +397,19 @@ def summarize_requests(
     idle_sample_count: int = 0,
     configured_concurrency: int | None = None,
     configured_num_requests: int | None = None,
+    backend_name: str | None = None,
+    backend_version: str | None = None,
+    backend_launch_command: list[str] | None = None,
+    backend_launch_command_hash: str | None = None,
+    backend_effective_values: dict[str, object] | None = None,
+    backend_applied_configuration: dict[str, object] | None = None,
+    backend_omitted_values: dict[str, object] | None = None,
+    backend_unsupported_values: dict[str, object] | None = None,
+    backend_unavailable_values: dict[str, object] | None = None,
+    backend_flag_aliases: dict[str, object] | None = None,
+    backend_capabilities_help_hash: str | None = None,
+    client_cpu_time_s: float | None = None,
+    client_cpu_utilization_percent: float | None = None,
 ) -> EndpointBenchmarkSummary:
     power_samples = power_samples or []
     telemetry = telemetry or TelemetryCapture(provider=None, samples=[], warnings=[])
@@ -323,18 +421,22 @@ def summarize_requests(
     )
     measured_successful = [record for record in measured_records if record.status == "ok"]
     measurement_window_applied = warmup_requests > 0 or bool(steady_state_duration_s and steady_state_duration_s > 0)
+    phase_power_samples = _phase_power_samples(
+        power_samples,
+        records,
+        warmup_requests=warmup_requests,
+        steady_state_duration_s=steady_state_duration_s,
+    )
+    warmup_power_samples = [sample for sample in phase_power_samples if sample.phase == "warmup"]
+    measurement_power_samples = [sample for sample in phase_power_samples if sample.phase == "measurement"]
     latencies = [record.latency_s for record in measured_successful]
     ttfts_ms = [record.ttft_s * 1000.0 for record in measured_successful if record.ttft_s is not None]
     tpots_ms = [record.tpot_s * 1000.0 for record in measured_successful if record.tpot_s is not None]
+    client_queue_s = [record.client_queue_s for record in measured_records if record.client_queue_s is not None]
     prompt_tokens = sum(record.prompt_tokens for record in measured_successful)
     completion_tokens = sum(record.completion_tokens for record in measured_successful)
     total_tokens = sum(record.total_tokens for record in measured_successful)
     measurement_duration = _measurement_duration(measured_records, wall_time_s, window_applied=measurement_window_applied)
-    measurement_power_samples = _measurement_power_samples(
-        power_samples,
-        measured_records,
-        window_applied=measurement_window_applied,
-    )
     concurrency_coverage = _concurrency_coverage(
         configured_concurrency=configured_concurrency,
         measured_request_count=len(measured_records),
@@ -346,9 +448,41 @@ def summarize_requests(
         provider=telemetry.provider,
         warnings=telemetry.warnings,
     )
+    client_issue_rate = _client_issue_rate(measured_records, measurement_duration)
+    request_backlog = _interval_backlog(measured_records, measurement_duration, weight="requests")
+    token_backlog = _interval_backlog(measured_records, measurement_duration, weight="tokens")
+    load_saturation_signal = _load_saturation_signal(
+        telemetry_summary.average_gpu_util_percent,
+        telemetry_summary.max_gpu_util_percent,
+    )
+    load_sufficiency = {
+        "schema_version": "load-sufficiency-trial/v1",
+        "gpu_utilization_available": telemetry_summary.average_gpu_util_percent is not None
+        or telemetry_summary.max_gpu_util_percent is not None,
+        "average_gpu_util_percent": telemetry_summary.average_gpu_util_percent,
+        "max_gpu_util_percent": telemetry_summary.max_gpu_util_percent,
+        "gpu_saturation_threshold_percent": LOAD_GPU_SATURATION_THRESHOLD_PERCENT,
+        "client_issue_rate_req_s": _round_or_none(client_issue_rate),
+        "avg_request_backlog": _round_or_none(request_backlog["avg"]),
+        "max_request_backlog": _round_or_none(request_backlog["max"]),
+        "request_backlog_source": "client_observed_inflight_requests",
+        "avg_token_backlog": _round_or_none(token_backlog["avg"]),
+        "max_token_backlog": _round_or_none(token_backlog["max"]),
+        "token_backlog_source": "observed_total_tokens_in_flight",
+        "load_saturation_signal": load_saturation_signal,
+    }
     active_power = _active_power(telemetry_summary.average_power_watts, idle_power_watts)
     active_energy = active_power * measurement_duration if active_power is not None and measurement_duration is not None else None
     active_joules_per_token = active_energy / total_tokens if active_energy is not None and total_tokens > 0 else None
+    energy_accounting = "idle_subtracted" if active_energy is not None else "raw"
+    joules_per_generated_token = (
+        telemetry_summary.energy_joules / completion_tokens
+        if telemetry_summary.energy_joules is not None and completion_tokens > 0
+        else None
+    )
+    active_joules_per_generated_token = active_energy / completion_tokens if active_energy is not None and completion_tokens > 0 else None
+    tokens_per_joule = total_tokens / telemetry_summary.energy_joules if telemetry_summary.energy_joules not in {None, 0} else None
+    active_tokens_per_joule = total_tokens / active_energy if active_energy not in {None, 0} else None
     active_tokens_per_watt = (
         total_tokens / measurement_duration / active_power
         if active_power is not None and active_power > 0 and measurement_duration is not None and measurement_duration > 0
@@ -374,13 +508,40 @@ def summarize_requests(
         "concurrency_coverage": concurrency_coverage,
         "idle_power_watts": _round_or_none(idle_power_watts),
         "idle_sample_count": idle_sample_count,
+        "idle_baseline_source": _idle_baseline_source(idle_power_watts, idle_sample_count),
+        "idle_baseline_phase": "pre_run" if idle_power_watts is not None or idle_sample_count > 0 else "unavailable",
+        "warmup_power_sample_count": len(warmup_power_samples),
+        "measurement_power_sample_count": len(measurement_power_samples),
+        "warmup_average_power_watts": _round_or_none(_average_power(warmup_power_samples)),
+        "measurement_average_power_watts": _round_or_none(_average_power(measurement_power_samples)),
+        "energy_window": "measurement",
         "soak_requested_duration_s": soak_duration_s,
         "soak_effective_duration_s": _round_or_none(wall_time_s),
         "ttft_sample_count": len(ttfts_ms),
         "tpot_sample_count": len(tpots_ms),
         "timing_source": _timing_source(measured_successful),
         "token_count_source": _token_count_source(measured_successful),
-        "energy_accounting": "idle_subtracted" if active_energy is not None else "gross",
+        "client_cpu_time_s": _round_or_none(client_cpu_time_s),
+        "client_cpu_utilization_percent": _round_or_none(client_cpu_utilization_percent),
+        "client_queue_sample_count": len(client_queue_s),
+        "avg_client_queue_s": _round_or_none(_mean(client_queue_s)),
+        "p50_client_queue_s": _round_or_none(_percentile(client_queue_s, 50)),
+        "p95_client_queue_s": _round_or_none(_percentile(client_queue_s, 95)),
+        "p99_client_queue_s": _round_or_none(_percentile(client_queue_s, 99)),
+        "max_client_queue_s": _round_or_none(max(client_queue_s) if client_queue_s else None),
+        "client_saturation_signal": _client_saturation_signal(client_cpu_utilization_percent),
+        "client_issue_rate_req_s": _round_or_none(client_issue_rate),
+        "avg_request_backlog": _round_or_none(request_backlog["avg"]),
+        "max_request_backlog": _round_or_none(request_backlog["max"]),
+        "avg_token_backlog": _round_or_none(token_backlog["avg"]),
+        "max_token_backlog": _round_or_none(token_backlog["max"]),
+        "load_saturation_signal": load_saturation_signal,
+        "load_sufficiency": load_sufficiency,
+        "energy_accounting": energy_accounting,
+        "tokens_per_joule": _round_or_none(tokens_per_joule),
+        "active_tokens_per_joule": _round_or_none(active_tokens_per_joule),
+        "joules_per_generated_token": _round_or_none(joules_per_generated_token),
+        "active_joules_per_generated_token": _round_or_none(active_joules_per_generated_token),
         "phase_energy_attribution": "unavailable_without_phase_markers",
         "stability_classification": "single_trial",
     }
@@ -390,6 +551,7 @@ def summarize_requests(
         configured_num_requests=configured_num_requests,
         measured_request_count=len(measured_records),
     )
+    client_warnings = _client_warnings(client_cpu_utilization_percent, measurement_duration)
     return EndpointBenchmarkSummary(
         run_id=run_id,
         total_requests=len(records),
@@ -424,13 +586,22 @@ def summarize_requests(
         power_sampling_duration_s=telemetry_summary.power_sampling_duration_s,
         power_sampling_rate_hz=telemetry_summary.power_sampling_rate_hz,
         idle_power_watts=_round_or_none(idle_power_watts),
+        warmup_power_sample_count=len(warmup_power_samples),
+        measurement_power_sample_count=len(measurement_power_samples),
+        warmup_average_power_watts=_round_or_none(_average_power(warmup_power_samples)),
+        measurement_average_power_watts=_round_or_none(_average_power(measurement_power_samples)),
         active_power_watts=_round_or_none(active_power),
         active_energy_joules=_round_or_none(active_energy),
         energy_joules=telemetry_summary.energy_joules,
+        energy_accounting=energy_accounting,
         joules_per_token=telemetry_summary.joules_per_token,
         active_joules_per_token=_round_or_none(active_joules_per_token),
+        joules_per_generated_token=_round_or_none(joules_per_generated_token),
+        active_joules_per_generated_token=_round_or_none(active_joules_per_generated_token),
         tokens_per_second_per_watt=telemetry_summary.tokens_per_second_per_watt,
         active_tokens_per_second_per_watt=_round_or_none(active_tokens_per_watt),
+        tokens_per_joule=_round_or_none(tokens_per_joule),
+        active_tokens_per_joule=_round_or_none(active_tokens_per_joule),
         warmup_requests=warmup_requests,
         steady_state_requests=len(measured_successful),
         steady_state_duration_s=_round_or_none(measurement_duration),
@@ -456,12 +627,38 @@ def summarize_requests(
         telemetry_quality=telemetry_summary.telemetry_quality,
         telemetry_notes=telemetry_summary.telemetry_notes,
         telemetry_summary=to_dict(telemetry_summary),
-        warnings=sorted({*telemetry_summary.telemetry_warnings, *token_warnings, *concurrency_warnings}),
+        warnings=sorted({*telemetry_summary.telemetry_warnings, *token_warnings, *concurrency_warnings, *client_warnings}),
         measurement_duration_s=_round_or_none(measurement_duration),
         measured_requests=len(measured_records),
         measured_successful_requests=len(measured_successful),
         measured_failed_requests=len(measured_records) - len(measured_successful),
         token_count_source=_token_count_source(measured_successful),
+        client_cpu_time_s=_round_or_none(client_cpu_time_s),
+        client_cpu_utilization_percent=_round_or_none(client_cpu_utilization_percent),
+        client_queue_sample_count=len(client_queue_s),
+        avg_client_queue_s=_round_or_none(_mean(client_queue_s)),
+        p50_client_queue_s=_round_or_none(_percentile(client_queue_s, 50)),
+        p95_client_queue_s=_round_or_none(_percentile(client_queue_s, 95)),
+        p99_client_queue_s=_round_or_none(_percentile(client_queue_s, 99)),
+        max_client_queue_s=_round_or_none(max(client_queue_s) if client_queue_s else None),
+        client_issue_rate_req_s=_round_or_none(client_issue_rate),
+        avg_request_backlog=_round_or_none(request_backlog["avg"]),
+        max_request_backlog=_round_or_none(request_backlog["max"]),
+        avg_token_backlog=_round_or_none(token_backlog["avg"]),
+        max_token_backlog=_round_or_none(token_backlog["max"]),
+        load_saturation_signal=load_saturation_signal,
+        load_sufficiency=load_sufficiency,
+        backend_name=backend_name,
+        backend_version=backend_version,
+        backend_launch_command=list(backend_launch_command or []),
+        backend_launch_command_hash=backend_launch_command_hash,
+        backend_effective_values=dict(backend_effective_values or {}),
+        backend_applied_configuration=dict(backend_applied_configuration or {}),
+        backend_omitted_values=dict(backend_omitted_values or {}),
+        backend_unsupported_values=dict(backend_unsupported_values or {}),
+        backend_unavailable_values=dict(backend_unavailable_values or {}),
+        backend_flag_aliases=dict(backend_flag_aliases or {}),
+        backend_capabilities_help_hash=backend_capabilities_help_hash,
     )
 
 
@@ -475,9 +672,32 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
     successful_requests = sum(summary.successful_requests for summary in summaries)
     failed_requests = sum(summary.failed_requests for summary in summaries)
     wall_time_s = sum(summary.wall_time_s for summary in summaries)
+    client_cpu_time_s = sum(summary.client_cpu_time_s for summary in summaries if summary.client_cpu_time_s is not None) or None
+    client_cpu_utilization_percent = (
+        client_cpu_time_s / wall_time_s * 100.0
+        if client_cpu_time_s is not None and wall_time_s > 0
+        else _mean([_float(summary.client_cpu_utilization_percent) for summary in summaries if _float(summary.client_cpu_utilization_percent) is not None])
+    )
+    client_queue_sample_count = sum(summary.client_queue_sample_count for summary in summaries)
+    client_issue_rate_req_s = _mean([_float(summary.client_issue_rate_req_s) for summary in summaries if _float(summary.client_issue_rate_req_s) is not None])
+    avg_request_backlog = _mean([_float(summary.avg_request_backlog) for summary in summaries if _float(summary.avg_request_backlog) is not None])
+    max_request_backlog = max([summary.max_request_backlog for summary in summaries if summary.max_request_backlog is not None], default=None)
+    avg_token_backlog = _mean([_float(summary.avg_token_backlog) for summary in summaries if _float(summary.avg_token_backlog) is not None])
+    max_token_backlog = max([summary.max_token_backlog for summary in summaries if summary.max_token_backlog is not None], default=None)
     prompt_tokens = sum(summary.prompt_tokens for summary in summaries)
     completion_tokens = sum(summary.completion_tokens for summary in summaries)
     total_tokens = sum(summary.total_tokens for summary in summaries)
+    energy_joules = sum([summary.energy_joules for summary in summaries if summary.energy_joules is not None]) or None
+    active_energy_joules = sum([summary.active_energy_joules for summary in summaries if summary.active_energy_joules is not None]) or None
+    energy_accounting = "idle_subtracted" if active_energy_joules is not None else "raw"
+    tokens_per_joule = total_tokens / energy_joules if energy_joules not in {None, 0} else None
+    active_tokens_per_joule = total_tokens / active_energy_joules if active_energy_joules not in {None, 0} else None
+    joules_per_generated_token = energy_joules / completion_tokens if energy_joules is not None and completion_tokens > 0 else None
+    active_joules_per_generated_token = (
+        active_energy_joules / completion_tokens
+        if active_energy_joules is not None and completion_tokens > 0
+        else None
+    )
     metrics = {
         "total_tokens_s": [_float(summary.total_tokens_s) for summary in summaries],
         "output_tokens_s": [_float(summary.output_tokens_s) for summary in summaries],
@@ -487,6 +707,8 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         "p95_tpot_ms": [_float(summary.p95_tpot_ms) for summary in summaries],
         "joules_per_token": [_float(summary.joules_per_token) for summary in summaries],
         "active_joules_per_token": [_float(summary.active_joules_per_token) for summary in summaries],
+        "tokens_per_joule": [_float(summary.tokens_per_joule) for summary in summaries],
+        "joules_per_generated_token": [_float(summary.joules_per_generated_token) for summary in summaries],
     }
     metric_values = {key: [value for value in values if value is not None] for key, values in metrics.items()}
     confidence_intervals = {
@@ -511,12 +733,41 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
             "schema_version": "measurement-quality/v1",
             "trial_count": len(summaries),
             "stability_classification": stability,
-            "energy_accounting": "idle_subtracted" if any(summary.active_energy_joules is not None for summary in summaries) else "gross",
+            "energy_accounting": energy_accounting,
+            "energy_window": "measurement",
+            "warmup_power_sample_count": sum(summary.warmup_power_sample_count for summary in summaries),
+            "measurement_power_sample_count": sum(summary.measurement_power_sample_count for summary in summaries),
+            "warmup_average_power_watts": _round_or_none(
+                _mean([_float(summary.warmup_average_power_watts) for summary in summaries if _float(summary.warmup_average_power_watts) is not None])
+            ),
+            "measurement_average_power_watts": _round_or_none(
+                _mean([_float(summary.measurement_average_power_watts) for summary in summaries if _float(summary.measurement_average_power_watts) is not None])
+            ),
+            "tokens_per_joule": _round_or_none(tokens_per_joule),
+            "active_tokens_per_joule": _round_or_none(active_tokens_per_joule),
+            "joules_per_generated_token": _round_or_none(joules_per_generated_token),
+            "active_joules_per_generated_token": _round_or_none(active_joules_per_generated_token),
             "measurement_duration_s": sum(summary.measurement_duration_s or 0.0 for summary in summaries) or None,
             "measured_requests": sum(summary.measured_requests or 0 for summary in summaries),
             "measured_successful_requests": sum(summary.measured_successful_requests or 0 for summary in summaries),
             "measured_failed_requests": sum(summary.measured_failed_requests or 0 for summary in summaries),
             "token_count_source": _aggregate_token_count_source(summaries),
+            "client_cpu_time_s": _round_or_none(client_cpu_time_s),
+            "client_cpu_utilization_percent": _round_or_none(client_cpu_utilization_percent),
+            "client_queue_sample_count": client_queue_sample_count,
+            "avg_client_queue_s": _round_or_none(_weighted_queue_mean(summaries)),
+            "p50_client_queue_s": _round_or_none(_mean([_float(summary.p50_client_queue_s) for summary in summaries if _float(summary.p50_client_queue_s) is not None])),
+            "p95_client_queue_s": _round_or_none(_mean([_float(summary.p95_client_queue_s) for summary in summaries if _float(summary.p95_client_queue_s) is not None])),
+            "p99_client_queue_s": _round_or_none(_mean([_float(summary.p99_client_queue_s) for summary in summaries if _float(summary.p99_client_queue_s) is not None])),
+            "max_client_queue_s": _round_or_none(max([summary.max_client_queue_s for summary in summaries if summary.max_client_queue_s is not None], default=None)),
+            "client_saturation_signal": _client_saturation_signal(client_cpu_utilization_percent),
+            "client_issue_rate_req_s": _round_or_none(client_issue_rate_req_s),
+            "avg_request_backlog": _round_or_none(avg_request_backlog),
+            "max_request_backlog": _round_or_none(max_request_backlog),
+            "avg_token_backlog": _round_or_none(avg_token_backlog),
+            "max_token_backlog": _round_or_none(max_token_backlog),
+            "load_saturation_signal": _aggregate_load_saturation_signal(summaries),
+            "load_sufficiency": _aggregate_load_sufficiency(summaries),
         }
     )
     return replace(
@@ -548,10 +799,19 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         power_sample_count=sum(summary.power_sample_count for summary in summaries),
         average_power_watts=_mean([_float(summary.average_power_watts) for summary in summaries if _float(summary.average_power_watts) is not None]),
         peak_power_watts=max([summary.peak_power_watts for summary in summaries if summary.peak_power_watts is not None], default=None),
-        energy_joules=sum([summary.energy_joules for summary in summaries if summary.energy_joules is not None]) or None,
+        warmup_power_sample_count=sum(summary.warmup_power_sample_count for summary in summaries),
+        measurement_power_sample_count=sum(summary.measurement_power_sample_count for summary in summaries),
+        warmup_average_power_watts=_mean([_float(summary.warmup_average_power_watts) for summary in summaries if _float(summary.warmup_average_power_watts) is not None]),
+        measurement_average_power_watts=_mean(
+            [_float(summary.measurement_average_power_watts) for summary in summaries if _float(summary.measurement_average_power_watts) is not None]
+        ),
+        energy_joules=energy_joules,
+        energy_accounting=energy_accounting,
         joules_per_token=_mean(metric_values["joules_per_token"]),
-        active_energy_joules=sum([summary.active_energy_joules for summary in summaries if summary.active_energy_joules is not None]) or None,
+        active_energy_joules=active_energy_joules,
         active_joules_per_token=_mean(metric_values["active_joules_per_token"]),
+        joules_per_generated_token=_round_or_none(joules_per_generated_token),
+        active_joules_per_generated_token=_round_or_none(active_joules_per_generated_token),
         tokens_per_second_per_watt=_mean([_float(summary.tokens_per_second_per_watt) for summary in summaries if _float(summary.tokens_per_second_per_watt) is not None]),
         active_tokens_per_second_per_watt=_mean(
             [
@@ -560,6 +820,8 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
                 if _float(summary.active_tokens_per_second_per_watt) is not None
             ]
         ),
+        tokens_per_joule=_round_or_none(tokens_per_joule),
+        active_tokens_per_joule=_round_or_none(active_tokens_per_joule),
         temperature_rise_c=_mean([_float(summary.temperature_rise_c) for summary in summaries if _float(summary.temperature_rise_c) is not None]),
         temperature_slope_c_per_min=_mean([_float(summary.temperature_slope_c_per_min) for summary in summaries if _float(summary.temperature_slope_c_per_min) is not None]),
         thermal_stability_classification=_aggregate_thermal_classification(summaries),
@@ -578,6 +840,21 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         measured_successful_requests=sum(summary.measured_successful_requests or 0 for summary in summaries),
         measured_failed_requests=sum(summary.measured_failed_requests or 0 for summary in summaries),
         token_count_source=_aggregate_token_count_source(summaries),
+        client_cpu_time_s=_round_or_none(client_cpu_time_s),
+        client_cpu_utilization_percent=_round_or_none(client_cpu_utilization_percent),
+        client_queue_sample_count=client_queue_sample_count,
+        avg_client_queue_s=_round_or_none(_weighted_queue_mean(summaries)),
+        p50_client_queue_s=_round_or_none(_mean([_float(summary.p50_client_queue_s) for summary in summaries if _float(summary.p50_client_queue_s) is not None])),
+        p95_client_queue_s=_round_or_none(_mean([_float(summary.p95_client_queue_s) for summary in summaries if _float(summary.p95_client_queue_s) is not None])),
+        p99_client_queue_s=_round_or_none(_mean([_float(summary.p99_client_queue_s) for summary in summaries if _float(summary.p99_client_queue_s) is not None])),
+        max_client_queue_s=_round_or_none(max([summary.max_client_queue_s for summary in summaries if summary.max_client_queue_s is not None], default=None)),
+        client_issue_rate_req_s=_round_or_none(client_issue_rate_req_s),
+        avg_request_backlog=_round_or_none(avg_request_backlog),
+        max_request_backlog=_round_or_none(max_request_backlog),
+        avg_token_backlog=_round_or_none(avg_token_backlog),
+        max_token_backlog=_round_or_none(max_token_backlog),
+        load_saturation_signal=_aggregate_load_saturation_signal(summaries),
+        load_sufficiency=_aggregate_load_sufficiency(summaries),
     )
 
 
@@ -695,19 +972,52 @@ def _measurement_duration(records: list[RequestRecord], wall_time_s: float, *, w
     return None
 
 
-def _measurement_power_samples(
+def _phase_power_samples(
     samples: list[PowerSampleRecord],
     records: list[RequestRecord],
     *,
-    window_applied: bool,
+    warmup_requests: int,
+    steady_state_duration_s: float | None,
 ) -> list[PowerSampleRecord]:
-    if not window_applied:
-        return samples
-    if not records:
+    if not samples:
         return []
-    start = min(record.start_time for record in records)
-    end = max(record.end_time for record in records)
-    return [sample for sample in samples if start <= sample.timestamp_s <= end]
+    if warmup_requests <= 0 and (steady_state_duration_s is None or steady_state_duration_s <= 0):
+        return [sample if sample.phase == "idle" else replace(sample, phase="measurement") for sample in samples]
+    warmup_records = _warmup_window_records(records, warmup_requests=warmup_requests)
+    measured_records = _measurement_window_records(
+        records,
+        warmup_requests=warmup_requests,
+        steady_state_duration_s=steady_state_duration_s,
+    )
+    warmup_window = _record_time_window(warmup_records)
+    measurement_window = _record_time_window(measured_records)
+    phased = []
+    for sample in samples:
+        if sample.phase == "idle":
+            phased.append(sample)
+            continue
+        phase = "measurement"
+        if warmup_window is not None and warmup_window[0] <= sample.timestamp_s <= warmup_window[1]:
+            phase = "warmup"
+        elif measurement_window is not None and measurement_window[0] <= sample.timestamp_s <= measurement_window[1]:
+            phase = "measurement"
+        elif warmup_window is not None or measurement_window is not None:
+            phase = "active_other"
+        phased.append(replace(sample, phase=phase))
+    return phased
+
+
+def _warmup_window_records(records: list[RequestRecord], *, warmup_requests: int) -> list[RequestRecord]:
+    if warmup_requests <= 0 or not records:
+        return []
+    ordered = sorted(records, key=lambda record: (record.start_time, record.request_id))
+    return ordered[:warmup_requests]
+
+
+def _record_time_window(records: list[RequestRecord]) -> tuple[float, float] | None:
+    if not records:
+        return None
+    return min(record.start_time for record in records), max(record.end_time for record in records)
 
 
 def _effective_concurrency_limit(
@@ -748,10 +1058,117 @@ def _concurrency_warnings(
     return warnings
 
 
+def _client_saturation_signal(client_cpu_utilization_percent: float | None) -> str:
+    if client_cpu_utilization_percent is None:
+        return "unknown"
+    if client_cpu_utilization_percent >= CLIENT_CPU_SATURATION_THRESHOLD_PERCENT:
+        return "cpu_saturated"
+    return "not_saturated"
+
+
+def _client_warnings(client_cpu_utilization_percent: float | None, measurement_duration_s: float | None) -> list[str]:
+    if measurement_duration_s is None or measurement_duration_s < CLIENT_CPU_WARNING_MIN_DURATION_S:
+        return []
+    if _client_saturation_signal(client_cpu_utilization_percent) != "cpu_saturated":
+        return []
+    return ["Client CPU utilization was high during the benchmark, so throughput may be client limited."]
+
+
+def _client_issue_rate(records: list[RequestRecord], measurement_duration_s: float | None) -> float | None:
+    if not records or measurement_duration_s is None or measurement_duration_s <= 0:
+        return None
+    return len(records) / measurement_duration_s
+
+
+def _interval_backlog(records: list[RequestRecord], measurement_duration_s: float | None, *, weight: str) -> dict[str, float | None]:
+    if not records or measurement_duration_s is None or measurement_duration_s <= 0:
+        return {"avg": None, "max": None}
+    events: list[tuple[float, float]] = []
+    for record in records:
+        start = record.client_start_time if record.client_start_time is not None else record.start_time
+        end = record.end_time
+        if end < start:
+            continue
+        value = 1.0 if weight == "requests" else float(max(0, record.total_tokens))
+        events.append((start, value))
+        events.append((end, -value))
+    if not events:
+        return {"avg": None, "max": None}
+    events.sort(key=lambda item: (item[0], item[1]))
+    active = 0.0
+    max_active = 0.0
+    area = 0.0
+    previous = events[0][0]
+    for timestamp, delta in events:
+        if timestamp > previous:
+            area += active * (timestamp - previous)
+            previous = timestamp
+        active = max(0.0, active + delta)
+        max_active = max(max_active, active)
+    return {"avg": area / measurement_duration_s, "max": max_active}
+
+
+def _load_saturation_signal(average_gpu_util_percent: float | None, max_gpu_util_percent: float | None) -> str:
+    gpu_value = max(
+        [value for value in (average_gpu_util_percent, max_gpu_util_percent) if value is not None],
+        default=None,
+    )
+    if gpu_value is None:
+        return "unknown_without_gpu_utilization"
+    if gpu_value >= LOAD_GPU_SATURATION_THRESHOLD_PERCENT:
+        return "gpu_saturated"
+    return "not_saturated"
+
+
+def _aggregate_load_saturation_signal(summaries: list[EndpointBenchmarkSummary]) -> str:
+    signals = [summary.load_saturation_signal for summary in summaries if summary.load_saturation_signal]
+    if any(signal == "gpu_saturated" for signal in signals):
+        return "gpu_saturated"
+    if any(signal == "not_saturated" for signal in signals):
+        return "not_saturated"
+    return "unknown_without_gpu_utilization"
+
+
+def _aggregate_load_sufficiency(summaries: list[EndpointBenchmarkSummary]) -> dict[str, object]:
+    return {
+        "schema_version": "load-sufficiency-trial-aggregate/v1",
+        "trial_count": len(summaries),
+        "gpu_utilization_available": any(
+            (summary.load_sufficiency or {}).get("gpu_utilization_available") is True
+            for summary in summaries
+        ),
+        "average_gpu_util_percent": _round_or_none(
+            _mean([_float(summary.average_gpu_util_percent) for summary in summaries if _float(summary.average_gpu_util_percent) is not None])
+        ),
+        "max_gpu_util_percent": _round_or_none(max([summary.max_gpu_util_percent for summary in summaries if summary.max_gpu_util_percent is not None], default=None)),
+        "gpu_saturation_threshold_percent": LOAD_GPU_SATURATION_THRESHOLD_PERCENT,
+        "client_issue_rate_req_s": _round_or_none(
+            _mean([_float(summary.client_issue_rate_req_s) for summary in summaries if _float(summary.client_issue_rate_req_s) is not None])
+        ),
+        "avg_request_backlog": _round_or_none(
+            _mean([_float(summary.avg_request_backlog) for summary in summaries if _float(summary.avg_request_backlog) is not None])
+        ),
+        "max_request_backlog": _round_or_none(max([summary.max_request_backlog for summary in summaries if summary.max_request_backlog is not None], default=None)),
+        "avg_token_backlog": _round_or_none(
+            _mean([_float(summary.avg_token_backlog) for summary in summaries if _float(summary.avg_token_backlog) is not None])
+        ),
+        "max_token_backlog": _round_or_none(max([summary.max_token_backlog for summary in summaries if summary.max_token_backlog is not None], default=None)),
+        "load_saturation_signal": _aggregate_load_saturation_signal(summaries),
+    }
+
+
 def _active_power(average_power_watts: float | None, idle_power_watts: float | None) -> float | None:
     if average_power_watts is None or idle_power_watts is None:
         return None
     return max(0.0, average_power_watts - idle_power_watts)
+
+
+def _idle_baseline_source(idle_power_watts: float | None, idle_sample_count: int) -> str:
+    if idle_sample_count > 0:
+        return "sampled_pre_run"
+    if idle_power_watts is not None:
+        return "configured"
+    return "unavailable"
 
 
 def _average_power(samples: list[PowerSampleRecord]) -> float | None:
@@ -812,6 +1229,18 @@ def _aggregate_thermal_classification(summaries: list[EndpointBenchmarkSummary])
     if not classes:
         return None
     return max(classes, key=lambda item: priority.get(item, 0))
+
+
+def _weighted_queue_mean(summaries: list[EndpointBenchmarkSummary]) -> float | None:
+    weighted_total = 0.0
+    sample_count = 0
+    for summary in summaries:
+        value = _float(summary.avg_client_queue_s)
+        if value is None or summary.client_queue_sample_count <= 0:
+            continue
+        weighted_total += value * summary.client_queue_sample_count
+        sample_count += summary.client_queue_sample_count
+    return weighted_total / sample_count if sample_count else None
 
 
 def _metric_stats(values: list[float]) -> dict[str, float | int | None]:

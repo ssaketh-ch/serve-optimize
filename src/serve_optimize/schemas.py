@@ -469,6 +469,8 @@ class ManagedRunSummary:
     resume_loaded_candidate_count: int = 0
     resume_skipped_candidate_count: int = 0
     resume_warnings: list[str] = field(default_factory=list)
+    client_saturation: dict[str, Any] = field(default_factory=dict)
+    load_sufficiency: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -519,6 +521,17 @@ class EndpointBenchmarkConfig:
     soak_duration_s: float | None = None
     stream: bool = False
     api_key_env: str | None = None
+    backend_name: str | None = None
+    backend_version: str | None = None
+    backend_launch_command: list[str] = field(default_factory=list)
+    backend_launch_command_hash: str | None = None
+    backend_effective_values: dict[str, Any] = field(default_factory=dict)
+    backend_applied_configuration: dict[str, Any] = field(default_factory=dict)
+    backend_omitted_values: dict[str, Any] = field(default_factory=dict)
+    backend_unsupported_values: dict[str, Any] = field(default_factory=dict)
+    backend_unavailable_values: dict[str, Any] = field(default_factory=dict)
+    backend_flag_aliases: dict[str, Any] = field(default_factory=dict)
+    backend_capabilities_help_hash: str | None = None
     schema_version: str = "endpoint-benchmark/v1"
 
 
@@ -537,6 +550,9 @@ class RequestRecord:
     tpot_s: float | None = None
     timing_source: str | None = None
     token_count_source: str | None = None
+    client_submit_time: float | None = None
+    client_start_time: float | None = None
+    client_queue_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -666,13 +682,22 @@ class EndpointBenchmarkSummary:
     power_sampling_duration_s: float | None = None
     power_sampling_rate_hz: float | None = None
     idle_power_watts: float | None = None
+    warmup_power_sample_count: int = 0
+    measurement_power_sample_count: int = 0
+    warmup_average_power_watts: float | None = None
+    measurement_average_power_watts: float | None = None
     active_power_watts: float | None = None
     active_energy_joules: float | None = None
     energy_joules: float | None = None
+    energy_accounting: str | None = None
     joules_per_token: float | None = None
     active_joules_per_token: float | None = None
+    joules_per_generated_token: float | None = None
+    active_joules_per_generated_token: float | None = None
     tokens_per_second_per_watt: float | None = None
     active_tokens_per_second_per_watt: float | None = None
+    tokens_per_joule: float | None = None
+    active_tokens_per_joule: float | None = None
     warmup_requests: int = 0
     steady_state_requests: int | None = None
     steady_state_duration_s: float | None = None
@@ -706,6 +731,32 @@ class EndpointBenchmarkSummary:
     measured_successful_requests: int | None = None
     measured_failed_requests: int | None = None
     token_count_source: str | None = None
+    client_cpu_time_s: float | None = None
+    client_cpu_utilization_percent: float | None = None
+    client_queue_sample_count: int = 0
+    avg_client_queue_s: float | None = None
+    p50_client_queue_s: float | None = None
+    p95_client_queue_s: float | None = None
+    p99_client_queue_s: float | None = None
+    max_client_queue_s: float | None = None
+    client_issue_rate_req_s: float | None = None
+    avg_request_backlog: float | None = None
+    max_request_backlog: float | None = None
+    avg_token_backlog: float | None = None
+    max_token_backlog: float | None = None
+    load_saturation_signal: str | None = None
+    load_sufficiency: dict[str, Any] = field(default_factory=dict)
+    backend_name: str | None = None
+    backend_version: str | None = None
+    backend_launch_command: list[str] = field(default_factory=list)
+    backend_launch_command_hash: str | None = None
+    backend_effective_values: dict[str, Any] = field(default_factory=dict)
+    backend_applied_configuration: dict[str, Any] = field(default_factory=dict)
+    backend_omitted_values: dict[str, Any] = field(default_factory=dict)
+    backend_unsupported_values: dict[str, Any] = field(default_factory=dict)
+    backend_unavailable_values: dict[str, Any] = field(default_factory=dict)
+    backend_flag_aliases: dict[str, Any] = field(default_factory=dict)
+    backend_capabilities_help_hash: str | None = None
 
 
 @dataclass(frozen=True)

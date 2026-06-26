@@ -70,6 +70,7 @@ from .schemas import (
     EndpointBenchmarkSummary,
     EvaluationRung,
     Goal,
+    HealthCheckResult,
     LaunchConfig,
     LaunchGroup,
     ManagedCandidateResult,
@@ -84,6 +85,7 @@ from .schemas import (
     RungResult,
     ServeCandidate,
     ServerHandle,
+    ServerLaunchSpec,
     ServingConfig,
     VllmServePlan,
     WorkloadConfig,
@@ -148,6 +150,13 @@ WORKLOAD_EXTRA_KEYS = {
     "aiconfigurator_rank",
     "aiconfigurator_system_key",
 }
+CLIENT_LIMITED_MIN_CONFIGS = 3
+CLIENT_LIMITED_FLAT_THROUGHPUT_CV = 0.05
+CLIENT_LIMITED_CPU_THRESHOLD_PERCENT = 90.0
+LOAD_SUFFICIENCY_MIN_CONCURRENCY_LEVELS = 3
+LOAD_SUFFICIENCY_FLAT_THROUGHPUT_CV = 0.05
+LOAD_SUFFICIENCY_GPU_THRESHOLD_PERCENT = 85.0
+LOAD_SUFFICIENCY_PRESSURE_GROWTH_RATIO = 1.2
 
 
 class _ManagedExecutionState:
@@ -280,6 +289,8 @@ def run_managed_evaluation(
     recommendation_summary_json_path = run_dir / "recommendation_summary.json"
     optimizer_quality_path = run_dir / "optimizer_quality.json"
     optimizer_failure_cache_path = run_dir / "optimizer_failure_cache.json"
+    client_saturation_path = run_dir / "client_saturation.json"
+    load_sufficiency_path = run_dir / "load_sufficiency.json"
     vllm_argument_capabilities_path = run_dir / "vllm_argument_capabilities.json"
     sglang_argument_capabilities_path = run_dir / "sglang_argument_capabilities.json"
     rendered_launch_configs_path = run_dir / "rendered_launch_configs.jsonl"
@@ -298,6 +309,8 @@ def run_managed_evaluation(
     write_jsonl(promotion_decisions_path, [])
     write_json(optimizer_quality_path, {})
     write_json(optimizer_failure_cache_path, {})
+    write_json(client_saturation_path, {})
+    write_json(load_sufficiency_path, {})
 
     hardware = detect_hardware()
     workload_profile = workload_profile or WorkloadProfile()
@@ -600,6 +613,7 @@ def run_managed_evaluation(
             "validation",
             validation.reason or "Candidate failed managed validation.",
             details={
+                "reason": _validation_failure_reason(validation),
                 "backend": config.backend,
                 "candidate_source": (config.extra or {}).get("candidate_source"),
                 "model_metadata_known": model_metadata.metadata_known,
@@ -783,6 +797,30 @@ def run_managed_evaluation(
     synthesis_summary = _apply_synthesis_execution_status(synthesis_summary, state.candidate_results)
     write_json(candidate_synthesis_path, synthesis_summary)
     write_json(launch_groups_path, state.launch_group_rows)
+    client_saturation = _client_saturation_summary(state.rung_results)
+    write_json(client_saturation_path, client_saturation)
+    _progress(
+        progress_callback,
+        "client_saturation",
+        classification=client_saturation.get("classification"),
+        candidate_count=client_saturation.get("candidate_count"),
+        max_client_cpu_utilization_percent=client_saturation.get("max_client_cpu_utilization_percent"),
+        throughput_coefficient_of_variation=client_saturation.get("throughput_coefficient_of_variation"),
+    )
+    load_sufficiency = _load_sufficiency_summary(
+        state.rung_results,
+        goal=goal,
+        client_saturation=client_saturation,
+    )
+    write_json(load_sufficiency_path, load_sufficiency)
+    _progress(
+        progress_callback,
+        "load_sufficiency",
+        classification=load_sufficiency.get("classification"),
+        concurrency_level_count=load_sufficiency.get("concurrency_level_count"),
+        max_gpu_util_percent=load_sufficiency.get("max_gpu_util_percent"),
+        pressure_growth_ratio=load_sufficiency.get("pressure_growth_ratio"),
+    )
     _progress(
         progress_callback,
         "recommendation_start",
@@ -809,6 +847,8 @@ def run_managed_evaluation(
         vllm_argument_capabilities=vllm_argument_capabilities,
         sglang_argument_capabilities=sglang_argument_capabilities,
         runtime_environment=runtime_environment,
+        client_saturation=client_saturation,
+        load_sufficiency=load_sufficiency,
     )
     _progress(
         progress_callback,
@@ -853,6 +893,8 @@ def run_managed_evaluation(
         "recommendation_summary_json": str(recommendation_summary_json_path),
         "optimizer_quality_json": str(optimizer_quality_path),
         "optimizer_failure_cache_json": str(optimizer_failure_cache_path),
+        "client_saturation_json": str(client_saturation_path),
+        "load_sufficiency_json": str(load_sufficiency_path),
         "logs_dir": str(run_dir / "logs"),
     }
     if vllm_argument_capabilities is not None:
@@ -935,6 +977,8 @@ def run_managed_evaluation(
         resume_loaded_candidate_count=len(resume_state.records) if resume_state is not None else 0,
         resume_skipped_candidate_count=state.resume_skips,
         resume_warnings=resume_state.warnings if resume_state is not None else [],
+        client_saturation=client_saturation,
+        load_sufficiency=load_sufficiency,
     )
     write_json(run_dir / "managed_run.json", summary)
     _progress(
@@ -1680,7 +1724,13 @@ def _evaluate_launch_groups(
                     pending_workload_count=len(pending_workloads),
                 )
                 for config, workload, _evidence_context in pending_workloads:
-                    failure = _candidate_failure(run_id, workload.candidate_id, "availability", f"Managed backend '{backend}' is not available.", details={"group_id": group.group_id, "rung": workload.rung})
+                    failure = _candidate_failure(
+                        run_id,
+                        workload.candidate_id,
+                        "availability",
+                        f"Managed backend '{backend}' is not available.",
+                        details={"group_id": group.group_id, "rung": workload.rung, "reason": "backend_unavailable"},
+                    )
                     state.failures.append(failure)
                     _append_jsonl(failures_path, [failure])
                     state.candidate_results.append(_failed_result(config, failure, workload=workload))
@@ -1688,8 +1738,9 @@ def _evaluate_launch_groups(
 
             launch_config = replace(representative_config, id=group.group_id)
             spec = adapter.build_launch_spec(launch_config, host=host, port=port, log_dir=run_dir / "logs")
+            launch_provenance = _launch_provenance_from_spec(spec)
             _append_jsonl(launch_specs_path, [spec])
-            _append_jsonl(lifecycle_path, [_lifecycle(run_id, group.group_id, backend, "launch_spec", "ok", details={"base_url": spec.base_url, "group_id": group.group_id, "rung": _group_rung(group)})])
+            _append_jsonl(lifecycle_path, [_lifecycle(run_id, group.group_id, backend, "launch_spec", "ok", details={"base_url": spec.base_url, "group_id": group.group_id, "rung": _group_rung(group), **launch_provenance})])
             _progress(
                 progress_callback,
                 "launch_start",
@@ -1697,6 +1748,8 @@ def _evaluate_launch_groups(
                 rung=_group_rung(group),
                 base_url=spec.base_url,
                 command=" ".join(spec.command),
+                backend_version=launch_provenance.get("backend_version"),
+                effective_values=launch_provenance.get("backend_effective_values"),
                 stdout_log_path=spec.stdout_log_path,
                 stderr_log_path=spec.stderr_log_path,
                 pending_workload_count=len(pending_workloads),
@@ -1748,8 +1801,15 @@ def _evaluate_launch_groups(
                 error=health.error,
             )
             if not health.healthy:
+                failure_reason = _failure_reason_for_health(health)
                 for config, workload, _evidence_context in pending_workloads:
-                    failure = _candidate_failure(run_id, workload.candidate_id, "health", health.error or health.status, details={**to_dict(health), "group_id": group.group_id, "rung": workload.rung})
+                    failure = _candidate_failure(
+                        run_id,
+                        workload.candidate_id,
+                        "health",
+                        health.error or health.status,
+                        details={**to_dict(health), "group_id": group.group_id, "rung": workload.rung, "reason": failure_reason},
+                    )
                     state.failures.append(failure)
                     _append_jsonl(failures_path, [failure])
                     state.candidate_results.append(_failed_result(config, failure, workload=workload))
@@ -1779,6 +1839,7 @@ def _evaluate_launch_groups(
                         base_url=handle.base_url,
                         model=model,
                         trial=trial,
+                        launch_provenance=launch_provenance,
                     )
                     _progress(
                         progress_callback,
@@ -1834,6 +1895,7 @@ def _evaluate_launch_groups(
                                         base_url=handle.base_url,
                                         model=model,
                                         trial=0,
+                                        launch_provenance=launch_provenance,
                                     ),
                                     "candidate": config,
                                     "launch_group": group,
@@ -1967,17 +2029,19 @@ def _evaluate_launch_groups(
             )
             raise
         except Exception as exc:
+            failure_stage = "launch" if handle is None else "benchmark"
+            failure_reason = _failure_reason_for_exception(exc, stage=failure_stage)
             _progress(
                 progress_callback,
                 "launch_group_failed",
                 group_id=group.group_id,
                 rung=_group_rung(group),
-                stage="launch" if handle is None else "benchmark",
+                stage=failure_stage,
                 error=f"{exc.__class__.__name__}: {exc}",
             )
             failed_workloads = pending_workloads or [(configs_by_id[candidate_id], workload, None) for candidate_id in group.original_config_ids for workload in group.workload_configs if workload.candidate_id == candidate_id]
             for config, workload, _evidence_context in failed_workloads:
-                failure = _candidate_failure(run_id, workload.candidate_id, "launch" if handle is None else "benchmark", f"{exc.__class__.__name__}: {exc}", details={"group_id": group.group_id, "rung": workload.rung})
+                failure = _candidate_failure(run_id, workload.candidate_id, failure_stage, f"{exc.__class__.__name__}: {exc}", details={"group_id": group.group_id, "rung": workload.rung, "reason": failure_reason})
                 state.failures.append(failure)
                 _append_jsonl(failures_path, [failure])
                 state.candidate_results.append(_failed_result(config, failure, workload=workload))
@@ -2048,6 +2112,10 @@ def _summary_progress_fields(summary: object | None) -> dict[str, object]:
         "measured_requests": _optional_int(measured_requests),
         "successful_requests": _optional_int(getattr(summary, "successful_requests", None)),
         "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
+        "client_cpu_utilization_percent": _optional_float(getattr(summary, "client_cpu_utilization_percent", None)),
+        "p95_client_queue_s": _optional_float(getattr(summary, "p95_client_queue_s", None)),
+        "load_saturation_signal": _optional_str(getattr(summary, "load_saturation_signal", None)),
+        "client_issue_rate_req_s": _optional_float(getattr(summary, "client_issue_rate_req_s", None)),
     }
 
 
@@ -2129,6 +2197,8 @@ def _write_managed_recommendation_artifacts(
     vllm_argument_capabilities: VLLMArgumentCapabilities | None,
     sglang_argument_capabilities: SGLangArgumentCapabilities | None,
     runtime_environment: dict[str, object],
+    client_saturation: dict[str, Any],
+    load_sufficiency: dict[str, Any],
 ) -> _ManagedRecommendationArtifacts:
     inputs, input_metadata = _managed_recommendation_inputs(
         configs_by_id=configs_by_id,
@@ -2145,6 +2215,8 @@ def _write_managed_recommendation_artifacts(
         metadata_notes=[
             "Managed Mode recommendations use only measured results and exact fresh measured evidence hits.",
             *([note] if (note := slo_note(_workload_profile_from_candidates(list(configs_by_id.values())))) else []),
+            *_client_saturation_notes(client_saturation),
+            *_load_sufficiency_notes(load_sufficiency),
         ],
     )
     recommendation = _managed_recommendation_result(
@@ -2178,6 +2250,8 @@ def _write_managed_recommendation_artifacts(
             selected.get("runtime_fingerprint") if selected else None
         ),
         "runtime_environment": runtime_environment,
+        "client_saturation": client_saturation,
+        "load_sufficiency": load_sufficiency,
         "recommendation_quality_audit": recommendation_quality_audit,
         "optimizer_quality": optimizer_quality,
         "recommendation": recommendation,
@@ -2449,27 +2523,68 @@ def _managed_measured_metrics(metrics: dict[str, Any]) -> dict[str, float | int 
         "configured_concurrency": _optional_int(metrics.get("configured_concurrency")),
         "effective_concurrency_limit": _optional_int(metrics.get("effective_concurrency_limit")),
         "concurrency_coverage": _optional_str(metrics.get("concurrency_coverage")),
+        "client_cpu_time_s": _optional_float(metrics.get("client_cpu_time_s")),
+        "client_cpu_utilization_percent": _optional_float(metrics.get("client_cpu_utilization_percent")),
+        "client_queue_sample_count": _optional_int(metrics.get("client_queue_sample_count")) or 0,
+        "avg_client_queue_s": _optional_float(metrics.get("avg_client_queue_s")),
+        "p50_client_queue_s": _optional_float(metrics.get("p50_client_queue_s")),
+        "p95_client_queue_s": _optional_float(metrics.get("p95_client_queue_s")),
+        "p99_client_queue_s": _optional_float(metrics.get("p99_client_queue_s")),
+        "max_client_queue_s": _optional_float(metrics.get("max_client_queue_s")),
+        "client_saturation_signal": _optional_str(metrics.get("client_saturation_signal")),
+        "client_issue_rate_req_s": _optional_float(metrics.get("client_issue_rate_req_s")),
+        "avg_request_backlog": _optional_float(metrics.get("avg_request_backlog")),
+        "max_request_backlog": _optional_float(metrics.get("max_request_backlog")),
+        "avg_token_backlog": _optional_float(metrics.get("avg_token_backlog")),
+        "max_token_backlog": _optional_float(metrics.get("max_token_backlog")),
+        "load_saturation_signal": _optional_str(metrics.get("load_saturation_signal")),
+        "load_sufficiency": metrics.get("load_sufficiency") if isinstance(metrics.get("load_sufficiency"), dict) else {},
+        "average_gpu_util_percent": _optional_float(metrics.get("average_gpu_util_percent")),
+        "max_gpu_util_percent": _optional_float(metrics.get("max_gpu_util_percent")),
     }
 
 
 def _managed_telemetry_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     active_tokens_per_watt = _optional_float(metrics.get("active_tokens_per_watt"))
     gross_tokens_per_watt = _optional_float(metrics.get("tokens_per_watt"))
+    active_tokens_per_joule = _optional_float(metrics.get("active_tokens_per_joule"))
+    raw_tokens_per_joule = _optional_float(metrics.get("tokens_per_joule"))
     active_joules_per_token = _optional_float(metrics.get("active_joules_per_token"))
     gross_joules_per_token = _optional_float(metrics.get("joules_per_token"))
+    active_joules_per_generated_token = _optional_float(metrics.get("active_joules_per_generated_token"))
+    raw_joules_per_generated_token = _optional_float(metrics.get("joules_per_generated_token"))
+    energy_accounting = _optional_str(metrics.get("energy_accounting"))
+    if energy_accounting is None:
+        energy_accounting = "idle_subtracted" if active_joules_per_token is not None else "raw"
     return {
         "average_power_watts": _optional_float(metrics.get("average_power_w")),
         "joules_per_token": (
             active_joules_per_token if active_joules_per_token is not None else gross_joules_per_token
         ),
+        "joules_per_generated_token": (
+            active_joules_per_generated_token
+            if active_joules_per_generated_token is not None
+            else raw_joules_per_generated_token
+        ),
         "tokens_per_second_per_watt": (
             active_tokens_per_watt if active_tokens_per_watt is not None else gross_tokens_per_watt
         ),
+        "tokens_per_joule": (
+            active_tokens_per_joule if active_tokens_per_joule is not None else raw_tokens_per_joule
+        ),
         "active_joules_per_token": active_joules_per_token,
         "gross_joules_per_token": gross_joules_per_token,
+        "active_joules_per_generated_token": active_joules_per_generated_token,
+        "raw_joules_per_generated_token": raw_joules_per_generated_token,
         "active_tokens_per_second_per_watt": active_tokens_per_watt,
         "gross_tokens_per_second_per_watt": gross_tokens_per_watt,
-        "energy_accounting": "idle_subtracted" if active_joules_per_token is not None else "gross",
+        "active_tokens_per_joule": active_tokens_per_joule,
+        "raw_tokens_per_joule": raw_tokens_per_joule,
+        "energy_accounting": energy_accounting,
+        "warmup_power_sample_count": _optional_int(metrics.get("warmup_power_sample_count")) or 0,
+        "measurement_power_sample_count": _optional_int(metrics.get("measurement_power_sample_count")) or 0,
+        "average_gpu_util_percent": _optional_float(metrics.get("average_gpu_util_percent")),
+        "max_gpu_util_percent": _optional_float(metrics.get("max_gpu_util_percent")),
         "temperature_rise_c": _optional_float(metrics.get("temperature_rise_c")),
         "temperature_slope_c_per_min": _optional_float(metrics.get("temperature_slope_c_per_min")),
         "thermal_stability_classification": _optional_str(metrics.get("thermal_stability_classification")),
@@ -2546,9 +2661,20 @@ def _write_managed_pareto_csv(path: Path, rows: list[dict[str, object]]) -> None
         "total_tokens_s",
         "p95_latency_s",
         "failed_requests",
+        "client_cpu_utilization_percent",
+        "p95_client_queue_s",
+        "client_saturation_signal",
+        "client_issue_rate_req_s",
+        "max_request_backlog",
+        "max_token_backlog",
+        "load_saturation_signal",
+        "max_gpu_util_percent",
         "average_power_watts",
         "joules_per_token",
+        "joules_per_generated_token",
         "tokens_per_second_per_watt",
+        "tokens_per_joule",
+        "energy_accounting",
         "score",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2596,9 +2722,27 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
             else _optional_float(row.get("joules_per_token"))
         ),
         "active_joules_per_token": _optional_float(row.get("active_joules_per_token")),
+        "joules_per_generated_token": (
+            _optional_float(row.get("active_joules_per_generated_token"))
+            if row.get("active_joules_per_generated_token") is not None
+            else _optional_float(row.get("joules_per_generated_token"))
+        ),
+        "active_joules_per_generated_token": _optional_float(row.get("active_joules_per_generated_token")),
         "stability_classification": _optional_str(row.get("stability_classification")),
         "tokens_per_watt": _optional_float(row.get("tokens_per_second_per_watt")),
         "active_tokens_per_watt": _optional_float(row.get("active_tokens_per_second_per_watt")),
+        "tokens_per_joule": (
+            _optional_float(row.get("active_tokens_per_joule"))
+            if row.get("active_tokens_per_joule") is not None
+            else _optional_float(row.get("tokens_per_joule"))
+        ),
+        "active_tokens_per_joule": _optional_float(row.get("active_tokens_per_joule")),
+        "energy_accounting": _optional_str(row.get("energy_accounting"))
+        or _optional_str(measurement_quality.get("energy_accounting")),
+        "warmup_power_sample_count": _optional_int(row.get("warmup_power_sample_count")) or 0,
+        "measurement_power_sample_count": _optional_int(row.get("measurement_power_sample_count")) or 0,
+        "warmup_average_power_watts": _optional_float(row.get("warmup_average_power_watts")),
+        "measurement_average_power_watts": _optional_float(row.get("measurement_average_power_watts")),
         "telemetry_quality": _optional_str(row.get("telemetry_quality")) or "unavailable",
         "total_requests": (
             _optional_int(row.get("measured_requests"))
@@ -2618,6 +2762,24 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
         "configured_concurrency": _optional_int(measurement_quality.get("configured_concurrency")),
         "effective_concurrency_limit": _optional_int(measurement_quality.get("effective_concurrency_limit")),
         "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
+        "client_cpu_time_s": _optional_float(row.get("client_cpu_time_s")),
+        "client_cpu_utilization_percent": _optional_float(row.get("client_cpu_utilization_percent")),
+        "client_queue_sample_count": _optional_int(row.get("client_queue_sample_count")) or 0,
+        "avg_client_queue_s": _optional_float(row.get("avg_client_queue_s")),
+        "p50_client_queue_s": _optional_float(row.get("p50_client_queue_s")),
+        "p95_client_queue_s": _optional_float(row.get("p95_client_queue_s")),
+        "p99_client_queue_s": _optional_float(row.get("p99_client_queue_s")),
+        "max_client_queue_s": _optional_float(row.get("max_client_queue_s")),
+        "client_saturation_signal": _optional_str(measurement_quality.get("client_saturation_signal")),
+        "client_issue_rate_req_s": _optional_float(row.get("client_issue_rate_req_s")),
+        "avg_request_backlog": _optional_float(row.get("avg_request_backlog")),
+        "max_request_backlog": _optional_float(row.get("max_request_backlog")),
+        "avg_token_backlog": _optional_float(row.get("avg_token_backlog")),
+        "max_token_backlog": _optional_float(row.get("max_token_backlog")),
+        "load_saturation_signal": _optional_str(row.get("load_saturation_signal")),
+        "load_sufficiency": row.get("load_sufficiency") if isinstance(row.get("load_sufficiency"), dict) else {},
+        "average_gpu_util_percent": _optional_float(row.get("average_gpu_util_percent")),
+        "max_gpu_util_percent": _optional_float(row.get("max_gpu_util_percent")),
     }
 
 
@@ -2671,12 +2833,30 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
         "average_power_w": _optional_float(measurement.get("average_power_w")),
         "joules_per_token": _optional_float(measurement.get("joules_per_token")),
         "active_joules_per_token": _optional_float(raw_summary.get("active_joules_per_token")),
+        "joules_per_generated_token": (
+            _optional_float(raw_summary.get("active_joules_per_generated_token"))
+            if raw_summary.get("active_joules_per_generated_token") is not None
+            else _optional_float(raw_summary.get("joules_per_generated_token"))
+        ),
+        "active_joules_per_generated_token": _optional_float(raw_summary.get("active_joules_per_generated_token")),
         "stability_classification": _optional_str(raw_summary.get("stability_classification")),
         "temperature_rise_c": _optional_float(raw_summary.get("temperature_rise_c")),
         "temperature_slope_c_per_min": _optional_float(raw_summary.get("temperature_slope_c_per_min")),
         "thermal_stability_classification": _optional_str(raw_summary.get("thermal_stability_classification")),
         "tokens_per_watt": _optional_float(measurement.get("tokens_per_watt")),
         "active_tokens_per_watt": _optional_float(raw_summary.get("active_tokens_per_second_per_watt")),
+        "tokens_per_joule": (
+            _optional_float(raw_summary.get("active_tokens_per_joule"))
+            if raw_summary.get("active_tokens_per_joule") is not None
+            else _optional_float(raw_summary.get("tokens_per_joule"))
+        ),
+        "active_tokens_per_joule": _optional_float(raw_summary.get("active_tokens_per_joule")),
+        "energy_accounting": _optional_str(raw_summary.get("energy_accounting"))
+        or _optional_str(measurement_quality.get("energy_accounting")),
+        "warmup_power_sample_count": _optional_int(raw_summary.get("warmup_power_sample_count")) or 0,
+        "measurement_power_sample_count": _optional_int(raw_summary.get("measurement_power_sample_count")) or 0,
+        "warmup_average_power_watts": _optional_float(raw_summary.get("warmup_average_power_watts")),
+        "measurement_average_power_watts": _optional_float(raw_summary.get("measurement_average_power_watts")),
         "telemetry_quality": (
             _optional_str(raw_summary.get("telemetry_quality"))
             or _optional_str(measurement.get("confidence"))
@@ -2700,6 +2880,24 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
         "configured_concurrency": _optional_int(measurement_quality.get("configured_concurrency")),
         "effective_concurrency_limit": _optional_int(measurement_quality.get("effective_concurrency_limit")),
         "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
+        "client_cpu_time_s": _optional_float(raw_summary.get("client_cpu_time_s")),
+        "client_cpu_utilization_percent": _optional_float(raw_summary.get("client_cpu_utilization_percent")),
+        "client_queue_sample_count": _optional_int(raw_summary.get("client_queue_sample_count")) or 0,
+        "avg_client_queue_s": _optional_float(raw_summary.get("avg_client_queue_s")),
+        "p50_client_queue_s": _optional_float(raw_summary.get("p50_client_queue_s")),
+        "p95_client_queue_s": _optional_float(raw_summary.get("p95_client_queue_s")),
+        "p99_client_queue_s": _optional_float(raw_summary.get("p99_client_queue_s")),
+        "max_client_queue_s": _optional_float(raw_summary.get("max_client_queue_s")),
+        "client_saturation_signal": _optional_str(measurement_quality.get("client_saturation_signal")),
+        "client_issue_rate_req_s": _optional_float(raw_summary.get("client_issue_rate_req_s")),
+        "avg_request_backlog": _optional_float(raw_summary.get("avg_request_backlog")),
+        "max_request_backlog": _optional_float(raw_summary.get("max_request_backlog")),
+        "avg_token_backlog": _optional_float(raw_summary.get("avg_token_backlog")),
+        "max_token_backlog": _optional_float(raw_summary.get("max_token_backlog")),
+        "load_saturation_signal": _optional_str(raw_summary.get("load_saturation_signal")),
+        "load_sufficiency": raw_summary.get("load_sufficiency") if isinstance(raw_summary.get("load_sufficiency"), dict) else {},
+        "average_gpu_util_percent": _optional_float(raw_summary.get("average_gpu_util_percent")),
+        "max_gpu_util_percent": _optional_float(raw_summary.get("max_gpu_util_percent")),
     }
 
 
@@ -2720,6 +2918,312 @@ def _group_rung(group: LaunchGroup) -> str | None:
 
 def _rung_measurement_count(results: list[RungResult], rung: str) -> int:
     return sum(1 for result in results if result.rung == rung and result.measured_or_evidence_source == "measured")
+
+
+def _client_saturation_summary(rung_results: list[RungResult]) -> dict[str, Any]:
+    selected_results = _latest_recommendable_rung_results(rung_results)
+    rows = []
+    for result in selected_results:
+        throughput = _optional_float(result.metrics.get("throughput_tokens_per_sec"))
+        if throughput is None or throughput <= 0:
+            continue
+        rows.append(
+            {
+                "candidate_id": result.candidate_id,
+                "throughput_tokens_per_sec": throughput,
+                "client_cpu_utilization_percent": _optional_float(result.metrics.get("client_cpu_utilization_percent")),
+                "p95_client_queue_s": _optional_float(result.metrics.get("p95_client_queue_s")),
+                "client_saturation_signal": _optional_str(result.metrics.get("client_saturation_signal")),
+            }
+        )
+    throughputs = [float(row["throughput_tokens_per_sec"]) for row in rows]
+    cpu_values = [
+        value
+        for row in rows
+        if (value := _optional_float(row.get("client_cpu_utilization_percent"))) is not None
+    ]
+    queue_values = [
+        value
+        for row in rows
+        if (value := _optional_float(row.get("p95_client_queue_s"))) is not None
+    ]
+    mean_throughput = sum(throughputs) / len(throughputs) if throughputs else None
+    throughput_cv = _coefficient_of_variation(throughputs)
+    flat_throughput = (
+        len(throughputs) >= CLIENT_LIMITED_MIN_CONFIGS
+        and throughput_cv is not None
+        and throughput_cv <= CLIENT_LIMITED_FLAT_THROUGHPUT_CV
+    )
+    max_cpu = max(cpu_values, default=None)
+    client_saturated = max_cpu is not None and max_cpu >= CLIENT_LIMITED_CPU_THRESHOLD_PERCENT
+    if flat_throughput and client_saturated:
+        classification = "client_limited"
+    elif len(throughputs) < CLIENT_LIMITED_MIN_CONFIGS:
+        classification = "insufficient_evidence"
+    elif not cpu_values:
+        classification = "insufficient_client_cpu_evidence"
+    else:
+        classification = "not_client_limited"
+    return {
+        "schema_version": "client-saturation/v1",
+        "classification": classification,
+        "candidate_count": len(throughputs),
+        "min_required_candidate_count": CLIENT_LIMITED_MIN_CONFIGS,
+        "mean_throughput_tokens_per_sec": _round_or_none(mean_throughput),
+        "throughput_coefficient_of_variation": _round_or_none(throughput_cv),
+        "flat_throughput": flat_throughput,
+        "flat_throughput_cv_threshold": CLIENT_LIMITED_FLAT_THROUGHPUT_CV,
+        "client_saturated": client_saturated,
+        "client_cpu_saturation_threshold_percent": CLIENT_LIMITED_CPU_THRESHOLD_PERCENT,
+        "max_client_cpu_utilization_percent": _round_or_none(max_cpu),
+        "max_p95_client_queue_s": _round_or_none(max(queue_values, default=None)),
+        "rows": rows,
+        "reason": _client_saturation_reason(
+            classification,
+            candidate_count=len(throughputs),
+            flat_throughput=flat_throughput,
+            client_saturated=client_saturated,
+            has_cpu=bool(cpu_values),
+        ),
+    }
+
+
+def _client_saturation_reason(
+    classification: str,
+    *,
+    candidate_count: int,
+    flat_throughput: bool,
+    client_saturated: bool,
+    has_cpu: bool,
+) -> str:
+    if classification == "client_limited":
+        return "Throughput was flat across measured configurations while client CPU was saturated."
+    if candidate_count < CLIENT_LIMITED_MIN_CONFIGS:
+        return "Fewer than three measured configurations were available, so flat throughput across many configurations was not established."
+    if not has_cpu:
+        return "Client CPU utilization was unavailable, so client saturation could not be established."
+    if not flat_throughput:
+        return "Throughput was not flat across the measured configurations."
+    if not client_saturated:
+        return "Client CPU utilization did not reach the saturation threshold."
+    return "Client saturation was not established."
+
+
+def _client_saturation_notes(client_saturation: dict[str, Any]) -> list[str]:
+    if client_saturation.get("classification") != "client_limited":
+        return []
+    return ["Experiment marked client_limited because throughput was flat while client CPU was saturated."]
+
+
+def _load_sufficiency_summary(
+    rung_results: list[RungResult],
+    *,
+    goal: Goal,
+    client_saturation: dict[str, Any],
+) -> dict[str, Any]:
+    selected_results = _latest_recommendable_rung_results(rung_results)
+    rows = [_load_sufficiency_row(result) for result in selected_results]
+    rows = [row for row in rows if row is not None]
+    throughputs = [float(row["throughput_tokens_per_sec"]) for row in rows]
+    concurrency_values = sorted(
+        {
+            value
+            for row in rows
+            if (value := _optional_int(row.get("configured_concurrency"))) is not None and value > 0
+        }
+    )
+    mean_throughput = sum(throughputs) / len(throughputs) if throughputs else None
+    throughput_cv = _coefficient_of_variation(throughputs)
+    flat_throughput = (
+        len(throughputs) >= LOAD_SUFFICIENCY_MIN_CONCURRENCY_LEVELS
+        and throughput_cv is not None
+        and throughput_cv <= LOAD_SUFFICIENCY_FLAT_THROUGHPUT_CV
+    )
+    max_gpu = _max_optional(
+        [
+            value
+            for row in rows
+            for value in (
+                _optional_float(row.get("average_gpu_util_percent")),
+                _optional_float(row.get("max_gpu_util_percent")),
+            )
+            if value is not None
+        ]
+    )
+    gpu_saturated = max_gpu is not None and max_gpu >= LOAD_SUFFICIENCY_GPU_THRESHOLD_PERCENT
+    pressure_growth = _load_pressure_growth(rows)
+    pressure_growth_ratio = _max_optional(list(pressure_growth.values()))
+    pressure_applied = (
+        pressure_growth_ratio is not None
+        and pressure_growth_ratio >= LOAD_SUFFICIENCY_PRESSURE_GROWTH_RATIO
+    )
+    client_limited = client_saturation.get("classification") == "client_limited"
+    if goal != Goal.PERFORMANCE:
+        classification = "not_evaluated_non_throughput_goal"
+    elif not rows:
+        classification = "insufficient_evidence"
+    elif client_limited:
+        classification = "client_limited"
+    elif gpu_saturated:
+        classification = "load_sufficient_gpu_saturated"
+    elif len(concurrency_values) < LOAD_SUFFICIENCY_MIN_CONCURRENCY_LEVELS:
+        classification = "insufficient_sweep"
+    elif flat_throughput and pressure_applied:
+        classification = "load_sufficient_throughput_plateau"
+    elif flat_throughput:
+        classification = "load_insufficient_pressure"
+    else:
+        classification = "not_saturated"
+    zero_change_check = {
+        "zero_change_detected": flat_throughput,
+        "load_generator_applied_pressure": pressure_applied,
+        "pressure_growth_ratio": _round_or_none(pressure_growth_ratio),
+        "pressure_growth_threshold": LOAD_SUFFICIENCY_PRESSURE_GROWTH_RATIO,
+    }
+    return {
+        "schema_version": "load-sufficiency/v1",
+        "classification": classification,
+        "goal": goal.value,
+        "candidate_count": len(rows),
+        "concurrency_levels": concurrency_values,
+        "concurrency_level_count": len(concurrency_values),
+        "min_required_concurrency_levels": LOAD_SUFFICIENCY_MIN_CONCURRENCY_LEVELS,
+        "mean_throughput_tokens_per_sec": _round_or_none(mean_throughput),
+        "throughput_coefficient_of_variation": _round_or_none(throughput_cv),
+        "flat_throughput": flat_throughput,
+        "flat_throughput_cv_threshold": LOAD_SUFFICIENCY_FLAT_THROUGHPUT_CV,
+        "gpu_saturated": gpu_saturated,
+        "gpu_saturation_threshold_percent": LOAD_SUFFICIENCY_GPU_THRESHOLD_PERCENT,
+        "max_gpu_util_percent": _round_or_none(max_gpu),
+        "pressure_applied": pressure_applied,
+        "pressure_growth_ratio": _round_or_none(pressure_growth_ratio),
+        "pressure_growth_threshold": LOAD_SUFFICIENCY_PRESSURE_GROWTH_RATIO,
+        "pressure_growth": {key: _round_or_none(value) for key, value in pressure_growth.items()},
+        "zero_change_pressure_check": zero_change_check,
+        "client_saturation_classification": client_saturation.get("classification"),
+        "rows": rows,
+        "reason": _load_sufficiency_reason(
+            classification,
+            goal=goal,
+            row_count=len(rows),
+            concurrency_level_count=len(concurrency_values),
+            flat_throughput=flat_throughput,
+            pressure_applied=pressure_applied,
+            gpu_saturated=gpu_saturated,
+            client_limited=client_limited,
+        ),
+    }
+
+
+def _load_sufficiency_row(result: RungResult) -> dict[str, object] | None:
+    throughput = _optional_float(result.metrics.get("throughput_tokens_per_sec"))
+    if throughput is None or throughput <= 0:
+        return None
+    return {
+        "candidate_id": result.candidate_id,
+        "workload_id": result.workload_id,
+        "rung": result.rung,
+        "rung_index": result.rung_index,
+        "measured_or_evidence_source": result.measured_or_evidence_source,
+        "throughput_tokens_per_sec": throughput,
+        "request_rate_req_s": _optional_float(result.metrics.get("requests_per_sec")),
+        "configured_concurrency": _optional_int(result.metrics.get("configured_concurrency")),
+        "effective_concurrency_limit": _optional_int(result.metrics.get("effective_concurrency_limit")),
+        "client_issue_rate_req_s": _optional_float(result.metrics.get("client_issue_rate_req_s")),
+        "avg_request_backlog": _optional_float(result.metrics.get("avg_request_backlog")),
+        "max_request_backlog": _optional_float(result.metrics.get("max_request_backlog")),
+        "avg_token_backlog": _optional_float(result.metrics.get("avg_token_backlog")),
+        "max_token_backlog": _optional_float(result.metrics.get("max_token_backlog")),
+        "average_gpu_util_percent": _optional_float(result.metrics.get("average_gpu_util_percent")),
+        "max_gpu_util_percent": _optional_float(result.metrics.get("max_gpu_util_percent")),
+        "load_saturation_signal": _optional_str(result.metrics.get("load_saturation_signal")),
+        "client_saturation_signal": _optional_str(result.metrics.get("client_saturation_signal")),
+    }
+
+
+def _load_pressure_growth(rows: list[dict[str, object]]) -> dict[str, float]:
+    growth = {}
+    for key in (
+        "configured_concurrency",
+        "client_issue_rate_req_s",
+        "max_request_backlog",
+        "max_token_backlog",
+    ):
+        ratio = _growth_ratio(
+            [
+                value
+                for row in rows
+                if (value := _optional_float(row.get(key))) is not None
+            ]
+        )
+        if ratio is not None:
+            growth[key] = ratio
+    return growth
+
+
+def _growth_ratio(values: list[float]) -> float | None:
+    positive = [value for value in values if value > 0]
+    if len(positive) < 2:
+        return None
+    minimum = min(positive)
+    maximum = max(positive)
+    if minimum <= 0:
+        return None
+    return maximum / minimum
+
+
+def _max_optional(values: Iterable[float | None]) -> float | None:
+    concrete = [value for value in values if value is not None]
+    return max(concrete, default=None)
+
+
+def _load_sufficiency_reason(
+    classification: str,
+    *,
+    goal: Goal,
+    row_count: int,
+    concurrency_level_count: int,
+    flat_throughput: bool,
+    pressure_applied: bool,
+    gpu_saturated: bool,
+    client_limited: bool,
+) -> str:
+    if classification == "not_evaluated_non_throughput_goal":
+        return f"Load sufficiency is only evaluated for throughput mode, and this run used goal {goal.value}."
+    if row_count == 0:
+        return "No successful throughput measurements were available for load sufficiency classification."
+    if client_limited:
+        return "Client saturation was detected, so the run cannot prove server load sufficiency."
+    if gpu_saturated:
+        return "GPU utilization reached the server saturation threshold."
+    if concurrency_level_count < LOAD_SUFFICIENCY_MIN_CONCURRENCY_LEVELS:
+        return "Fewer than three concurrency levels were measured and no saturation signal was observed."
+    if flat_throughput and pressure_applied:
+        return "Throughput was flat while the load generator applied increasing pressure."
+    if flat_throughput:
+        return "Throughput was flat, but the load generator did not show enough pressure growth."
+    return "Throughput did not plateau and no GPU saturation signal was observed."
+
+
+def _load_sufficiency_notes(load_sufficiency: dict[str, Any]) -> list[str]:
+    classification = load_sufficiency.get("classification")
+    if classification == "load_insufficient_pressure":
+        return ["Load sufficiency was not established because flat throughput lacked pressure growth evidence."]
+    if classification == "insufficient_sweep":
+        return ["Load sufficiency was not established because the throughput sweep covered fewer than three concurrency levels."]
+    if classification == "client_limited":
+        return ["Load sufficiency was not established because the experiment was client_limited."]
+    return []
+
+
+def _coefficient_of_variation(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    if mean == 0:
+        return None
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return variance**0.5 / mean
 
 
 def _unique_result_count(results: list[ManagedCandidateResult], *, statuses: set[str]) -> int:
@@ -3002,6 +3506,31 @@ def _rendered_launch_config_row(
         "flag_aliases": rendered.flag_aliases,
         "capabilities_help_hash": rendered.capabilities_help_hash,
     }
+
+
+def _launch_provenance_from_spec(spec: ServerLaunchSpec) -> dict[str, object]:
+    metadata = spec.metadata or {}
+    rendered = metadata.get("rendered_launch")
+    rendered_payload = rendered if isinstance(rendered, dict) else {}
+    command = [str(item) for item in spec.command]
+    return {
+        "backend_name": spec.backend,
+        "backend_version": _optional_str(metadata.get("version")),
+        "backend_launch_command": command,
+        "backend_launch_command_hash": stable_payload_hash({"command": command}),
+        "backend_effective_values": _dict_payload(rendered_payload.get("rendered_fields")),
+        "backend_applied_configuration": _dict_payload(rendered_payload.get("canonical_config")),
+        "backend_omitted_values": _dict_payload(rendered_payload.get("omitted_fields")),
+        "backend_unsupported_values": _dict_payload(rendered_payload.get("unsupported_fields")),
+        "backend_unavailable_values": _dict_payload(rendered_payload.get("unavailable_fields")),
+        "backend_flag_aliases": _dict_payload(rendered_payload.get("flag_aliases")),
+        "backend_capabilities_help_hash": _optional_str(rendered_payload.get("capabilities_help_hash")),
+    }
+
+
+def _dict_payload(value: object) -> dict[str, object]:
+    payload = to_dict(value)
+    return dict(payload) if isinstance(payload, dict) else {}
 
 
 def _rendered_launch_metadata(
@@ -3667,8 +4196,10 @@ def _benchmark_config_from_workload(
     base_url: str,
     model: str,
     trial: int,
+    launch_provenance: dict[str, object] | None = None,
 ) -> EndpointBenchmarkConfig:
     run_id = workload.workload_id if workload.trials == 1 else f"{workload.workload_id}-trial-{trial + 1:02d}"
+    launch_provenance = launch_provenance or {}
     return EndpointBenchmarkConfig(
         run_id=run_id,
         base_url=base_url,
@@ -3686,6 +4217,21 @@ def _benchmark_config_from_workload(
         idle_power_watts=workload.idle_power_watts,
         soak_duration_s=workload.soak_duration_s,
         stream=workload.stream,
+        backend_name=_optional_str(launch_provenance.get("backend_name")),
+        backend_version=_optional_str(launch_provenance.get("backend_version")),
+        backend_launch_command=(
+            [str(item) for item in launch_provenance.get("backend_launch_command", [])]
+            if isinstance(launch_provenance.get("backend_launch_command"), list)
+            else []
+        ),
+        backend_launch_command_hash=_optional_str(launch_provenance.get("backend_launch_command_hash")),
+        backend_effective_values=_dict_payload(launch_provenance.get("backend_effective_values")),
+        backend_applied_configuration=_dict_payload(launch_provenance.get("backend_applied_configuration")),
+        backend_omitted_values=_dict_payload(launch_provenance.get("backend_omitted_values")),
+        backend_unsupported_values=_dict_payload(launch_provenance.get("backend_unsupported_values")),
+        backend_unavailable_values=_dict_payload(launch_provenance.get("backend_unavailable_values")),
+        backend_flag_aliases=_dict_payload(launch_provenance.get("backend_flag_aliases")),
+        backend_capabilities_help_hash=_optional_str(launch_provenance.get("backend_capabilities_help_hash")),
     )
 
 
@@ -3757,6 +4303,10 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
+def _round_or_none(value: float | int | None) -> float | None:
+    return round(float(value), 6) if value is not None else None
+
+
 def _optional_bool(value: object, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -3783,13 +4333,17 @@ def _write_optimizer_failure_cache(
     configs_by_id: dict[str, ServingConfig],
 ) -> dict[str, object]:
     stage_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
     entries: list[dict[str, object]] = []
     for failure in failures:
         config = configs_by_id.get(failure.config_id)
+        failure_reason = _failure_reason_from_details(failure.details)
         stage_counts[failure.stage] = stage_counts.get(failure.stage, 0) + 1
+        reason_counts[failure_reason] = reason_counts.get(failure_reason, 0) + 1
         cache_payload = {
             "backend": config.backend if config is not None else None,
             "stage": failure.stage,
+            "reason": failure_reason,
             "config": _failure_cache_config_payload(config),
         }
         entries.append(
@@ -3798,6 +4352,7 @@ def _write_optimizer_failure_cache(
                 "config_id": failure.config_id,
                 "backend": config.backend if config is not None else None,
                 "stage": failure.stage,
+                "reason": failure_reason,
                 "error": failure.error,
                 "details": failure.details,
             }
@@ -3809,7 +4364,8 @@ def _write_optimizer_failure_cache(
         "summary": {
             "entry_count": len(entries),
             "stage_counts": dict(sorted(stage_counts.items())),
-            "cache_key_policy": "backend_stage_and_serving_config_without_candidate_id",
+            "reason_counts": dict(sorted(reason_counts.items())),
+            "cache_key_policy": "backend_stage_reason_and_serving_config_without_candidate_id",
         },
         "entries": entries,
         "notes": [
@@ -3844,6 +4400,93 @@ def _candidate_failure(
         timestamp=datetime.now(timezone.utc).isoformat(),
         details=details or {},
     )
+
+
+def _validation_failure_reason(validation: CandidateValidationResult) -> str:
+    reason = validation.reason or ""
+    classified = _failure_reason_from_text(reason)
+    if classified is not None:
+        return classified
+    markers = (
+        "requires detected",
+        "requires installed",
+        "cannot be rendered",
+        "does not support",
+        "not listed by installed",
+        "without a direct",
+        "unsupported",
+    )
+    if any(marker in reason for marker in markers):
+        return "invalid_config"
+    return "validation_failed"
+
+
+def _failure_reason_for_exception(exc: Exception, *, stage: str) -> str:
+    classified = _failure_reason_from_text(f"{exc.__class__.__name__}: {exc}")
+    if classified is not None:
+        return classified
+    if stage == "launch" and isinstance(exc, ValueError):
+        return "invalid_config"
+    if stage == "launch":
+        return "backend_failed_to_start"
+    if stage == "benchmark" and (isinstance(exc, TimeoutError) or _is_timeout_text(exc)):
+        return "benchmark_timeout"
+    return stage
+
+
+def _failure_reason_for_health(health: HealthCheckResult) -> str:
+    payload = f"{health.status} {health.error or ''}"
+    details = health.details if isinstance(health.details, dict) else {}
+    if details:
+        payload = f"{payload} {json.dumps(details, sort_keys=True)}"
+    classified = _failure_reason_from_text(payload)
+    if classified is not None:
+        return classified
+    if health.status == "process_exited" or "process_returncode" in details:
+        return "backend_crashed_during_load"
+    return "backend_failed_to_start"
+
+
+def _failure_reason_from_details(details: dict[str, object]) -> str:
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if reason is not None and str(reason).strip():
+        return str(reason)
+    return "unclassified"
+
+
+def _failure_reason_from_text(value: object) -> str | None:
+    text = str(value).lower()
+    if _has_any(
+        text,
+        (
+            "out of memory",
+            "cuda oom",
+            "cuda error: out of memory",
+            " oom",
+            "oom ",
+            "(oom)",
+            "[oom]",
+            ": oom",
+            "failed to allocate",
+            "not enough memory",
+            "insufficient memory",
+        ),
+    ):
+        return "out_of_memory"
+    if _has_any(text, ("gated repo", "gated model", "requires authentication", "unauthorized", "forbidden", "permission denied", "access denied", "http_401", "http_403", " 401", " 403")):
+        return "unavailable_gated_access"
+    if _has_any(text, ("model not found", "repository not found", "repo not found", "not found", "does not exist", "unavailable model", "http_404", " 404")):
+        return "unavailable_model"
+    return None
+
+
+def _has_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _is_timeout_text(value: object) -> bool:
+    text = str(value).lower()
+    return _has_any(text, ("timed out", "timeout", "deadline exceeded"))
 
 
 def _failed_result(config: ServingConfig, failure: CandidateFailureRecord, workload: WorkloadConfig | None = None) -> ManagedCandidateResult:

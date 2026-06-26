@@ -495,6 +495,35 @@ def test_pareto_frontier_uses_power_when_available() -> None:
     assert next(score for score in scores if score.candidate_id == "dominator").pareto_optimal is True
 
 
+def test_pareto_frontier_preserves_load_sufficiency_fields() -> None:
+    loaded = _input("loaded", total_tokens_s=120.0, p95_latency_s=0.8, tokens_per_second_per_watt=2.0, joules_per_token=0.006)
+    loaded.measured_metrics.update(
+        {
+            "client_issue_rate_req_s": 100.0,
+            "max_request_backlog": 32.0,
+            "max_token_backlog": 8192.0,
+            "load_saturation_signal": "gpu_saturated",
+            "client_saturation_signal": "not_saturated",
+        }
+    )
+    loaded.telemetry_metrics["max_gpu_util_percent"] = 100.0
+    loaded.telemetry_metrics["tokens_per_joule"] = 2.5
+    loaded.telemetry_metrics["joules_per_generated_token"] = 0.4
+    loaded.telemetry_metrics["energy_accounting"] = "idle_subtracted"
+
+    _, result = score_recommendation_inputs([loaded], goal=RecommendationGoal.THROUGHPUT)
+
+    row = result.pareto_frontier[0]
+    assert row["client_issue_rate_req_s"] == pytest.approx(100.0)
+    assert row["max_request_backlog"] == pytest.approx(32.0)
+    assert row["max_token_backlog"] == pytest.approx(8192.0)
+    assert row["load_saturation_signal"] == "gpu_saturated"
+    assert row["max_gpu_util_percent"] == pytest.approx(100.0)
+    assert row["tokens_per_joule"] == pytest.approx(2.5)
+    assert row["joules_per_generated_token"] == pytest.approx(0.4)
+    assert row["energy_accounting"] == "idle_subtracted"
+
+
 def test_alternative_recommendations_include_objective_winners() -> None:
     inputs = [
         _input("throughput", total_tokens_s=150.0, p95_latency_s=1.4, tokens_per_second_per_watt=0.8, joules_per_token=0.02),
