@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from serve_optimize.backends.base import environment_with_command_dir
 from serve_optimize.backends.factory import (
     ATTACH_ONLY_BACKENDS,
     MANAGED_BACKEND_CHOICES,
@@ -35,10 +36,10 @@ from serve_optimize.backends.vllm import (
 from serve_optimize.cli import main
 from serve_optimize.evidence import launch_config_hash, workload_config_hash
 from serve_optimize.managed import (
+    _benchmark_config_from_workload,
     _client_saturation_summary,
     _generate_managed_candidates,
     _load_sufficiency_summary,
-    _benchmark_config_from_workload,
     _managed_measured_metrics,
     _managed_telemetry_metrics,
     _measurement_metrics,
@@ -110,6 +111,17 @@ def test_vllm_launch_prefers_executable_beside_active_python(tmp_path, monkeypat
     assert command[0] == str(executable)
 
 
+def test_backend_launch_environment_prepends_command_directory(tmp_path) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    python_path = bin_dir / "python"
+    python_path.write_text("", encoding="utf-8")
+
+    env = environment_with_command_dir([str(python_path), "-m", "sglang.launch_server"], {"PATH": "/usr/bin"})
+
+    assert env["PATH"].split(":")[0] == str(bin_dir)
+
+
 def test_vllm_backend_default_baseline_omits_tuning_flags() -> None:
     rendered = render_vllm_launch(
         _config(extra={"backend_defaults": True, "baseline": True}),
@@ -163,6 +175,7 @@ def test_sglang_launch_spec_sets_distinct_grpc_port(monkeypatch, tmp_path) -> No
 
     assert spec.port == 65000
     assert spec.environment["SGLANG_GRPC_PORT"] == "12345"
+    assert "PATH" in spec.environment
     assert spec.metadata["allocated_grpc_port"] == 12345
 
 

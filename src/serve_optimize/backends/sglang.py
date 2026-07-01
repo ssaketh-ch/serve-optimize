@@ -21,7 +21,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from serve_optimize.backends.base import LaunchPlan
+from serve_optimize.backends.base import LaunchPlan, environment_with_command_dir
 from serve_optimize.endpoint_benchmark import RequestFn, send_chat_completion_request
 from serve_optimize.schemas import (
     EndpointBenchmarkConfig,
@@ -244,7 +244,7 @@ class SglangAdapter:
             port=resolved_port,
             base_url=base_url,
             command=rendered.command,
-            environment={"SGLANG_GRPC_PORT": str(grpc_port)},
+            environment=environment_with_command_dir(rendered.command, {"SGLANG_GRPC_PORT": str(grpc_port)}),
             stdout_log_path=str(candidate_log_dir / "stdout.log"),
             stderr_log_path=str(candidate_log_dir / "stderr.log"),
             metadata=metadata,

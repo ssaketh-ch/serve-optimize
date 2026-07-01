@@ -1,6 +1,7 @@
 sglang==0.5.13.post1
 flash-attn-4==4.0.0b18
 sglang-kernel==0.4.3
+ninja==1.13.0
 torch==2.11.0
 torchaudio==2.11.0
 torchvision==0.26.0
