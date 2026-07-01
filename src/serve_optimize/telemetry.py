@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .schemas import PowerSampleRecord, TelemetryCapabilities, TelemetrySummary
 
@@ -63,6 +63,7 @@ class TelemetryCollector:
         self._samples: list[PowerSampleRecord] = []
         self._warnings: list[str] = []
         self._provider: str | None = None
+        self._last_cpu_times: tuple[int, int] | None = None
 
     def start(self) -> None:
         if self.telemetry == "none":
@@ -70,7 +71,7 @@ class TelemetryCollector:
         provider = _resolve_provider(self.telemetry)
         if provider is None:
             self._warnings.append(f"Telemetry provider '{self.telemetry}' is unsupported.")
-            self._samples.append(_error_sample(self.telemetry, self.device_index, f"Unsupported telemetry provider: {self.telemetry}"))
+            self._samples.append(self._annotate_sample(_error_sample(self.telemetry, self.device_index, f"Unsupported telemetry provider: {self.telemetry}")))
             return
         self._provider = provider
         self._stop.clear()
@@ -104,11 +105,11 @@ class TelemetryCollector:
             handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
         except Exception as exc:
             self._warnings.append(f"NVML telemetry unavailable: {exc.__class__.__name__}: {exc}")
-            self._samples.append(_error_sample("nvml", self.device_index, f"{exc.__class__.__name__}: {exc}"))
+            self._samples.append(self._annotate_sample(_error_sample("nvml", self.device_index, f"{exc.__class__.__name__}: {exc}")))
             return
         try:
             while not self._stop.is_set():
-                self._samples.append(_sample_nvml(pynvml, handle, self.device_index))
+                self._samples.append(self._annotate_sample(_sample_nvml(pynvml, handle, self.device_index)))
                 time.sleep(self.interval_s)
         finally:
             try:
@@ -118,12 +119,33 @@ class TelemetryCollector:
 
     def _run_nvidia_smi(self) -> None:
         while not self._stop.is_set():
-            sample = _sample_nvidia_smi(self.device_index)
+            sample = self._annotate_sample(_sample_nvidia_smi(self.device_index))
             self._samples.append(sample)
             if sample.error:
                 self._warnings.append(f"nvidia-smi telemetry sample failed: {sample.error}")
                 return
             time.sleep(self.interval_s)
+
+    def _annotate_sample(self, sample: PowerSampleRecord) -> PowerSampleRecord:
+        return replace(
+            sample,
+            sample_interval_s=self.interval_s,
+            cpu_util_percent=self._sample_cpu_util_percent(),
+        )
+
+    def _sample_cpu_util_percent(self) -> float | None:
+        current = _read_proc_stat_cpu_times()
+        if current is None:
+            return None
+        previous = self._last_cpu_times
+        self._last_cpu_times = current
+        if previous is None:
+            return None
+        idle_delta = current[1] - previous[1]
+        total_delta = current[0] - previous[0]
+        if total_delta <= 0:
+            return None
+        return max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0))
 
 
 def make_telemetry_collector(telemetry: str, device_index: int = 0, interval_s: float = 0.2) -> TelemetryCollector:
@@ -195,6 +217,7 @@ def summarize_power_samples(samples: list[PowerSampleRecord], wall_time_s: float
         "sample_count": summary.sample_count,
         "duration_s": summary.duration_s,
         "sampling_rate_hz": summary.sampling_rate_hz,
+        "sample_interval_s": summary.sample_interval_s,
         "missing_fields": summary.missing_fields,
         "warnings": summary.warnings,
         "notes": summary.notes,
@@ -214,6 +237,9 @@ def summarize_power_samples(samples: list[PowerSampleRecord], wall_time_s: float
         "thermal_stability_classification": summary.thermal_stability_classification,
         "average_sm_clock_mhz": summary.average_sm_clock_mhz,
         "average_memory_clock_mhz": summary.average_memory_clock_mhz,
+        "average_cpu_util_percent": summary.average_cpu_util_percent,
+        "average_client_process_cpu_percent": summary.average_client_process_cpu_percent,
+        "average_backend_process_cpu_percent": summary.average_backend_process_cpu_percent,
         "observed_memory_mb": summary.max_memory_used_mb,
     }
 
@@ -242,6 +268,9 @@ def summarize_telemetry(
     timestamps = [sample.timestamp_s for sample in samples]
     sampling_duration = (max(timestamps) - min(timestamps)) if len(timestamps) > 1 else None
     sampling_rate = (len(samples) - 1) / sampling_duration if sampling_duration and sampling_duration > 0 else None
+    sample_intervals = [_optional_float(sample.sample_interval_s) for sample in samples]
+    sample_intervals = [value for value in sample_intervals if value is not None]
+    sample_interval = _average(sample_intervals)
 
     gpu_utils = [_first_float(sample.gpu_util_percent, sample.gpu_utilization_pct) for sample in samples]
     gpu_utils = [value for value in gpu_utils if value is not None]
@@ -265,6 +294,12 @@ def summarize_telemetry(
     memory_used = [value for value in memory_used if value is not None]
     memory_totals = [_first_int(sample.memory_total_mb) for sample in samples]
     memory_totals = [value for value in memory_totals if value is not None]
+    cpu_utils = [_optional_float(sample.cpu_util_percent) for sample in samples]
+    cpu_utils = [value for value in cpu_utils if value is not None]
+    client_process_cpu = [_optional_float(sample.client_process_cpu_percent) for sample in samples]
+    client_process_cpu = [value for value in client_process_cpu if value is not None]
+    backend_process_cpu = [_optional_float(sample.backend_process_cpu_percent) for sample in samples]
+    backend_process_cpu = [value for value in backend_process_cpu if value is not None]
 
     provider = provider or _first_text([sample.provider or sample.source for sample in samples])
     power_limit = _first_float(*[sample.power_limit_watts for sample in samples])
@@ -345,6 +380,11 @@ def summarize_telemetry(
         "avg_sm_clock_mhz": _round_or_none(_average(sm_clocks)),
         "avg_memory_clock_mhz": _round_or_none(_average(memory_clocks)),
     }
+    cpu_stats = {
+        "avg_cpu_util_percent": _round_or_none(_average(cpu_utils)),
+        "avg_client_process_cpu_percent": _round_or_none(_average(client_process_cpu)),
+        "avg_backend_process_cpu_percent": _round_or_none(_average(backend_process_cpu)),
+    }
     provider_info = {
         "provider": provider,
         "device_name": device_name,
@@ -370,6 +410,7 @@ def summarize_telemetry(
         sample_count=len(samples),
         duration_s=rounded_sampling_duration,
         sampling_rate_hz=rounded_sampling_rate,
+        sample_interval_s=_round_or_none(sample_interval),
         missing_fields=missing_fields,
         warnings=unique_warnings,
         notes=unique_notes,
@@ -383,6 +424,7 @@ def summarize_telemetry(
         valid_power_sample_count=len(watts),
         power_sampling_duration_s=rounded_sampling_duration,
         power_sampling_rate_hz=rounded_sampling_rate,
+        power_sample_interval_s=_round_or_none(sample_interval),
         average_power_watts=_round_or_none(average_power),
         min_power_watts=_round_or_none(min_power),
         max_power_watts=_round_or_none(max_power),
@@ -402,6 +444,9 @@ def summarize_telemetry(
         thermal_stability_classification=thermal_classification,
         average_sm_clock_mhz=clock_stats["avg_sm_clock_mhz"],
         average_memory_clock_mhz=clock_stats["avg_memory_clock_mhz"],
+        average_cpu_util_percent=cpu_stats["avg_cpu_util_percent"],
+        average_client_process_cpu_percent=cpu_stats["avg_client_process_cpu_percent"],
+        average_backend_process_cpu_percent=cpu_stats["avg_backend_process_cpu_percent"],
         average_memory_used_mb=_round_or_none(_average(memory_used)),
         max_memory_used_mb=max(memory_used) if memory_used else None,
         memory_total_mb=max(memory_totals) if memory_totals else None,
@@ -633,6 +678,25 @@ def _parse_int(value: str) -> int | None:
         return int(float(text))
     except ValueError:
         return None
+
+
+def _read_proc_stat_cpu_times() -> tuple[int, int] | None:
+    try:
+        with open("/proc/stat", encoding="utf-8") as handle:
+            line = handle.readline()
+    except OSError:
+        return None
+    parts = line.split()
+    if not parts or parts[0] != "cpu":
+        return None
+    try:
+        values = [int(value) for value in parts[1:]]
+    except ValueError:
+        return None
+    if len(values) < 4:
+        return None
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return sum(values), idle
 
 
 GROSS_ENERGY_NOTE = "Energy uses gross active power unless an idle baseline is supplied or sampled."

@@ -72,6 +72,14 @@ class HardwareSnapshot:
     detected_at: str
     gpus: list[GpuDevice] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    gpu_count: int = 0
+    interconnect: str | None = None
+    cpu_model: str | None = None
+    cpu_core_count: int | None = None
+    system_memory_mb: int | None = None
+    storage_type: str | None = None
+    operating_system: str | None = None
+    container_or_virtual_environment: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def empty(cls, hostname: str, platform: str, python_version: str, note: str) -> HardwareSnapshot:
@@ -82,6 +90,8 @@ class HardwareSnapshot:
             detected_at=datetime.now(timezone.utc).isoformat(),
             gpus=[],
             notes=[note],
+            gpu_count=0,
+            operating_system=platform,
         )
 
     @property
@@ -109,6 +119,10 @@ class ModelCapabilityMetadata:
     metadata_known: bool = False
     is_local_path: bool = False
     config_path: str | None = None
+    revision: str | None = None
+    model_access_status: str | None = None
+    tokenizer_id: str | None = None
+    tokenizer_revision: str | None = None
     torch_dtype: str | None = None
     quantization_method: str | None = None
     quantization_config: dict[str, Any] = field(default_factory=dict)
@@ -471,6 +485,10 @@ class ManagedRunSummary:
     resume_warnings: list[str] = field(default_factory=list)
     client_saturation: dict[str, Any] = field(default_factory=dict)
     load_sufficiency: dict[str, Any] = field(default_factory=dict)
+    backend_capability_registry: dict[str, Any] = field(default_factory=dict)
+    candidate_generation_report: dict[str, Any] = field(default_factory=dict)
+    candidate_pruning_report: dict[str, Any] = field(default_factory=dict)
+    recommendation_ablation_plan: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -532,6 +550,20 @@ class EndpointBenchmarkConfig:
     backend_unavailable_values: dict[str, Any] = field(default_factory=dict)
     backend_flag_aliases: dict[str, Any] = field(default_factory=dict)
     backend_capabilities_help_hash: str | None = None
+    experiment_campaign_id: str | None = None
+    parent_run_id: str | None = None
+    objective_mode: str | None = None
+    candidate_source: str | None = None
+    model_revision: str | None = None
+    model_access_status: str | None = None
+    tokenizer_id: str | None = None
+    tokenizer_revision: str | None = None
+    workload_description: dict[str, Any] = field(default_factory=dict)
+    backend_health_status: str | None = None
+    backend_started_at: str | None = None
+    backend_ready_at: str | None = None
+    backend_startup_time_s: float | None = None
+    model_load_time_s: float | None = None
     schema_version: str = "endpoint-benchmark/v1"
 
 
@@ -543,11 +575,15 @@ class RequestRecord:
     latency_s: float
     status: str
     error: str | None = None
+    error_reason: str | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     ttft_s: float | None = None
     tpot_s: float | None = None
+    finish_reason: str | None = None
+    http_status: int | None = None
+    client_status: str | None = None
     timing_source: str | None = None
     token_count_source: str | None = None
     client_submit_time: float | None = None
@@ -561,6 +597,7 @@ class PowerSampleRecord:
     phase: str
     watts: float | None
     source: str
+    sample_interval_s: float | None = None
     device_index: int | None = None
     device_id: str | None = None
     provider: str | None = None
@@ -582,6 +619,9 @@ class PowerSampleRecord:
     mig_mode: str | None = None
     mig_profile: str | None = None
     device_name: str | None = None
+    cpu_util_percent: float | None = None
+    client_process_cpu_percent: float | None = None
+    backend_process_cpu_percent: float | None = None
     error: str | None = None
 
 
@@ -605,6 +645,7 @@ class TelemetrySummary:
     sample_count: int = 0
     duration_s: float | None = None
     sampling_rate_hz: float | None = None
+    sample_interval_s: float | None = None
     missing_fields: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -618,6 +659,7 @@ class TelemetrySummary:
     valid_power_sample_count: int = 0
     power_sampling_duration_s: float | None = None
     power_sampling_rate_hz: float | None = None
+    power_sample_interval_s: float | None = None
     average_power_watts: float | None = None
     min_power_watts: float | None = None
     max_power_watts: float | None = None
@@ -637,6 +679,9 @@ class TelemetrySummary:
     thermal_stability_classification: str | None = None
     average_sm_clock_mhz: float | None = None
     average_memory_clock_mhz: float | None = None
+    average_cpu_util_percent: float | None = None
+    average_client_process_cpu_percent: float | None = None
+    average_backend_process_cpu_percent: float | None = None
     average_memory_used_mb: float | None = None
     max_memory_used_mb: int | None = None
     memory_total_mb: int | None = None
@@ -667,9 +712,11 @@ class EndpointBenchmarkSummary:
     avg_ttft_ms: float | None = None
     p50_ttft_ms: float | None = None
     p95_ttft_ms: float | None = None
+    p99_ttft_ms: float | None = None
     avg_tpot_ms: float | None = None
     p50_tpot_ms: float | None = None
     p95_tpot_ms: float | None = None
+    p99_tpot_ms: float | None = None
     ttft_sample_count: int = 0
     tpot_sample_count: int = 0
     timing_source: str | None = None
@@ -688,6 +735,7 @@ class EndpointBenchmarkSummary:
     measurement_average_power_watts: float | None = None
     active_power_watts: float | None = None
     active_energy_joules: float | None = None
+    idle_subtracted_energy_joules: float | None = None
     energy_joules: float | None = None
     energy_accounting: str | None = None
     joules_per_token: float | None = None
@@ -709,10 +757,12 @@ class EndpointBenchmarkSummary:
     stability_classification: str = "single_trial"
     confidence_intervals: dict[str, Any] = field(default_factory=dict)
     observed_memory_mb: int | None = None
+    peak_gpu_memory_mb: int | None = None
     average_gpu_util_percent: float | None = None
     max_gpu_util_percent: float | None = None
     average_memory_util_percent: float | None = None
     max_memory_util_percent: float | None = None
+    average_memory_bandwidth_util_percent: float | None = None
     average_temperature_c: float | None = None
     max_temperature_c: float | None = None
     temperature_rise_c: float | None = None
@@ -757,6 +807,32 @@ class EndpointBenchmarkSummary:
     backend_unavailable_values: dict[str, Any] = field(default_factory=dict)
     backend_flag_aliases: dict[str, Any] = field(default_factory=dict)
     backend_capabilities_help_hash: str | None = None
+    trial_id: str | None = None
+    experiment_campaign_id: str | None = None
+    parent_run_id: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    hostname: str | None = None
+    repository_commit: str | None = None
+    dirty_tree: bool | None = None
+    python_version: str | None = None
+    cuda_version: str | None = None
+    gpu_driver_version: str | None = None
+    backend_health_status: str | None = None
+    model_id: str | None = None
+    model_revision: str | None = None
+    model_access_status: str | None = None
+    tokenizer_id: str | None = None
+    tokenizer_revision: str | None = None
+    objective_mode: str | None = None
+    candidate_source: str | None = None
+    workload_description: dict[str, Any] = field(default_factory=dict)
+    backend_started_at: str | None = None
+    backend_ready_at: str | None = None
+    backend_startup_time_s: float | None = None
+    model_load_time_s: float | None = None
+    trial_wall_clock_time_s: float | None = None
+    outcome: str | None = None
 
 
 @dataclass(frozen=True)

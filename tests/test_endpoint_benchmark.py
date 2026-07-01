@@ -172,12 +172,80 @@ def test_summary_includes_stream_timing_metrics() -> None:
 
     assert summary.avg_ttft_ms == pytest.approx(150.0)
     assert summary.p95_ttft_ms == pytest.approx(195.0)
+    assert summary.p99_ttft_ms == pytest.approx(199.0)
     assert summary.avg_tpot_ms == pytest.approx(30.0)
     assert summary.p95_tpot_ms == pytest.approx(39.0)
+    assert summary.p99_tpot_ms == pytest.approx(39.8)
     assert summary.ttft_sample_count == 2
     assert summary.tpot_sample_count == 2
     assert summary.timing_source == "openai_stream_chunks"
     assert summary.measurement_quality["phase_energy_attribution"] == "unavailable_without_phase_markers"
+
+
+def test_summary_includes_trial_identity_and_workload_description() -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="trial-1",
+        base_url="http://127.0.0.1:8000/v1",
+        model="example-model",
+        concurrency=2,
+        num_requests=3,
+        max_tokens=16,
+        prompt="hello",
+        timeout_s=10.0,
+        experiment_campaign_id="campaign-1",
+        parent_run_id="managed-1",
+        objective_mode="balanced",
+        candidate_source="safe_baseline",
+        model_revision="abc123",
+        model_access_status="public",
+        tokenizer_id="example-tokenizer",
+        tokenizer_revision="tok123",
+        backend_name="vllm",
+        backend_version="1.2.3",
+        backend_launch_command=["vllm", "serve", "example-model"],
+        backend_health_status="healthy",
+        backend_started_at="2026-06-26T00:00:00+00:00",
+        backend_ready_at="2026-06-26T00:00:10+00:00",
+        backend_startup_time_s=10.0,
+        model_load_time_s=10.0,
+        workload_description={
+            "workload_name": "synthetic-short",
+            "dataset_source": "synthetic",
+            "requested_output_length_distribution": {"p50": 16},
+        },
+    )
+    records = [
+        RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=4, completion_tokens=8, total_tokens=12),
+        RequestRecord(1, 0.0, 2.0, 2.0, "ok", prompt_tokens=5, completion_tokens=16, total_tokens=21),
+    ]
+
+    summary = summarize_requests(
+        "trial-1",
+        records,
+        wall_time_s=2.0,
+        config=config,
+        started_at="2026-06-26T00:01:00+00:00",
+        ended_at="2026-06-26T00:01:02+00:00",
+        trial_wall_clock_time_s=2.0,
+    )
+
+    assert summary.trial_id == "trial-1"
+    assert summary.experiment_campaign_id == "campaign-1"
+    assert summary.parent_run_id == "managed-1"
+    assert summary.objective_mode == "balanced"
+    assert summary.candidate_source == "safe_baseline"
+    assert summary.backend_name == "vllm"
+    assert summary.backend_version == "1.2.3"
+    assert summary.backend_launch_command == ["vllm", "serve", "example-model"]
+    assert summary.backend_health_status == "healthy"
+    assert summary.model_id == "example-model"
+    assert summary.model_revision == "abc123"
+    assert summary.model_access_status == "public"
+    assert summary.tokenizer_id == "example-tokenizer"
+    assert summary.tokenizer_revision == "tok123"
+    assert summary.workload_description["actual_output_length_distribution"]["p50"] == pytest.approx(12.0)
+    assert summary.outcome == "completed"
+    assert summary.trial_wall_clock_time_s == pytest.approx(2.0)
 
 
 def test_summary_metric_calculation_with_power_fields() -> None:
@@ -188,11 +256,11 @@ def test_summary_metric_calculation_with_power_fields() -> None:
     telemetry = TelemetryCapture(
         provider="nvml",
         samples=[
-            PowerSampleRecord(0.0, "measured", 100.0, "nvml", gpu_util_percent=70.0),
-            PowerSampleRecord(0.2, "measured", 110.0, "nvml", gpu_util_percent=72.0),
-            PowerSampleRecord(0.4, "measured", 120.0, "nvml", gpu_util_percent=74.0),
-            PowerSampleRecord(0.6, "measured", 130.0, "nvml", gpu_util_percent=76.0),
-            PowerSampleRecord(0.8, "measured", 140.0, "nvml", gpu_util_percent=78.0),
+            PowerSampleRecord(0.0, "measured", 100.0, "nvml", gpu_util_percent=70.0, memory_util_percent=40.0),
+            PowerSampleRecord(0.2, "measured", 110.0, "nvml", gpu_util_percent=72.0, memory_util_percent=42.0),
+            PowerSampleRecord(0.4, "measured", 120.0, "nvml", gpu_util_percent=74.0, memory_util_percent=44.0),
+            PowerSampleRecord(0.6, "measured", 130.0, "nvml", gpu_util_percent=76.0, memory_util_percent=46.0),
+            PowerSampleRecord(0.8, "measured", 140.0, "nvml", gpu_util_percent=78.0, memory_util_percent=48.0),
         ],
         warnings=[],
     )
@@ -214,6 +282,7 @@ def test_summary_metric_calculation_with_power_fields() -> None:
     assert summary.telemetry_provider == "nvml"
     assert summary.telemetry_quality == "good"
     assert summary.average_gpu_util_percent == pytest.approx(74.0)
+    assert summary.average_memory_bandwidth_util_percent == pytest.approx(44.0)
     assert summary.warnings == []
 
 
@@ -779,7 +848,7 @@ def test_endpoint_auth_reads_secret_from_environment_without_storing_it(monkeypa
             return None
 
         def read(self) -> bytes:
-            return b'{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}'
+            return b'{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5},"choices":[{"finish_reason":"stop"}]}'
 
     def fake_urlopen(http_request, timeout):
         captured["authorization"] = http_request.get_header("Authorization")
@@ -811,6 +880,9 @@ def test_endpoint_auth_reads_secret_from_environment_without_storing_it(monkeypa
     config_text = (run.run_dir / "config.json").read_text(encoding="utf-8")
 
     assert record.status == "ok"
+    assert record.http_status == 200
+    assert record.client_status == "ok"
+    assert record.finish_reason == "stop"
     assert captured["authorization"] == "Bearer top-secret-value"
     assert "SERVE_OPTIMIZE_TEST_KEY" in config_text
     assert "top-secret-value" not in config_text
@@ -831,6 +903,34 @@ def test_endpoint_auth_rejects_an_unset_environment_variable() -> None:
 
     with pytest.raises(ValueError, match="unset or empty"):
         send_chat_completion_request(config, request_id=0)
+
+
+def test_telemetry_interval_uses_short_micro_window() -> None:
+    short_config = EndpointBenchmarkConfig(
+        run_id="run-short-telemetry",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        steady_state_duration_s=10.0,
+    )
+    long_config = EndpointBenchmarkConfig(
+        run_id="run-long-telemetry",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        steady_state_duration_s=120.0,
+    )
+
+    assert endpoint_benchmark._telemetry_interval_s(short_config) == pytest.approx(0.25)
+    assert endpoint_benchmark._telemetry_interval_s(long_config) == pytest.approx(1.0)
 
 
 def test_soak_duration_runs_additional_request_batches(monkeypatch: pytest.MonkeyPatch) -> None:

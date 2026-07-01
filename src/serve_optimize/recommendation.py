@@ -1148,6 +1148,12 @@ def compute_optimizer_quality(
     selected_candidate_id: str | None,
     ranked_scores: list[RecommendationScore],
     candidate_table: list[dict[str, float | int | str | None]],
+    trial_count: int | None = None,
+    failed_trials_avoided_by_pruning: int = 0,
+    evidence_hit_count: int = 0,
+    evidence_reuse_candidate_count: int = 0,
+    recommendation_changed_after_new_evidence: bool | None = None,
+    pruned_candidate_count: int = 0,
 ) -> dict[str, object]:
     valid_scores = [score for score in ranked_scores if score.final_score is not None]
     selected_score = next((score for score in valid_scores if score.candidate_id == selected_candidate_id), None)
@@ -1166,11 +1172,14 @@ def compute_optimizer_quality(
             rejected_count += 1
     selected_value = selected_score.final_score if selected_score else None
     best_value = best_score.final_score if best_score else None
+    selected_rank = _rank_for_candidate(valid_scores, selected_candidate_id)
+    selected_on_pareto = bool(selected_row and selected_row.get("pareto_optimal") is True)
     return {
         "schema_version": "optimizer_quality/v1",
         "scope": "evaluated_candidates_only",
         "baseline_type": "bounded_evaluated_candidate_baseline",
         "goal": goal,
+        "objective_formula": objective_formula_for_goal(goal),
         "selected_candidate_id": selected_candidate_id,
         "best_score_candidate_id": best_score.candidate_id if best_score else None,
         "search_regret": {
@@ -1195,11 +1204,73 @@ def compute_optimizer_quality(
             "safe_baseline_present": source_counts.get("safe_baseline", 0) > 0,
             "synthesized_candidate_count": source_counts.get("aiconfigurator_synthesis", 0),
         },
+        "recommendation_quality_metrics": {
+            "oracle_best_candidate": best_score.candidate_id if best_score else None,
+            "recommended_candidate": selected_candidate_id,
+            "regret_compared_with_oracle": {
+                "score_gap_to_best": _score_gap(best_value, selected_value),
+                "relative_score_regret": _relative_regret(best_value, selected_value, maximize=True),
+            },
+            "rank_of_recommended_candidate": selected_rank,
+            "recommended_candidate_on_pareto_frontier": selected_on_pareto,
+            "trials_required_to_reach_recommendation": trial_count,
+            "number_of_failed_trials_avoided_by_pruning": failed_trials_avoided_by_pruning,
+            "number_of_trials_avoided_by_pruning": pruned_candidate_count,
+            "evidence_reuse_improved_search_speed": bool(evidence_hit_count or evidence_reuse_candidate_count),
+            "evidence_reuse_candidate_count": evidence_reuse_candidate_count,
+            "evidence_hit_count": evidence_hit_count,
+            "recommendation_changed_after_new_evidence": recommendation_changed_after_new_evidence,
+        },
         "notes": [
             "Optimizer quality is bounded to evaluated candidates and exact fresh measured evidence hits.",
             "Regret values compare the selected candidate with bounded evaluated baselines, not all possible configurations.",
         ],
     }
+
+
+def objective_formula_for_goal(goal: str) -> dict[str, object]:
+    if goal == RecommendationGoal.THROUGHPUT.value:
+        return {
+            "objective": "throughput",
+            "primary_terms": ["output_tokens_per_second", "request_throughput_for_request_oriented_workloads"],
+            "guardrails": ["tail_latency", "failure_rate"],
+            "hard_penalties": ["failed_or_unavailable_candidate"],
+            "notes": ["Tail latency is used as a guardrail instead of the primary objective."],
+        }
+    if goal == RecommendationGoal.EFFICIENCY.value:
+        return {
+            "objective": "energy_efficiency",
+            "primary_terms": ["joules_per_generated_token", "tokens_per_joule"],
+            "guardrails": ["minimum_useful_throughput", "tail_latency"],
+            "energy_accounting_preference": "idle_subtracted_when_available",
+            "hard_penalties": ["failed_or_unavailable_candidate"],
+        }
+    if goal == RecommendationGoal.LATENCY.value:
+        return {
+            "objective": "latency",
+            "primary_terms": ["p95_latency"],
+            "guardrails": ["failure_rate"],
+            "hard_penalties": ["failed_or_unavailable_candidate"],
+        }
+    return {
+        "objective": "balanced",
+        "primary_terms": ["throughput_improvement", "latency_preservation", "reliability"],
+        "conditional_terms": ["energy_efficiency_when_power_data_is_available"],
+        "guardrails": ["memory_safety_margin", "failure_penalty"],
+        "hard_penalties": ["failed_or_unavailable_candidate"],
+    }
+
+
+def _rank_for_candidate(
+    valid_scores: list[RecommendationScore],
+    candidate_id: str | None,
+) -> int | None:
+    if candidate_id is None:
+        return None
+    for index, score in enumerate(valid_scores, start=1):
+        if score.candidate_id == candidate_id:
+            return index
+    return None
 
 
 def audit_recommendation_quality(recommendation: RecommendationResult) -> dict[str, object]:

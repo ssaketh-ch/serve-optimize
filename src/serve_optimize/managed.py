@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, fields, replace
@@ -48,7 +49,7 @@ from .managed_candidates import (
     generate_managed_candidates_from_capabilities,
 )
 from .managed_summary import write_recommendation_summary_artifacts
-from .modeling import infer_model_capability_metadata
+from .modeling import infer_model_capability_metadata, infer_model_spec
 from .preflight import PreflightRun, write_preflight_artifacts
 from .priors import (
     AIConfiguratorPriorProvider,
@@ -208,6 +209,7 @@ class _ManagedResumeState:
     source_run_dir: Path
     source_run_id: str | None
     records: dict[tuple[str, str, str, str], _ResumeCandidateRecord]
+    failure_cache_entries: list[dict[str, Any]]
     warnings: list[str]
 
 
@@ -291,6 +293,10 @@ def run_managed_evaluation(
     optimizer_failure_cache_path = run_dir / "optimizer_failure_cache.json"
     client_saturation_path = run_dir / "client_saturation.json"
     load_sufficiency_path = run_dir / "load_sufficiency.json"
+    backend_capability_registry_path = run_dir / "backend_capability_registry.json"
+    candidate_generation_report_path = run_dir / "candidate_generation_report.json"
+    candidate_pruning_report_path = run_dir / "candidate_pruning_report.json"
+    recommendation_ablation_plan_path = run_dir / "recommendation_ablation_plan.json"
     vllm_argument_capabilities_path = run_dir / "vllm_argument_capabilities.json"
     sglang_argument_capabilities_path = run_dir / "sglang_argument_capabilities.json"
     rendered_launch_configs_path = run_dir / "rendered_launch_configs.jsonl"
@@ -311,6 +317,10 @@ def run_managed_evaluation(
     write_json(optimizer_failure_cache_path, {})
     write_json(client_saturation_path, {})
     write_json(load_sufficiency_path, {})
+    write_json(backend_capability_registry_path, {})
+    write_json(candidate_generation_report_path, {})
+    write_json(candidate_pruning_report_path, {})
+    write_json(recommendation_ablation_plan_path, {})
 
     hardware = detect_hardware()
     workload_profile = workload_profile or WorkloadProfile()
@@ -333,6 +343,15 @@ def run_managed_evaluation(
         write_json(vllm_argument_capabilities_path, vllm_argument_capabilities.to_artifact())
     if sglang_argument_capabilities is not None:
         write_json(sglang_argument_capabilities_path, sglang_argument_capabilities.to_artifact())
+    backend_capability_registry = _backend_capability_registry(
+        backend=backend,
+        backend_metadata=backend_metadata,
+        vllm_argument_capabilities=vllm_argument_capabilities,
+        sglang_argument_capabilities=sglang_argument_capabilities,
+    )
+    write_json(backend_capability_registry_path, backend_capability_registry)
+    recommendation_ablation_plan = _recommendation_ablation_plan(goal)
+    write_json(recommendation_ablation_plan_path, recommendation_ablation_plan)
     evidence_store, evidence_warnings = _open_evidence_store(
         evidence_db_path=evidence_db_path,
         evidence_write=evidence_write,
@@ -505,6 +524,31 @@ def run_managed_evaluation(
             valid_count=len(valid_candidates),
             rejected_count=len(validation_rejections),
         )
+    repeat_failed_rejections: list[ValidationRejection] = []
+    if resume_state is not None:
+        valid_candidates, repeat_failed_rejections = _prune_repeat_failed_exact_configs(
+            valid_candidates,
+            resume_state=resume_state,
+        )
+        validation_rejections.extend(repeat_failed_rejections)
+        if repeat_failed_rejections:
+            _progress(
+                progress_callback,
+                "repeat_failed_config_pruning",
+                pruned_count=len(repeat_failed_rejections),
+            )
+    hard_constraint_rejections: list[ValidationRejection] = []
+    valid_candidates, hard_constraint_rejections = _prune_user_hard_constraint_violations(
+        valid_candidates,
+        workload_profile=workload_profile,
+    )
+    validation_rejections.extend(hard_constraint_rejections)
+    if hard_constraint_rejections:
+        _progress(
+            progress_callback,
+            "user_constraint_pruning",
+            pruned_count=len(hard_constraint_rejections),
+        )
     _append_jsonl(rendered_launch_configs_path, rendered_launch_rows)
     valid_candidate_count_before_prior_pruning = len(valid_candidates)
     rejected_candidate_count_before_prior_pruning = len(validation_rejections)
@@ -596,6 +640,39 @@ def run_managed_evaluation(
         validation_rejections=validation_rejections,
     )
     write_json(candidate_synthesis_path, synthesis_summary)
+    candidate_generation_report = _candidate_generation_report(
+        backend=backend,
+        goal=goal,
+        generated_candidates=candidate_pool,
+        candidate_generation=candidate_generation,
+        valid_candidate_count_before_prior_pruning=valid_candidate_count_before_prior_pruning,
+        rejected_candidate_count_before_prior_pruning=rejected_candidate_count_before_prior_pruning,
+        candidates_after_prior_pruning=valid_candidates,
+        hardware=hardware,
+        model=model,
+        model_metadata=model_metadata,
+        workload_profile=workload_profile,
+        backend_capability_registry=backend_capability_registry,
+        prior_summary=pruning.summary,
+        exact_fresh_ids=exact_fresh_ids,
+        evidence_prior_count=len(evidence_priors),
+        synthesis_summary=synthesis_summary,
+    )
+    candidate_pruning_report = _candidate_pruning_report(
+        all_candidates=candidate_source_count_configs,
+        valid_candidates=valid_candidates,
+        validation_rejections=validation_rejections,
+        candidate_generation=candidate_generation,
+        prior_summary=pruning.summary,
+        exact_fresh_ids=exact_fresh_ids,
+        repeat_failed_rejections=repeat_failed_rejections,
+        hard_constraint_rejections=hard_constraint_rejections,
+        synthesis_summary=synthesis_summary,
+        workload_profile=workload_profile,
+        resume_state=resume_state,
+    )
+    write_json(candidate_generation_report_path, candidate_generation_report)
+    write_json(candidate_pruning_report_path, candidate_pruning_report)
     candidates = [config for config, _validation in validation_rejections] + valid_candidates
     budget_policy = budget_policy or ManagedBudgetPolicy.default()
     staged_evaluation = budget_policy.should_stage(len(valid_candidates))
@@ -679,6 +756,7 @@ def run_managed_evaluation(
                 goal=goal,
                 telemetry=telemetry,
                 backend_metadata=backend_metadata,
+                model_metadata=model_metadata,
                 runtime_environment=runtime_environment,
                 hardware=hardware,
                 adapter=adapter,
@@ -765,6 +843,7 @@ def run_managed_evaluation(
             goal=goal,
             telemetry=telemetry,
             backend_metadata=backend_metadata,
+            model_metadata=model_metadata,
             runtime_environment=runtime_environment,
             hardware=hardware,
             adapter=adapter,
@@ -849,6 +928,11 @@ def run_managed_evaluation(
         runtime_environment=runtime_environment,
         client_saturation=client_saturation,
         load_sufficiency=load_sufficiency,
+        trial_count=len(state.rung_results),
+        failed_trials_avoided_by_pruning=_int_from_mapping(candidate_pruning_report, "failed_trials_avoided_by_pruning"),
+        evidence_hit_count=state.evidence_hits,
+        evidence_reuse_candidate_count=len(exact_fresh_ids) + len(evidence_priors),
+        pruned_candidate_count=_int_from_mapping(candidate_pruning_report, "total_pruned_candidate_count"),
     )
     _progress(
         progress_callback,
@@ -895,6 +979,10 @@ def run_managed_evaluation(
         "optimizer_failure_cache_json": str(optimizer_failure_cache_path),
         "client_saturation_json": str(client_saturation_path),
         "load_sufficiency_json": str(load_sufficiency_path),
+        "backend_capability_registry_json": str(backend_capability_registry_path),
+        "candidate_generation_report_json": str(candidate_generation_report_path),
+        "candidate_pruning_report_json": str(candidate_pruning_report_path),
+        "recommendation_ablation_plan_json": str(recommendation_ablation_plan_path),
         "logs_dir": str(run_dir / "logs"),
     }
     if vllm_argument_capabilities is not None:
@@ -979,6 +1067,10 @@ def run_managed_evaluation(
         resume_warnings=resume_state.warnings if resume_state is not None else [],
         client_saturation=client_saturation,
         load_sufficiency=load_sufficiency,
+        backend_capability_registry=backend_capability_registry,
+        candidate_generation_report=candidate_generation_report,
+        candidate_pruning_report=candidate_pruning_report,
+        recommendation_ablation_plan=recommendation_ablation_plan,
     )
     write_json(run_dir / "managed_run.json", summary)
     _progress(
@@ -1285,6 +1377,7 @@ def _load_managed_resume_state(
     warnings: list[str] = []
     workload_hashes = _resume_workload_hashes(source_run_dir, warnings)
     launch_hashes = _resume_launch_hashes(source_run_dir, warnings)
+    failure_cache_entries = _resume_failure_cache_entries(source_run_dir, warnings)
     records: dict[tuple[str, str, str, str], _ResumeCandidateRecord] = {}
     for row in payload.get("candidates", []):
         if not isinstance(row, dict) or row.get("status") != "completed":
@@ -1335,6 +1428,7 @@ def _load_managed_resume_state(
         source_run_dir=source_run_dir,
         source_run_id=_optional_str(payload.get("run_id")),
         records=records,
+        failure_cache_entries=failure_cache_entries,
         warnings=warnings,
     )
 
@@ -1388,6 +1482,22 @@ def _resume_launch_hashes(source_run_dir: Path, warnings: list[str]) -> dict[tup
             if candidate_id and workload_id:
                 hashes[(candidate_id, workload_id)] = launch_hash
     return hashes
+
+
+def _resume_failure_cache_entries(source_run_dir: Path, warnings: list[str]) -> list[dict[str, Any]]:
+    payload = _read_json_value(source_run_dir / "optimizer_failure_cache.json", warnings)
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return []
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("config"), dict):
+            result.append(entry)
+    return result
 
 
 def _resume_summary_path(paths: list[str], source_run_dir: Path) -> Path | None:
@@ -1473,6 +1583,7 @@ def _evaluate_launch_groups(
     goal: Goal,
     telemetry: str,
     backend_metadata: dict[str, object],
+    model_metadata: ModelCapabilityMetadata,
     runtime_environment: dict[str, object],
     hardware,
     adapter: ManagedBackendAdapter,
@@ -1790,7 +1901,16 @@ def _evaluate_launch_groups(
                 timeout_s=startup_timeout_s,
             )
             health = adapter.wait_for_health(handle, model=model, timeout_s=startup_timeout_s, request_fn=request_fn)
-            _append_jsonl(lifecycle_path, [_lifecycle(run_id, group.group_id, backend, "health", "ok" if health.healthy else "failed", details={**to_dict(health), "group_id": group.group_id, "rung": _group_rung(group)})])
+            backend_startup_time_s = _iso_duration_seconds(handle.started_at, health.ended_at)
+            launch_provenance = {
+                **launch_provenance,
+                "backend_health_status": health.status,
+                "backend_started_at": handle.started_at,
+                "backend_ready_at": health.ended_at,
+                "backend_startup_time_s": backend_startup_time_s,
+                "model_load_time_s": backend_startup_time_s,
+            }
+            _append_jsonl(lifecycle_path, [_lifecycle(run_id, group.group_id, backend, "health", "ok" if health.healthy else "failed", details={**to_dict(health), "group_id": group.group_id, "rung": _group_rung(group), **launch_provenance})])
             _progress(
                 progress_callback,
                 "health_result",
@@ -1840,6 +1960,9 @@ def _evaluate_launch_groups(
                         model=model,
                         trial=trial,
                         launch_provenance=launch_provenance,
+                        parent_run_id=run_id,
+                        objective_mode=_goal_value(goal),
+                        model_metadata=model_metadata,
                     )
                     _progress(
                         progress_callback,
@@ -1896,6 +2019,9 @@ def _evaluate_launch_groups(
                                         model=model,
                                         trial=0,
                                         launch_provenance=launch_provenance,
+                                        parent_run_id=run_id,
+                                        objective_mode=_goal_value(goal),
+                                        model_metadata=model_metadata,
                                     ),
                                     "candidate": config,
                                     "launch_group": group,
@@ -2199,6 +2325,11 @@ def _write_managed_recommendation_artifacts(
     runtime_environment: dict[str, object],
     client_saturation: dict[str, Any],
     load_sufficiency: dict[str, Any],
+    trial_count: int | None = None,
+    failed_trials_avoided_by_pruning: int = 0,
+    evidence_hit_count: int = 0,
+    evidence_reuse_candidate_count: int = 0,
+    pruned_candidate_count: int = 0,
 ) -> _ManagedRecommendationArtifacts:
     inputs, input_metadata = _managed_recommendation_inputs(
         configs_by_id=configs_by_id,
@@ -2235,8 +2366,16 @@ def _write_managed_recommendation_artifacts(
         },
     )
     selected = input_metadata.get(recommendation.recommended_candidate_id or "")
+    optimizer_quality = _enriched_optimizer_quality(
+        recommendation.optimizer_quality,
+        trial_count=trial_count,
+        failed_trials_avoided_by_pruning=failed_trials_avoided_by_pruning,
+        evidence_hit_count=evidence_hit_count,
+        evidence_reuse_candidate_count=evidence_reuse_candidate_count,
+        pruned_candidate_count=pruned_candidate_count,
+    )
+    recommendation = replace(recommendation, optimizer_quality=optimizer_quality)
     recommendation_quality_audit = audit_recommendation_quality(recommendation)
-    optimizer_quality = recommendation.optimizer_quality
     write_json(optimizer_quality_path, optimizer_quality)
     payload = {
         "schema_version": "managed-recommendation/v1",
@@ -3336,6 +3475,18 @@ def serving_config_to_workload_config(
     minimum_num_requests = concurrency + warmup_requests
     num_requests = max(requested_num_requests, minimum_num_requests)
     workload_extra = dict(extra.get("workload_extra") or {}) if isinstance(extra.get("workload_extra"), dict) else {}
+    for key in (
+        "candidate_source",
+        "dataset_source",
+        "dataset_license",
+        "random_seed",
+        "sampling_parameters",
+        "prefix_reuse",
+        "synthetic_or_real",
+        "experiment_campaign_id",
+    ):
+        if key in extra:
+            workload_extra[key] = extra[key]
     if requested_num_requests < minimum_num_requests:
         workload_extra["requested_num_requests"] = requested_num_requests
         workload_extra["num_requests_adjusted_reason"] = "raised_to_match_concurrency"
@@ -3442,6 +3593,496 @@ def _provided_candidate_generation(candidates: list[ServingConfig] | None = None
             for config in candidates
         ),
     )
+
+
+def _backend_capability_registry(
+    *,
+    backend: str,
+    backend_metadata: dict[str, object],
+    vllm_argument_capabilities: VLLMArgumentCapabilities | None,
+    sglang_argument_capabilities: SGLangArgumentCapabilities | None,
+) -> dict[str, object]:
+    capabilities = vllm_argument_capabilities if backend == "vllm" else sglang_argument_capabilities
+    artifact = capabilities.to_artifact() if capabilities is not None else {}
+    return {
+        "schema_version": "backend-capability-registry/v1",
+        "registry_version": "2026-06-28",
+        "backend": backend,
+        "backend_version": _optional_str(backend_metadata.get("version")),
+        "detection_status": _optional_str(getattr(capabilities, "detection_status", None)),
+        "capability_help_hash": _optional_str(getattr(capabilities, "help_hash", None)),
+        "capability_artifact": artifact,
+        "covered_parameter_families": (
+            _vllm_registry_families(vllm_argument_capabilities)
+            if backend == "vllm"
+            else _sglang_registry_families(sglang_argument_capabilities)
+        ),
+        "notes": [
+            "Backend flags are version scoped and derived from the installed backend help when detection succeeds.",
+            "A candidate that uses an unsupported, renamed, or rejected flag is treated as invalid_config during validation.",
+        ],
+    }
+
+
+def _vllm_registry_families(capabilities: VLLMArgumentCapabilities | None) -> dict[str, object]:
+    return {
+        "memory_utilization": _flag_family(capabilities, ["--gpu-memory-utilization"]),
+        "maximum_batched_tokens": _flag_family(capabilities, ["--max-num-batched-tokens"]),
+        "maximum_concurrent_sequences": _flag_family(capabilities, ["--max-num-seqs"]),
+        "maximum_model_length": _flag_family(capabilities, ["--max-model-len"]),
+        "tensor_parallel_size": _flag_family(capabilities, ["--tensor-parallel-size"]),
+        "data_type": _flag_family(capabilities, ["--dtype"]),
+        "quantization_mode": _flag_family(capabilities, ["--quantization"]),
+        "chunked_prefill": _flag_family(capabilities, ["--enable-chunked-prefill", "--no-enable-chunked-prefill"]),
+        "kv_cache_type": _flag_family(capabilities, ["--kv-cache-dtype"]),
+        "cpu_offload": _flag_family(capabilities, ["--cpu-offload-gb"]),
+        "swap_behavior": _flag_family(capabilities, ["--swap-space"]),
+    }
+
+
+def _sglang_registry_families(capabilities: SGLangArgumentCapabilities | None) -> dict[str, object]:
+    context_flags = ["--context-length", "--max-total-tokens"]
+    tensor_parallel_flags = ["--tp-size", "--tensor-parallel-size"]
+    schedule_flags = ["--schedule-policy", "--scheduler-policy", "--schedule-conservativeness"]
+    return {
+        "static_memory_fraction": _flag_family(capabilities, ["--mem-fraction-static"]),
+        "maximum_running_requests": _flag_family(capabilities, ["--max-running-requests"]),
+        "context_length": _flag_family(capabilities, context_flags),
+        "scheduling_policy": _flag_family(capabilities, schedule_flags),
+        "chunked_prefill_or_equivalent_prefill_control": _flag_family(capabilities, ["--chunked-prefill-size"]),
+        "tensor_parallel_size": _flag_family(capabilities, tensor_parallel_flags),
+        "data_type": _flag_family(capabilities, ["--dtype"]),
+        "quantization_mode": _flag_family(capabilities, ["--quantization"]),
+        "radix_cache_or_prefix_cache_behavior": _flag_family(
+            capabilities,
+            ["--disable-radix-cache", "--enable-radix-cache", "--disable-prefix-cache", "--enable-prefix-cache"],
+        ),
+        "version_specific_flag_names_and_deprecated_options": {
+            "context_length_aliases": context_flags,
+            "active_context_length_flag": capabilities.context_length_flag() if capabilities is not None else None,
+            "tensor_parallel_aliases": tensor_parallel_flags,
+            "active_tensor_parallel_flag": capabilities.tensor_parallel_flag() if capabilities is not None else None,
+            "scheduler_aliases": schedule_flags,
+            "supported_scheduler_aliases": _supported_flags(capabilities, schedule_flags),
+        },
+    }
+
+
+def _flag_family(
+    capabilities: VLLMArgumentCapabilities | SGLangArgumentCapabilities | None,
+    flags: list[str],
+) -> dict[str, object]:
+    supported = _supported_flags(capabilities, flags)
+    choices = {
+        flag: sorted(capabilities.choices_for(flag))
+        for flag in flags
+        if capabilities is not None and capabilities.choices_for(flag)
+    }
+    return {
+        "flags": flags,
+        "supported": bool(supported),
+        "supported_flags": supported,
+        "active_flag": supported[0] if supported else None,
+        "choices": choices,
+    }
+
+
+def _supported_flags(
+    capabilities: VLLMArgumentCapabilities | SGLangArgumentCapabilities | None,
+    flags: list[str],
+) -> list[str]:
+    if capabilities is None or capabilities.detection_status != "success":
+        return []
+    return [flag for flag in flags if capabilities.supports(flag)]
+
+
+def _candidate_generation_report(
+    *,
+    backend: str,
+    goal: Goal,
+    generated_candidates: list[ServingConfig],
+    candidate_generation: ManagedCandidateGenerationResult,
+    valid_candidate_count_before_prior_pruning: int,
+    rejected_candidate_count_before_prior_pruning: int,
+    candidates_after_prior_pruning: list[ServingConfig],
+    hardware,
+    model: str,
+    model_metadata: ModelCapabilityMetadata,
+    workload_profile: WorkloadProfile,
+    backend_capability_registry: dict[str, object],
+    prior_summary: dict[str, object],
+    exact_fresh_ids: set[str],
+    evidence_prior_count: int,
+    synthesis_summary: dict[str, object],
+) -> dict[str, object]:
+    model_spec = infer_model_spec(model)
+    best_gpu = hardware.best_gpu
+    estimated_vram_values = [config.estimated_vram_mb for config in generated_candidates if config.estimated_vram_mb is not None]
+    source_counts = _candidate_source_counts(generated_candidates)
+    slo_constraints = dict(workload_profile.slo_constraints or {})
+    return {
+        "schema_version": "candidate-generation-report/v1",
+        "backend": backend,
+        "goal": goal.value,
+        "generated_candidate_count": len(generated_candidates),
+        "valid_candidate_count_before_prior_pruning": valid_candidate_count_before_prior_pruning,
+        "rejected_candidate_count_before_prior_pruning": rejected_candidate_count_before_prior_pruning,
+        "candidate_count_after_prior_pruning": len(candidates_after_prior_pruning),
+        "candidate_source_counts": source_counts,
+        "requirements": {
+            "backend_defaults": any(_is_backend_default_control(config) for config in generated_candidates),
+            "hardware_memory_limits": bool(best_gpu and best_gpu.total_memory_mb),
+            "model_size_and_context_length": True,
+            "backend_specific_parameter_ranges": bool(backend_capability_registry.get("covered_parameter_families")),
+            "prior_evidence": bool(exact_fresh_ids or evidence_prior_count or prior_summary.get("prior_candidate_count")),
+            "objective_specific_preferences": goal in {Goal.PERFORMANCE, Goal.EFFICIENT, Goal.BALANCED},
+            "user_constraints": bool(slo_constraints or _profile_has_request_shape(workload_profile)),
+        },
+        "hardware_memory_summary": {
+            "gpu_count": hardware.gpu_count,
+            "best_gpu_name": best_gpu.name if best_gpu is not None else None,
+            "best_gpu_total_memory_mb": best_gpu.total_memory_mb if best_gpu is not None else None,
+            "best_gpu_free_memory_mb": best_gpu.free_memory_mb if best_gpu is not None else None,
+            "min_estimated_candidate_vram_mb": min(estimated_vram_values) if estimated_vram_values else None,
+            "max_estimated_candidate_vram_mb": max(estimated_vram_values) if estimated_vram_values else None,
+        },
+        "model_summary": {
+            "model_id": model,
+            "model_spec": to_dict(model_spec),
+            "metadata": to_dict(model_metadata),
+            "max_candidate_context_tokens": max([config.max_context_tokens for config in generated_candidates], default=None),
+        },
+        "backend_capability_registry_hash": stable_payload_hash(backend_capability_registry),
+        "generation_filters": {
+            "capability_filtered_count": candidate_generation.capability_filtered_count,
+            "invalid_quantization_filtered_count": candidate_generation.invalid_quantization_filtered_count,
+            "memory_filtered_count": candidate_generation.memory_filtered_count,
+            "memory_filtered_candidates": candidate_generation.memory_filtered_candidates,
+            "safe_baseline_added": candidate_generation.safe_baseline_added,
+        },
+        "prior_and_synthesis": {
+            "exact_fresh_candidate_ids": sorted(exact_fresh_ids),
+            "evidence_prior_count": evidence_prior_count,
+            "prior_policy_selected_candidate_ids": prior_summary.get("selected_candidate_ids", []),
+            "synthesis_summary": synthesis_summary.get("summary", {}),
+        },
+        "user_constraints": {
+            "slo_constraints": slo_constraints,
+            "profile": to_dict(workload_profile),
+            "power_cap_present": any(config.power_limit_watts is not None for config in generated_candidates) or "power_cap_watts" in slo_constraints,
+        },
+    }
+
+
+def _candidate_pruning_report(
+    *,
+    all_candidates: list[ServingConfig],
+    valid_candidates: list[ServingConfig],
+    validation_rejections: list[ValidationRejection],
+    candidate_generation: ManagedCandidateGenerationResult,
+    prior_summary: dict[str, object],
+    exact_fresh_ids: set[str],
+    repeat_failed_rejections: list[ValidationRejection],
+    hard_constraint_rejections: list[ValidationRejection],
+    synthesis_summary: dict[str, object],
+    workload_profile: WorkloadProfile,
+    resume_state: _ManagedResumeState | None,
+) -> dict[str, object]:
+    repeat_failed_ids = {config.id for config, _validation in repeat_failed_rejections}
+    hard_constraint_ids = {config.id for config, _validation in hard_constraint_rejections}
+    validation_entries = [
+        {
+            "candidate_id": config.id,
+            "stage": "validation",
+            "reason": _validation_failure_reason(validation),
+            "detail": validation.reason,
+            "candidate_source": (config.extra or {}).get("candidate_source"),
+        }
+        for config, validation in validation_rejections
+        if config.id not in repeat_failed_ids and config.id not in hard_constraint_ids
+    ]
+    repeat_entries = [
+        {
+            "candidate_id": config.id,
+            "stage": "failure_memory",
+            "reason": "previous_failed_exact_configuration",
+            "detail": validation.reason,
+            "candidate_source": (config.extra or {}).get("candidate_source"),
+        }
+        for config, validation in repeat_failed_rejections
+    ]
+    hard_constraint_entries = [
+        {
+            "candidate_id": config.id,
+            "stage": "user_constraints",
+            "reason": "violates_user_hard_constraint",
+            "detail": validation.reason,
+            "candidate_source": (config.extra or {}).get("candidate_source"),
+        }
+        for config, validation in hard_constraint_rejections
+    ]
+    prior_entries = [
+        dict(entry)
+        for entry in prior_summary.get("pruned_candidates", [])
+        if isinstance(entry, dict)
+    ]
+    memory_entries = [dict(entry) for entry in candidate_generation.memory_filtered_candidates]
+    synthesis_entries = _synthesis_pruning_entries(synthesis_summary)
+    total_pruned = len(memory_entries) + len(validation_entries) + len(hard_constraint_entries) + len(prior_entries) + len(synthesis_entries) + len(repeat_entries)
+    launch_hashes = {launch_config_hash(config) for config in valid_candidates}
+    return {
+        "schema_version": "candidate-pruning-report/v1",
+        "input_candidate_count": len(all_candidates),
+        "kept_candidate_count": len(valid_candidates),
+        "total_pruned_candidate_count": total_pruned,
+        "memory_pruned_candidate_count": len(memory_entries),
+        "validation_pruned_candidate_count": len(validation_entries),
+        "user_constraint_pruned_candidate_count": len(hard_constraint_entries),
+        "prior_pruned_candidate_count": len(prior_entries),
+        "synthesis_pruned_candidate_count": len(synthesis_entries),
+        "repeat_failed_exact_configuration_count": len(repeat_entries),
+        "failed_trials_avoided_by_pruning": len(validation_entries) + len(repeat_entries),
+        "kept_backend_default_control": any(_is_backend_default_control(config) for config in valid_candidates),
+        "kept_conservative_candidate": any(_is_conservative_candidate(config) for config in valid_candidates),
+        "diversity": {
+            "kept_candidate_count": len(valid_candidates),
+            "distinct_launch_config_count": len(launch_hashes),
+            "candidate_source_counts": _candidate_source_counts(valid_candidates),
+        },
+        "hard_constraints": {
+            "slo_constraints": dict(workload_profile.slo_constraints or {}),
+            "violations_pruned": [
+                entry for entry in memory_entries + validation_entries + hard_constraint_entries if entry["reason"] in {"invalid_config", "out_of_memory", "memory_estimate_exceeds_available_memory", "violates_user_hard_constraint"}
+            ],
+        },
+        "exact_fresh_candidate_ids": sorted(exact_fresh_ids),
+        "failure_memory_policy": {
+            "artifact": "optimizer_failure_cache.json",
+            "cache_key_policy": "backend_stage_reason_and_serving_config_without_candidate_id",
+            "external_failure_cache_loaded": bool(resume_state and resume_state.failure_cache_entries),
+            "repeat_pruning_available": True,
+            "note": "Resume mode prunes exact serving configs that match a stored previous failure on the same backend and model.",
+        },
+        "pruned_candidates": memory_entries + validation_entries + hard_constraint_entries + prior_entries + synthesis_entries + repeat_entries,
+    }
+
+
+def _prune_user_hard_constraint_violations(
+    candidates: list[ServingConfig],
+    *,
+    workload_profile: WorkloadProfile,
+) -> tuple[list[ServingConfig], list[ValidationRejection]]:
+    constraints = dict(workload_profile.slo_constraints or {})
+    max_memory_mb = _constraint_float(
+        constraints,
+        "max_memory_mb",
+        "max_gpu_memory_mb",
+        "maximum_memory_mb",
+        "maximum_gpu_memory_mb",
+    )
+    power_cap_watts = _constraint_float(
+        constraints,
+        "power_cap_watts",
+        "max_power_watts",
+        "maximum_power_watts",
+    )
+    if max_memory_mb is None and power_cap_watts is None:
+        return candidates, []
+    kept: list[ServingConfig] = []
+    rejections: list[ValidationRejection] = []
+    for config in candidates:
+        reason = _hard_constraint_violation_reason(
+            config,
+            max_memory_mb=max_memory_mb,
+            power_cap_watts=power_cap_watts,
+        )
+        if reason is None:
+            kept.append(config)
+            continue
+        rejections.append(
+            (
+                config,
+                CandidateValidationResult(
+                    config_id=config.id,
+                    valid=False,
+                    reason=reason,
+                ),
+            )
+        )
+    return kept, rejections
+
+
+def _hard_constraint_violation_reason(
+    config: ServingConfig,
+    *,
+    max_memory_mb: float | None,
+    power_cap_watts: float | None,
+) -> str | None:
+    if max_memory_mb is not None and config.estimated_vram_mb is not None and config.estimated_vram_mb > max_memory_mb:
+        return f"Candidate estimated_vram_mb={config.estimated_vram_mb} exceeds user max_memory_mb={max_memory_mb}."
+    if power_cap_watts is not None and config.power_limit_watts is not None and config.power_limit_watts > power_cap_watts:
+        return f"Candidate power_limit_watts={config.power_limit_watts} exceeds user power_cap_watts={power_cap_watts}."
+    return None
+
+
+def _constraint_float(
+    constraints: dict[str, object],
+    *keys: str,
+) -> float | None:
+    for key in keys:
+        value = _optional_float(constraints.get(key))
+        if value is not None and value >= 0:
+            return value
+    return None
+
+
+def _prune_repeat_failed_exact_configs(
+    candidates: list[ServingConfig],
+    *,
+    resume_state: _ManagedResumeState,
+) -> tuple[list[ServingConfig], list[ValidationRejection]]:
+    failed_config_hashes = {
+        _optional_str(entry.get("config_hash")) or stable_payload_hash(entry.get("config"))
+        for entry in resume_state.failure_cache_entries
+        if isinstance(entry.get("config"), dict)
+    }
+    if not failed_config_hashes:
+        return candidates, []
+    kept: list[ServingConfig] = []
+    rejections: list[ValidationRejection] = []
+    for config in candidates:
+        config_hash = stable_payload_hash(_failure_cache_config_payload(config))
+        if config_hash not in failed_config_hashes:
+            kept.append(config)
+            continue
+        rejections.append(
+            (
+                config,
+                CandidateValidationResult(
+                    config_id=config.id,
+                    valid=False,
+                    reason="Candidate repeats a previously failed exact configuration from the resume failure cache.",
+                ),
+            )
+        )
+    return kept, rejections
+
+
+def _synthesis_pruning_entries(synthesis_summary: dict[str, object]) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    records = synthesis_summary.get("candidate_records")
+    if not isinstance(records, list):
+        return entries
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        status = record.get("status")
+        if status != "deduped":
+            continue
+        entries.append(
+            {
+                "candidate_id": _optional_str(record.get("candidate_id")) or "unknown",
+                "stage": "synthesis",
+                "reason": "deduplicated_candidate",
+                "detail": _optional_str(record.get("reason")),
+            }
+        )
+    return entries
+
+
+def _recommendation_ablation_plan(goal: Goal) -> dict[str, object]:
+    ablations = [
+        ("no_evidence_reuse", "Disable exact fresh and stale evidence reuse."),
+        ("no_hardware_awareness", "Generate candidates without GPU memory and hardware shape signals."),
+        ("no_backend_capability_registry", "Assume static backend flags instead of version detected capabilities."),
+        ("no_failure_memory", "Do not reuse optimizer failure cache entries for pruning."),
+        ("random_candidate_order", "Evaluate the same candidates in random order."),
+        ("energy_term_removed", "Remove power and energy terms from scoring."),
+        ("latency_guardrail_removed", "Remove tail latency guardrail from scoring."),
+        ("only_backend_defaults", "Evaluate only backend default control candidates."),
+        ("generic_random_search_same_trials", "Compare against random search with the same trial count."),
+        ("generic_grid_search_same_trials", "Compare against grid search with the same trial count."),
+        ("generic_bayesian_tuner_same_trials", "Compare against a generic Bayesian tuner with the same trial count."),
+    ]
+    return {
+        "schema_version": "recommendation-ablation-plan/v1",
+        "goal": goal.value,
+        "status": "planned_not_run",
+        "ablations": [
+            {
+                "name": name,
+                "description": description,
+                "enabled_in_this_run": False,
+            }
+            for name, description in ablations
+        ],
+        "notes": [
+            "This artifact records the ablations required for the paper matrix.",
+            "Managed evaluation writes this plan during ordinary runs, but ablation execution is controlled by explicit experiment commands.",
+        ],
+    }
+
+
+def _enriched_optimizer_quality(
+    optimizer_quality: dict[str, Any],
+    *,
+    trial_count: int | None,
+    failed_trials_avoided_by_pruning: int,
+    evidence_hit_count: int,
+    evidence_reuse_candidate_count: int,
+    pruned_candidate_count: int,
+) -> dict[str, Any]:
+    quality = dict(optimizer_quality or {})
+    metrics = dict(quality.get("recommendation_quality_metrics") or {})
+    metrics.update(
+        {
+            "trials_required_to_reach_recommendation": trial_count,
+            "number_of_failed_trials_avoided_by_pruning": failed_trials_avoided_by_pruning,
+            "number_of_trials_avoided_by_pruning": pruned_candidate_count,
+            "evidence_reuse_improved_search_speed": bool(evidence_hit_count or evidence_reuse_candidate_count),
+            "evidence_reuse_candidate_count": evidence_reuse_candidate_count,
+            "evidence_hit_count": evidence_hit_count,
+            "recommendation_changed_after_new_evidence": None,
+        }
+    )
+    quality["recommendation_quality_metrics"] = metrics
+    return quality
+
+
+def _is_backend_default_control(config: ServingConfig) -> bool:
+    extra = config.extra or {}
+    return bool(extra.get("backend_defaults") is True or extra.get("baseline") is True)
+
+
+def _is_conservative_candidate(config: ServingConfig) -> bool:
+    extra = config.extra or {}
+    return bool(extra.get("baseline") is True or config.max_batch_size <= 1 or (config.estimated_vram_mb or 0) > 0)
+
+
+def _profile_has_request_shape(profile: WorkloadProfile) -> bool:
+    return any(
+        value is not None
+        for value in (
+            profile.input_tokens,
+            profile.output_tokens,
+            profile.concurrency,
+            profile.num_requests,
+            profile.max_new_tokens,
+            profile.dataset,
+        )
+    )
+
+
+def _int_from_mapping(mapping: dict[str, Any], key: str) -> int:
+    value = mapping.get(key)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _canonicalize_valid_candidates(
@@ -4190,6 +4831,42 @@ def _benchmark_config(
     )
 
 
+def _workload_description(workload: WorkloadConfig) -> dict[str, object]:
+    extra = dict(workload.extra or {})
+    profile = extra.get("workload_profile") if isinstance(extra.get("workload_profile"), dict) else {}
+    token_distribution = profile.get("token_distribution") if isinstance(profile.get("token_distribution"), dict) else {}
+    input_distribution = token_distribution.get("input_tokens") if isinstance(token_distribution.get("input_tokens"), dict) else {}
+    output_distribution = token_distribution.get("output_tokens") if isinstance(token_distribution.get("output_tokens"), dict) else {}
+    dataset = workload.dataset or str(profile.get("dataset") or "synthetic")
+    sampling_parameters = extra.get("sampling_parameters") if isinstance(extra.get("sampling_parameters"), dict) else {}
+    return {
+        "schema_version": "workload-description/v1",
+        "workload_name": workload.workload_id,
+        "dataset_source": extra.get("dataset_source") or dataset,
+        "dataset_license_status": extra.get("dataset_license") or ("synthetic" if "synthetic" in str(dataset).lower() else "unknown"),
+        "number_prompts": workload.num_prompts or workload.num_requests,
+        "prompt_length_distribution": input_distribution or _length_distribution(workload.input_length),
+        "requested_output_length_distribution": output_distribution or _length_distribution(workload.output_length or workload.max_new_tokens),
+        "actual_output_length_distribution": {},
+        "sampling_parameters": sampling_parameters or {"temperature": 0, "max_tokens": workload.max_new_tokens},
+        "concurrency_schedule": {"type": "fixed", "concurrency": workload.concurrency},
+        "request_rate_schedule": {"type": "fixed", "request_rate": workload.request_rate},
+        "warmup_duration_s": workload.warmup_duration_s,
+        "measurement_duration_s": workload.benchmark_duration_s,
+        "warmup_requests": workload.warmup_requests,
+        "random_seed": extra.get("random_seed"),
+        "streaming": workload.stream,
+        "prefix_reuse": _optional_bool(extra.get("prefix_reuse"), default=False),
+        "synthetic_or_real": extra.get("synthetic_or_real") or ("synthetic" if "synthetic" in str(dataset).lower() else "unknown"),
+    }
+
+
+def _length_distribution(length: int | None) -> dict[str, object]:
+    if length is None:
+        return {"source": "unavailable", "count": 0}
+    return {"source": "configured", "p50": length, "p95": length, "p99": length}
+
+
 def _benchmark_config_from_workload(
     *,
     workload: WorkloadConfig,
@@ -4197,6 +4874,9 @@ def _benchmark_config_from_workload(
     model: str,
     trial: int,
     launch_provenance: dict[str, object] | None = None,
+    parent_run_id: str | None = None,
+    objective_mode: str | None = None,
+    model_metadata: ModelCapabilityMetadata | None = None,
 ) -> EndpointBenchmarkConfig:
     run_id = workload.workload_id if workload.trials == 1 else f"{workload.workload_id}-trial-{trial + 1:02d}"
     launch_provenance = launch_provenance or {}
@@ -4232,6 +4912,20 @@ def _benchmark_config_from_workload(
         backend_unavailable_values=_dict_payload(launch_provenance.get("backend_unavailable_values")),
         backend_flag_aliases=_dict_payload(launch_provenance.get("backend_flag_aliases")),
         backend_capabilities_help_hash=_optional_str(launch_provenance.get("backend_capabilities_help_hash")),
+        experiment_campaign_id=_campaign_id(workload, parent_run_id),
+        parent_run_id=parent_run_id,
+        objective_mode=objective_mode,
+        candidate_source=_optional_str(workload.extra.get("candidate_source")) or "default",
+        model_revision=model_metadata.revision if model_metadata is not None else None,
+        model_access_status=model_metadata.model_access_status if model_metadata is not None else None,
+        tokenizer_id=model_metadata.tokenizer_id if model_metadata is not None else model,
+        tokenizer_revision=model_metadata.tokenizer_revision if model_metadata is not None else None,
+        workload_description=_workload_description(workload),
+        backend_health_status=_optional_str(launch_provenance.get("backend_health_status")),
+        backend_started_at=_optional_str(launch_provenance.get("backend_started_at")),
+        backend_ready_at=_optional_str(launch_provenance.get("backend_ready_at")),
+        backend_startup_time_s=_optional_float(launch_provenance.get("backend_startup_time_s")),
+        model_load_time_s=_optional_float(launch_provenance.get("model_load_time_s")),
     )
 
 
@@ -4320,6 +5014,25 @@ def _optional_bool(value: object, *, default: bool = False) -> bool:
     return default
 
 
+def _goal_value(goal: Goal | str) -> str:
+    return goal.value if isinstance(goal, Goal) else str(goal)
+
+
+def _campaign_id(workload: WorkloadConfig, parent_run_id: str | None) -> str | None:
+    return _optional_str(workload.extra.get("experiment_campaign_id")) or os.environ.get("SERVE_OPTIMIZE_CAMPAIGN_ID") or parent_run_id
+
+
+def _iso_duration_seconds(started_at: str | None, ended_at: str | None) -> float | None:
+    if not started_at or not ended_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(ended_at)
+    except ValueError:
+        return None
+    return max(0.0, (end - start).total_seconds())
+
+
 def _optional_str(value: object) -> str | None:
     if value is None:
         return None
@@ -4340,15 +5053,18 @@ def _write_optimizer_failure_cache(
         failure_reason = _failure_reason_from_details(failure.details)
         stage_counts[failure.stage] = stage_counts.get(failure.stage, 0) + 1
         reason_counts[failure_reason] = reason_counts.get(failure_reason, 0) + 1
+        config_payload = _failure_cache_config_payload(config)
         cache_payload = {
             "backend": config.backend if config is not None else None,
             "stage": failure.stage,
             "reason": failure_reason,
-            "config": _failure_cache_config_payload(config),
+            "config": config_payload,
         }
         entries.append(
             {
                 "cache_key": stable_payload_hash(cache_payload),
+                "config_hash": stable_payload_hash(config_payload),
+                "config": config_payload,
                 "config_id": failure.config_id,
                 "backend": config.backend if config is not None else None,
                 "stage": failure.stage,
@@ -4404,6 +5120,10 @@ def _candidate_failure(
 
 def _validation_failure_reason(validation: CandidateValidationResult) -> str:
     reason = validation.reason or ""
+    if "previously failed exact configuration" in reason:
+        return "previous_failed_exact_configuration"
+    if "exceeds user" in reason:
+        return "violates_user_hard_constraint"
     classified = _failure_reason_from_text(reason)
     if classified is not None:
         return classified

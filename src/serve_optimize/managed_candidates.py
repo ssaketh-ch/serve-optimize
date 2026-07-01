@@ -36,6 +36,8 @@ class ManagedCandidateGenerationResult:
     candidate_source_counts: dict[str, int]
     capability_filtered_count: int = 0
     invalid_quantization_filtered_count: int = 0
+    memory_filtered_count: int = 0
+    memory_filtered_candidates: list[dict[str, object]] = field(default_factory=list)
     safe_baseline_added: bool = False
 
 
@@ -144,6 +146,7 @@ def generate_managed_candidates_from_capabilities(
             continue
         candidates.append(_from_legacy(config, source="legacy_filtered"))
 
+    candidates, memory_filtered_candidates = _filter_by_memory_estimate(candidates, context.hardware)
     candidates = _dedupe_candidates(candidates)
     selected = candidates[: max(1, limit)]
     source_counts = Counter(str((config.extra or {}).get("candidate_source") or "unknown") for config in selected)
@@ -152,6 +155,8 @@ def generate_managed_candidates_from_capabilities(
         candidate_source_counts=dict(sorted(source_counts.items())),
         capability_filtered_count=capability_filtered_count,
         invalid_quantization_filtered_count=invalid_quantization_filtered_count,
+        memory_filtered_count=len(memory_filtered_candidates),
+        memory_filtered_candidates=memory_filtered_candidates,
         safe_baseline_added=bool(selected and selected[0].extra.get("candidate_source") == "safe_baseline"),
     )
 
@@ -268,11 +273,14 @@ def _generate_sglang_candidates(
             _with_profile(config, _profile_payload(context))
             for config in candidates
         ]
+    candidates, memory_filtered_candidates = _filter_by_memory_estimate(candidates, context.hardware)
     selected = _dedupe_candidates(candidates)[: max(1, limit)]
     source_counts = Counter(str((config.extra or {}).get("candidate_source") or "unknown") for config in selected)
     return ManagedCandidateGenerationResult(
         candidates=selected,
         candidate_source_counts=dict(sorted(source_counts.items())),
+        memory_filtered_count=len(memory_filtered_candidates),
+        memory_filtered_candidates=memory_filtered_candidates,
         safe_baseline_added=bool(selected and selected[0].extra.get("candidate_source") == "safe_baseline"),
     )
 
@@ -642,6 +650,35 @@ def _from_legacy(config: ServingConfig, *, source: str) -> ServingConfig:
         notes=notes,
         extra=extra,
     )
+
+
+def _filter_by_memory_estimate(
+    candidates: list[ServingConfig],
+    hardware: HardwareSnapshot,
+) -> tuple[list[ServingConfig], list[dict[str, object]]]:
+    gpu = hardware.best_gpu
+    if gpu is None or gpu.total_memory_mb is None:
+        return candidates, []
+    conservative_limit_mb = int(gpu.total_memory_mb * 0.94)
+    kept: list[ServingConfig] = []
+    pruned: list[dict[str, object]] = []
+    for config in candidates:
+        if config.estimated_vram_mb is None or config.estimated_vram_mb <= conservative_limit_mb:
+            kept.append(config)
+            continue
+        pruned.append(
+            {
+                "candidate_id": config.id,
+                "stage": "candidate_generation",
+                "reason": "memory_estimate_exceeds_available_memory",
+                "detail": "Estimated VRAM exceeded the conservative available memory limit.",
+                "estimated_vram_mb": config.estimated_vram_mb,
+                "conservative_limit_mb": conservative_limit_mb,
+                "gpu_total_memory_mb": gpu.total_memory_mb,
+                "candidate_source": (config.extra or {}).get("candidate_source"),
+            }
+        )
+    return kept, pruned
 
 
 def _dedupe_candidates(candidates: list[ServingConfig]) -> list[ServingConfig]:

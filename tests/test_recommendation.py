@@ -184,17 +184,30 @@ def test_compute_optimizer_quality_reports_bounded_regret() -> None:
         ranked_scores=[_score("best", 0.9), _score("selected", 0.6)],
         candidate_table=[
             {"candidate_id": "best", "source": "managed_measured", "total_tokens_s": 100.0, "p95_latency_s": 0.5, "score": 0.9, "status": "eligible"},
-            {"candidate_id": "selected", "source": "managed_measured", "total_tokens_s": 80.0, "p95_latency_s": 0.7, "score": 0.6, "status": "eligible"},
+            {"candidate_id": "selected", "source": "managed_measured", "total_tokens_s": 80.0, "p95_latency_s": 0.7, "score": 0.6, "status": "eligible", "pareto_optimal": True},
         ],
+        trial_count=2,
+        failed_trials_avoided_by_pruning=1,
+        evidence_hit_count=1,
+        pruned_candidate_count=3,
     )
 
     assert quality["scope"] == "evaluated_candidates_only"
     assert quality["baseline_type"] == "bounded_evaluated_candidate_baseline"
+    assert quality["objective_formula"]["objective"] == "balanced"
     assert quality["search_regret"]["score_gap_to_best"] == pytest.approx(0.3)
     assert quality["search_regret"]["relative_score_regret"] == pytest.approx(1 / 3)
     assert quality["metric_regret_percent"]["throughput"] == pytest.approx(20.0)
     assert quality["metric_regret_percent"]["p95_latency"] == pytest.approx(40.0)
     assert quality["policy_coverage"]["candidate_source_counts"]["managed_measured"] == 2
+    metrics = quality["recommendation_quality_metrics"]
+    assert metrics["oracle_best_candidate"] == "best"
+    assert metrics["rank_of_recommended_candidate"] == 2
+    assert metrics["recommended_candidate_on_pareto_frontier"] is True
+    assert metrics["trials_required_to_reach_recommendation"] == 2
+    assert metrics["number_of_failed_trials_avoided_by_pruning"] == 1
+    assert metrics["number_of_trials_avoided_by_pruning"] == 3
+    assert metrics["evidence_reuse_improved_search_speed"] is True
 
 
 def test_evaluated_set_fidelity_missing_power_metric_winners() -> None:

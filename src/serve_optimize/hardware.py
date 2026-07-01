@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import platform
 import re
 import socket
@@ -30,6 +31,14 @@ def detect_hardware() -> HardwareSnapshot:
         detected_at=datetime.now(timezone.utc).isoformat(),
         gpus=gpus,
         notes=notes,
+        gpu_count=len(gpus),
+        interconnect=_detect_interconnect(len(gpus), notes),
+        cpu_model=_detect_cpu_model(),
+        cpu_core_count=os.cpu_count(),
+        system_memory_mb=_detect_system_memory_mb(),
+        storage_type=_detect_storage_type(notes),
+        operating_system=platform.platform(),
+        container_or_virtual_environment=_environment_details(),
     )
 
 
@@ -205,6 +214,85 @@ def _decode(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _detect_cpu_model() -> str | None:
+    cpuinfo = "/proc/cpuinfo"
+    try:
+        with open(cpuinfo, encoding="utf-8") as handle:
+            for line in handle:
+                if line.lower().startswith(("model name", "hardware", "processor")):
+                    _, _, value = line.partition(":")
+                    value = value.strip()
+                    if value:
+                        return value
+    except OSError:
+        pass
+    processor = platform.processor()
+    return processor or None
+
+
+def _detect_system_memory_mb() -> int | None:
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(int(parts[1]) / 1024)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _detect_storage_type(notes: list[str]) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["findmnt", "-no", "FSTYPE,SOURCE", "/"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception as exc:
+        notes.append(f"storage detection unavailable: {exc.__class__.__name__}")
+        return None
+    value = completed.stdout.strip()
+    return value or None
+
+
+def _detect_interconnect(gpu_count: int, notes: list[str]) -> str | None:
+    if gpu_count <= 1:
+        return "single_gpu"
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception as exc:
+        notes.append(f"interconnect detection unavailable: {exc.__class__.__name__}")
+        return None
+    output = completed.stdout.strip()
+    return output or None
+
+
+def _environment_details() -> dict[str, Any]:
+    container_markers = []
+    for path in ("/.dockerenv", "/run/.containerenv"):
+        if os.path.exists(path):
+            container_markers.append(path)
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    return {
+        "virtual_env": virtual_env,
+        "python_prefix": sys.prefix,
+        "python_base_prefix": getattr(sys, "base_prefix", sys.prefix),
+        "in_virtual_env": bool(virtual_env) or sys.prefix != getattr(sys, "base_prefix", sys.prefix),
+        "container": os.environ.get("container"),
+        "container_markers": container_markers,
+    }
 
 
 def _format_compute_capability(value: Any) -> str | None:

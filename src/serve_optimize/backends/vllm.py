@@ -36,6 +36,12 @@ from serve_optimize.schemas import (
 PopenFactory = Callable[..., subprocess.Popen[Any]]
 KillpgFn = Callable[[int, int], None]
 RELEVANT_VLLM_FLAGS = (
+    "--dtype",
+    "--gpu-memory-utilization",
+    "--max-model-len",
+    "--max-num-seqs",
+    "--tensor-parallel-size",
+    "--quantization",
     "--block-size",
     "--kv-cache-dtype",
     "--enforce-eager",
@@ -46,6 +52,8 @@ RELEVANT_VLLM_FLAGS = (
     "--cuda-graph-sizes",
     "--enable-prefix-caching",
     "--no-enable-prefix-caching",
+    "--cpu-offload-gb",
+    "--swap-space",
 )
 
 
@@ -409,8 +417,11 @@ def parse_vllm_argument_capabilities(
     version: str | None = None,
 ) -> VLLMArgumentCapabilities:
     flags = frozenset(re.findall(r"--[A-Za-z0-9][A-Za-z0-9_-]*", help_text))
-    choices = _parse_option_choices(help_text, "--kv-cache-dtype")
-    option_choices = {"--kv-cache-dtype": frozenset(choices)} if choices else {}
+    option_choices: dict[str, frozenset[str]] = {}
+    for flag in ("--dtype", "--quantization", "--kv-cache-dtype"):
+        choices = _parse_option_choices(help_text, flag)
+        if choices:
+            option_choices[flag] = frozenset(choices)
     help_hash = _vllm_capability_hash(flags, option_choices)
     return VLLMArgumentCapabilities(
         executable=executable,

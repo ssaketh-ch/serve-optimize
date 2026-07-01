@@ -38,6 +38,7 @@ from serve_optimize.managed import (
     _client_saturation_summary,
     _generate_managed_candidates,
     _load_sufficiency_summary,
+    _benchmark_config_from_workload,
     _managed_measured_metrics,
     _managed_telemetry_metrics,
     _measurement_metrics,
@@ -58,6 +59,7 @@ from serve_optimize.schemas import (
     HealthCheckResult,
     ManagedLifecycleRecord,
     ManagedRunSummary,
+    ModelCapabilityMetadata,
     PowerSampleRecord,
     PriorCandidate,
     PriorResult,
@@ -468,6 +470,7 @@ def test_sglang_help_parser_detects_flags_and_hash() -> None:
     assert capabilities.tensor_parallel_flag() == "--tp-size"
     assert capabilities.choices_for("--dtype") == frozenset({"auto", "float16", "bfloat16"})
     assert capabilities.choices_for("--quantization") == frozenset({"awq", "gptq"})
+    assert capabilities.choices_for("--schedule-policy") == frozenset({"fcfs", "lpm"})
     assert capabilities.help_hash == parse_sglang_argument_capabilities(_sglang_help_text()).help_hash
 
 
@@ -742,6 +745,8 @@ def test_vllm_command_omits_null_engine_options(tmp_path) -> None:
 def test_vllm_help_parser_detects_engine_flags_and_choices() -> None:
     caps = parse_vllm_argument_capabilities(
         """
+        --dtype {auto,half,float16,bfloat16,float32}
+        --quantization {awq,gptq}
         --block-size BLOCK_SIZE
         --kv-cache-dtype {auto,fp8,fp8_e4m3,fp8_e5m2,fp8_inc}
         --max-num-batched-tokens MAX_NUM_BATCHED_TOKENS
@@ -756,6 +761,8 @@ def test_vllm_help_parser_detects_engine_flags_and_choices() -> None:
     assert caps.supports("--block-size")
     assert caps.supports("--cuda-graph-sizes")
     assert caps.cudagraph_capture_flag() == "--cuda-graph-sizes"
+    assert caps.choices_for("--dtype") == frozenset({"auto", "half", "float16", "bfloat16", "float32"})
+    assert caps.choices_for("--quantization") == frozenset({"awq", "gptq"})
     assert caps.choices_for("--kv-cache-dtype") == frozenset({"auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"})
 
 
@@ -921,6 +928,8 @@ def test_launch_oom_records_out_of_memory_reason(tmp_path) -> None:
     assert failures[0]["stage"] == "launch"
     assert failures[0]["details"]["reason"] == "out_of_memory"
     assert failure_cache["summary"]["reason_counts"]["out_of_memory"] == 1
+    assert failure_cache["entries"][0]["config_hash"]
+    assert failure_cache["entries"][0]["config"]["model_id"] == "model-path"
 
 
 def test_launch_value_error_is_recorded_as_invalid_config(tmp_path) -> None:
@@ -1893,6 +1902,8 @@ def test_safe_baseline_survives_prior_pruning(tmp_path) -> None:
     )
 
     assert any(config.extra.get("candidate_source") == "safe_baseline" for config in result.candidates)
+    assert all(entry["reason"] == "not_selected_by_prior_policy" for entry in result.summary["pruned_candidates"])
+    assert result.summary["retention_policy"]["max_prior_candidates"] == 1
 
 
 def test_internal_generation_creates_launch_group_for_bf16_local_model(tmp_path, monkeypatch) -> None:
@@ -1989,6 +2000,10 @@ def test_internal_generation_limit_five_keeps_useful_valid_candidates(tmp_path, 
     run_dir = tmp_path / "runs" / summary.run_id
     managed_run = json.loads((run_dir / "managed_run.json").read_text(encoding="utf-8"))
     launch_groups = json.loads((run_dir / "launch_groups.json").read_text(encoding="utf-8"))
+    capability_registry = json.loads((run_dir / "backend_capability_registry.json").read_text(encoding="utf-8"))
+    generation_report = json.loads((run_dir / "candidate_generation_report.json").read_text(encoding="utf-8"))
+    pruning_report = json.loads((run_dir / "candidate_pruning_report.json").read_text(encoding="utf-8"))
+    ablation_plan = json.loads((run_dir / "recommendation_ablation_plan.json").read_text(encoding="utf-8"))
     failures = [
         json.loads(line)
         for line in (run_dir / "candidate_failures.jsonl").read_text(encoding="utf-8").splitlines()
@@ -2004,7 +2019,61 @@ def test_internal_generation_limit_five_keeps_useful_valid_candidates(tmp_path, 
     assert all(failure["stage"] != "validation" for failure in failures)
     assert managed_run["candidate_source_counts"]["safe_baseline"] == 1
     assert managed_run["valid_candidate_count_before_prior_pruning"] == 5
+    assert managed_run["artifacts"]["backend_capability_registry_json"].endswith("backend_capability_registry.json")
+    assert managed_run["artifacts"]["candidate_generation_report_json"].endswith("candidate_generation_report.json")
+    assert managed_run["artifacts"]["candidate_pruning_report_json"].endswith("candidate_pruning_report.json")
+    assert managed_run["artifacts"]["recommendation_ablation_plan_json"].endswith("recommendation_ablation_plan.json")
+    assert managed_run["backend_capability_registry"]["schema_version"] == "backend-capability-registry/v1"
+    assert managed_run["candidate_generation_report"]["requirements"]["backend_defaults"] is True
+    assert managed_run["candidate_pruning_report"]["kept_backend_default_control"] is True
+    assert capability_registry["covered_parameter_families"]["memory_utilization"]["supported"] is True
+    assert capability_registry["covered_parameter_families"]["kv_cache_type"]["supported"] is True
+    assert capability_registry["covered_parameter_families"]["cpu_offload"]["supported"] is True
+    assert generation_report["requirements"]["hardware_memory_limits"] is True
+    assert generation_report["requirements"]["model_size_and_context_length"] is True
+    assert generation_report["requirements"]["backend_specific_parameter_ranges"] is True
+    assert generation_report["requirements"]["objective_specific_preferences"] is True
+    assert generation_report["generation_filters"]["memory_filtered_count"] >= 0
+    assert pruning_report["memory_pruned_candidate_count"] >= 0
+    assert pruning_report["kept_conservative_candidate"] is True
+    assert isinstance(pruning_report["pruned_candidates"], list)
+    ablation_names = {item["name"] for item in ablation_plan["ablations"]}
+    assert "no_evidence_reuse" in ablation_names
+    assert "generic_random_search_same_trials" in ablation_names
+    assert managed_run["optimizer_quality"]["objective_formula"]["objective"] == "balanced"
+    assert managed_run["optimizer_quality"]["recommendation_quality_metrics"]["trials_required_to_reach_recommendation"] >= 1
     assert all(group["launch_config"]["quantization"] == "none" for group in launch_groups)
+
+
+def test_user_memory_constraint_prunes_candidate_before_launch(tmp_path) -> None:
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path,
+        telemetry="none",
+        adapter=_SuccessAdapter(),
+        request_fn=_ok_request_with_tokens,
+        candidate_provider=lambda: [_config(estimated_vram_mb=2048)],
+        evidence_write=False,
+        prior_provider=_NoPriorProvider(),
+        workload_profile=WorkloadProfile(slo_constraints={"max_memory_mb": 1}),
+    )
+
+    run_dir = tmp_path / summary.run_id
+    pruning_report = json.loads((run_dir / "candidate_pruning_report.json").read_text(encoding="utf-8"))
+    failures = _jsonl_rows(run_dir / "candidate_failures.jsonl")
+
+    assert summary.completed_candidate_count == 0
+    assert pruning_report["user_constraint_pruned_candidate_count"] == 1
+    assert pruning_report["pruned_candidates"][0]["reason"] == "violates_user_hard_constraint"
+    assert failures[0]["details"]["reason"] == "violates_user_hard_constraint"
 
 
 def test_synthesized_candidate_appears_with_source_metadata(tmp_path, monkeypatch) -> None:
@@ -2693,6 +2762,79 @@ def test_workload_profile_preserves_dataset_distribution_and_slos() -> None:
             telemetry="none",
         )
     )
+
+
+def test_benchmark_config_from_workload_carries_data_collection_metadata() -> None:
+    workload = serving_config_to_workload_config(
+        _config(
+            extra={
+                "workload_concurrency": 2,
+                "num_requests": 8,
+                "warmup_requests": 2,
+                "candidate_source": "safe_baseline",
+                "dataset_source": "synthetic-test",
+                "dataset_license": "synthetic",
+                "experiment_campaign_id": "campaign-1",
+                "random_seed": 123,
+                "workload_profile": {
+                    "profile_name": "short",
+                    "dataset": "synthetic-short",
+                    "token_distribution": {
+                        "input_tokens": {"p50": 128, "p95": 256},
+                        "output_tokens": {"p50": 64, "p95": 128},
+                    },
+                },
+            }
+        ),
+        trials=1,
+        request_timeout_s=30.0,
+        telemetry="none",
+    )
+    metadata = ModelCapabilityMetadata(
+        model_id="model-path",
+        revision="model-revision",
+        model_access_status="public",
+        tokenizer_id="tokenizer-path",
+        tokenizer_revision="tokenizer-revision",
+    )
+    config = _benchmark_config_from_workload(
+        workload=workload,
+        base_url="http://127.0.0.1:8000",
+        model="model-path",
+        trial=0,
+        parent_run_id="managed-run",
+        objective_mode=Goal.BALANCED.value,
+        model_metadata=metadata,
+        launch_provenance={
+            "backend_name": "sglang",
+            "backend_version": "0.5",
+            "backend_launch_command": ["python", "-m", "sglang.launch_server"],
+            "backend_health_status": "healthy",
+            "backend_started_at": "2026-06-26T00:00:00+00:00",
+            "backend_ready_at": "2026-06-26T00:00:05+00:00",
+            "backend_startup_time_s": 5.0,
+            "model_load_time_s": 5.0,
+        },
+    )
+
+    assert config.experiment_campaign_id == "campaign-1"
+    assert config.parent_run_id == "managed-run"
+    assert config.objective_mode == Goal.BALANCED.value
+    assert config.candidate_source == "safe_baseline"
+    assert config.backend_name == "sglang"
+    assert config.backend_version == "0.5"
+    assert config.backend_launch_command == ["python", "-m", "sglang.launch_server"]
+    assert config.backend_health_status == "healthy"
+    assert config.backend_startup_time_s == pytest.approx(5.0)
+    assert config.model_revision == "model-revision"
+    assert config.model_access_status == "public"
+    assert config.tokenizer_id == "tokenizer-path"
+    assert config.tokenizer_revision == "tokenizer-revision"
+    assert config.workload_description["dataset_source"] == "synthetic-test"
+    assert config.workload_description["dataset_license_status"] == "synthetic"
+    assert config.workload_description["prompt_length_distribution"]["p50"] == 128
+    assert config.workload_description["requested_output_length_distribution"]["p95"] == 128
+    assert config.workload_description["random_seed"] == 123
 
 
 def test_named_workload_profile_controls_load_across_candidates() -> None:
@@ -3981,6 +4123,12 @@ def test_evidence_list_cli_help() -> None:
 
 def _all_engine_caps() -> VLLMArgumentCapabilities:
     return _caps(
+        "--dtype",
+        "--gpu-memory-utilization",
+        "--max-model-len",
+        "--max-num-seqs",
+        "--tensor-parallel-size",
+        "--quantization",
         "--block-size",
         "--kv-cache-dtype",
         "--enforce-eager",
@@ -3990,6 +4138,10 @@ def _all_engine_caps() -> VLLMArgumentCapabilities:
         "--max-cudagraph-capture-size",
         "--enable-prefix-caching",
         "--no-enable-prefix-caching",
+        "--cpu-offload-gb",
+        "--swap-space",
+        dtype_choices=("auto", "half", "float16", "bfloat16", "float32"),
+        quantization_choices=("awq", "gptq"),
         kv_cache_dtype_choices=("auto", "float16", "bfloat16"),
     )
 
@@ -4016,8 +4168,19 @@ def _assert_active_engine_fields_are_rendered(candidate_row: dict[str, object], 
         assert "--no-enable-prefix-caching" in command
 
 
-def _caps(*flags: str, kv_cache_dtype_choices: tuple[str, ...] = ()) -> VLLMArgumentCapabilities:
-    option_choices = {"--kv-cache-dtype": frozenset(kv_cache_dtype_choices)} if kv_cache_dtype_choices else {}
+def _caps(
+    *flags: str,
+    dtype_choices: tuple[str, ...] = (),
+    quantization_choices: tuple[str, ...] = (),
+    kv_cache_dtype_choices: tuple[str, ...] = (),
+) -> VLLMArgumentCapabilities:
+    option_choices = {}
+    if dtype_choices:
+        option_choices["--dtype"] = frozenset(dtype_choices)
+    if quantization_choices:
+        option_choices["--quantization"] = frozenset(quantization_choices)
+    if kv_cache_dtype_choices:
+        option_choices["--kv-cache-dtype"] = frozenset(kv_cache_dtype_choices)
     return VLLMArgumentCapabilities(
         executable="vllm",
         version="test",
@@ -4039,6 +4202,7 @@ usage: python -m sglang.launch_server [options]
   --tp-size TP_SIZE
   --mem-fraction-static MEM_FRACTION_STATIC
   --max-running-requests MAX_RUNNING_REQUESTS
+  --schedule-policy {fcfs,lpm}
   --quantization {awq,gptq}
   --chunked-prefill-size CHUNKED_PREFILL_SIZE
   --disable-radix-cache
@@ -4062,9 +4226,13 @@ def _sglang_caps(*flags: str) -> SGLangArgumentCapabilities:
             "--tp-size",
             "--mem-fraction-static",
             "--max-running-requests",
+            "--schedule-policy",
             "--quantization",
             "--chunked-prefill-size",
             "--disable-radix-cache",
+            "--enable-radix-cache",
+            "--disable-prefix-cache",
+            "--enable-prefix-cache",
             "--disable-cuda-graph",
             "--cuda-graph-max-bs",
             "--served-model-name",
@@ -4080,6 +4248,7 @@ def _sglang_caps(*flags: str) -> SGLangArgumentCapabilities:
         option_choices={
             "--dtype": frozenset({"auto", "float16", "bfloat16"}),
             "--quantization": frozenset({"awq", "gptq"}),
+            "--schedule-policy": frozenset({"fcfs", "lpm"}),
         },
         help_hash="sglang-help-hash",
         detection_status="success",

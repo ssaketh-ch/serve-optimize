@@ -57,6 +57,7 @@ def infer_model_capability_metadata(
             config_path,
             is_local_path=True,
             source_label="Local",
+            access_status="public",
         )
     config_path, notes, warnings = _resolve_remote_config_path(
         model_id,
@@ -67,6 +68,8 @@ def infer_model_capability_metadata(
             model_id=model_id,
             metadata_known=False,
             is_local_path=False,
+            model_access_status=_model_access_status_from_messages([*notes, *warnings]),
+            tokenizer_id=model_id,
             notes=notes or ["Remote model metadata is unavailable."],
             warnings=warnings,
         )
@@ -76,6 +79,7 @@ def infer_model_capability_metadata(
         is_local_path=False,
         source_label="Remote",
         notes=notes,
+        access_status=_model_access_status_from_messages(notes),
     )
 
 
@@ -86,13 +90,19 @@ def _metadata_from_config(
     is_local_path: bool,
     source_label: str,
     notes: list[str] | None = None,
+    access_status: str | None = None,
 ) -> ModelCapabilityMetadata:
+    revision = _revision_from_config_path(config_path)
     if config_path.name != "config.json" or not config_path.exists():
         return ModelCapabilityMetadata(
             model_id=model_id,
             metadata_known=False,
             is_local_path=is_local_path,
             config_path=str(config_path),
+            revision=revision,
+            model_access_status="missing_local_files" if is_local_path else access_status,
+            tokenizer_id=model_id,
+            tokenizer_revision=revision,
             notes=notes or [],
             warnings=[f"{source_label} model config.json was not found."],
         )
@@ -104,6 +114,10 @@ def _metadata_from_config(
             metadata_known=False,
             is_local_path=is_local_path,
             config_path=str(config_path),
+            revision=revision,
+            model_access_status=access_status,
+            tokenizer_id=model_id,
+            tokenizer_revision=revision,
             notes=notes or [],
             warnings=[f"{source_label} model config.json could not be read: {exc.__class__.__name__}: {exc}"],
         )
@@ -117,6 +131,10 @@ def _metadata_from_config(
         metadata_known=True,
         is_local_path=is_local_path,
         config_path=str(config_path),
+        revision=revision,
+        model_access_status=access_status or "public",
+        tokenizer_id=model_id,
+        tokenizer_revision=revision,
         torch_dtype=str(torch_dtype) if torch_dtype is not None else None,
         quantization_method=str(quant_method).lower() if quant_method is not None else None,
         quantization_config=quantization_config,
@@ -154,6 +172,35 @@ def _resolve_remote_config_path(
             note = "Remote model config was downloaded before candidate generation."
         return Path(path), [note], warnings
     return None, ["Remote model config was not found in the local Hub cache."], warnings
+
+
+def _revision_from_config_path(config_path: Path) -> str | None:
+    parts = config_path.parts
+    if "snapshots" in parts:
+        index = parts.index("snapshots")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return None
+
+
+def _model_access_status_from_messages(messages: list[str]) -> str:
+    text = " ".join(messages).lower()
+    gated = "gated" in text
+    if any(marker in text for marker in ("unauthorized", "forbidden", "401", "403", "access denied")):
+        return "gated_denied"
+    if gated and any(marker in text for marker in ("cache", "downloaded", "read")):
+        return "gated_approved"
+    if gated:
+        return "gated_denied"
+    if any(marker in text for marker in ("not found", "404", "missing")):
+        return "missing_local_files"
+    if any(marker in text for marker in ("download failed", "connection", "timeout")):
+        return "download_failed"
+    if "downloaded" in text:
+        return "public"
+    if "cache" in text:
+        return "public"
+    return "public"
 
 
 def _parse_parameter_count(model_id: str) -> float:

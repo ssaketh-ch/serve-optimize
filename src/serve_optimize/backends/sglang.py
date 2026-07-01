@@ -46,9 +46,15 @@ RELEVANT_SGLANG_FLAGS = (
     "--tensor-parallel-size",
     "--mem-fraction-static",
     "--max-running-requests",
+    "--schedule-policy",
+    "--scheduler-policy",
+    "--schedule-conservativeness",
     "--quantization",
     "--chunked-prefill-size",
     "--disable-radix-cache",
+    "--enable-radix-cache",
+    "--disable-prefix-cache",
+    "--enable-prefix-cache",
     "--disable-cuda-graph",
     "--cuda-graph-max-bs",
     "--served-model-name",
@@ -488,12 +494,10 @@ def parse_sglang_argument_capabilities(
 ) -> SGLangArgumentCapabilities:
     flags = frozenset(re.findall(r"--[A-Za-z0-9][A-Za-z0-9_-]*", help_text))
     option_choices: dict[str, frozenset[str]] = {}
-    dtype_choices = _parse_option_choices(help_text, "--dtype")
-    if dtype_choices:
-        option_choices["--dtype"] = frozenset(dtype_choices)
-    quantization_choices = _parse_option_choices(help_text, "--quantization")
-    if quantization_choices:
-        option_choices["--quantization"] = frozenset(quantization_choices)
+    for flag in ("--dtype", "--quantization", "--schedule-policy", "--scheduler-policy"):
+        choices = _parse_option_choices(help_text, flag)
+        if choices:
+            option_choices[flag] = frozenset(choices)
     help_hash = _sglang_capability_hash(flags, option_choices)
     warnings = []
     if "--model-path" not in flags:

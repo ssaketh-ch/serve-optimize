@@ -282,8 +282,20 @@ def apply_managed_prior_policy(
         summary={
             "input_candidate_count": len(candidates),
             "selected_candidate_count": len(selected_candidates),
+            "selected_candidate_ids": selected_ids,
             "pruned_candidate_ids": [config.id for config in candidates if config.id not in selected_set],
+            "pruned_candidates": [
+                {
+                    "candidate_id": config.id,
+                    "stage": "prior_pruning",
+                    "reason": "not_selected_by_prior_policy",
+                    "detail": "Candidate was not retained by the prior policy after preserving controls, low memory candidates, diversity, and evidence hits.",
+                }
+                for config in candidates
+                if config.id not in selected_set
+            ],
             "require_measurement_for_final_recommendation": policy.require_measurement_for_final_recommendation,
+            "retention_policy": to_dict(policy),
         },
     )
 

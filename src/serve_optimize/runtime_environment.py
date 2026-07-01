@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -24,9 +25,14 @@ class RuntimeEnvironmentFingerprint:
     torch_version: str
     cuda_runtime_version: str
     python_version: str
+    hostname: str = UNAVAILABLE
+    operating_system: str = UNAVAILABLE
+    virtual_environment: str = UNAVAILABLE
+    gpu_driver_version: str = UNAVAILABLE
     compiler_toolchain: dict[str, str] = field(default_factory=dict)
     compiler_toolchain_fingerprint: str = ""
     serve_optimize_git_commit: str = UNAVAILABLE
+    dirty_tree: bool | None = None
     environment_fingerprint: str = ""
     schema_version: str = "runtime-environment/v1"
 
@@ -38,9 +44,14 @@ class RuntimeEnvironmentFingerprint:
             "torch_version": self.torch_version,
             "cuda_runtime_version": self.cuda_runtime_version,
             "python_version": self.python_version,
+            "hostname": self.hostname,
+            "operating_system": self.operating_system,
+            "virtual_environment": self.virtual_environment,
+            "gpu_driver_version": self.gpu_driver_version,
             "compiler_toolchain": self.compiler_toolchain,
             "compiler_toolchain_fingerprint": self.compiler_toolchain_fingerprint,
             "serve_optimize_git_commit": self.serve_optimize_git_commit,
+            "dirty_tree": self.dirty_tree,
             "environment_fingerprint": self.environment_fingerprint,
         }
 
@@ -60,9 +71,14 @@ def collect_runtime_environment(
         "torch_version": process["torch_version"],
         "cuda_runtime_version": process["cuda_runtime_version"],
         "python_version": process["python_version"],
+        "hostname": process["hostname"],
+        "operating_system": process["operating_system"],
+        "virtual_environment": process["virtual_environment"],
+        "gpu_driver_version": process["gpu_driver_version"],
         "compiler_toolchain": process["compiler_toolchain"],
         "compiler_toolchain_fingerprint": process["compiler_toolchain_fingerprint"],
         "serve_optimize_git_commit": process["serve_optimize_git_commit"],
+        "dirty_tree": process["dirty_tree"],
     }
     return RuntimeEnvironmentFingerprint(
         backend_name=backend_name,
@@ -70,9 +86,14 @@ def collect_runtime_environment(
         torch_version=str(payload["torch_version"]),
         cuda_runtime_version=str(payload["cuda_runtime_version"]),
         python_version=str(payload["python_version"]),
+        hostname=str(payload["hostname"]),
+        operating_system=str(payload["operating_system"]),
+        virtual_environment=str(payload["virtual_environment"]),
+        gpu_driver_version=str(payload["gpu_driver_version"]),
         compiler_toolchain=dict(process["compiler_toolchain"]),
         compiler_toolchain_fingerprint=str(payload["compiler_toolchain_fingerprint"]),
         serve_optimize_git_commit=str(payload["serve_optimize_git_commit"]),
+        dirty_tree=bool(payload["dirty_tree"]) if payload["dirty_tree"] is not None else None,
         environment_fingerprint=stable_payload_hash(payload),
     )
 
@@ -133,9 +154,14 @@ def _process_runtime_metadata(repo_root: str) -> dict[str, Any]:
         "torch_version": _package_version("torch"),
         "cuda_runtime_version": _torch_cuda_version(),
         "python_version": platform.python_version(),
+        "hostname": socket.gethostname(),
+        "operating_system": platform.platform(),
+        "virtual_environment": os.environ.get("VIRTUAL_ENV") or UNAVAILABLE,
+        "gpu_driver_version": _gpu_driver_version(),
         "compiler_toolchain": compiler_toolchain,
         "compiler_toolchain_fingerprint": stable_payload_hash(compiler_toolchain),
         "serve_optimize_git_commit": _git_commit(Path(repo_root)),
+        "dirty_tree": _git_dirty(Path(repo_root)),
     }
 
 
@@ -189,3 +215,36 @@ def _git_commit(repo_root: Path) -> str:
         return UNAVAILABLE
     commit = completed.stdout.strip()
     return commit if completed.returncode == 0 and commit else UNAVAILABLE
+
+
+def _git_dirty(repo_root: Path) -> bool | None:
+    if not (repo_root / ".git").exists():
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--short"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
+
+
+def _gpu_driver_version() -> str:
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return UNAVAILABLE
+    line = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+    return line if completed.returncode == 0 and line else UNAVAILABLE

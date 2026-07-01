@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import platform
 import socket
 import statistics
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
@@ -52,6 +54,13 @@ def make_run_id(prefix: str = "endpoint") -> str:
     return f"{prefix}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
+def _telemetry_interval_s(config: EndpointBenchmarkConfig) -> float:
+    requested_duration = config.steady_state_duration_s or config.soak_duration_s
+    if requested_duration is not None and requested_duration <= 30:
+        return 0.25
+    return 1.0
+
+
 def run_endpoint_benchmark(
     config: EndpointBenchmarkConfig,
     out_dir: Path,
@@ -60,6 +69,8 @@ def run_endpoint_benchmark(
     request_fn: RequestFn | None = None,
     telemetry_collector_factory: TelemetryCollectorFactory | None = None,
 ) -> EndpointBenchmarkRun:
+    started_at = datetime.now(timezone.utc).isoformat()
+    trial_wall_start = time.perf_counter()
     run_dir = out_dir / config.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     request_fn = request_fn or send_chat_completion_request
@@ -69,17 +80,18 @@ def run_endpoint_benchmark(
         write_json(run_dir / "prediction.json", prediction)
 
     telemetry_collector_factory = telemetry_collector_factory or make_telemetry_collector
+    telemetry_interval_s = _telemetry_interval_s(config)
     idle_samples: list[PowerSampleRecord] = []
     idle_power_watts = config.idle_power_watts
     if config.telemetry != "none" and config.idle_baseline_duration_s > 0:
-        idle_sampler = telemetry_collector_factory(config.telemetry, config.device_index, 0.2)
+        idle_sampler = telemetry_collector_factory(config.telemetry, config.device_index, telemetry_interval_s)
         idle_sampler.start()
         time.sleep(config.idle_baseline_duration_s)
         idle_capture = idle_sampler.stop()
         idle_samples = [replace(sample, phase="idle") for sample in idle_capture.samples]
         idle_power_watts = idle_power_watts if idle_power_watts is not None else _average_power(idle_samples)
 
-    sampler = telemetry_collector_factory(config.telemetry, config.device_index, 0.2)
+    sampler = telemetry_collector_factory(config.telemetry, config.device_index, telemetry_interval_s)
     sampler.start()
     cpu_start = time.process_time()
     wall_start = time.perf_counter()
@@ -88,6 +100,8 @@ def run_endpoint_benchmark(
     client_cpu_time_s = max(time.process_time() - cpu_start, 0.0)
     client_cpu_utilization_percent = (client_cpu_time_s / wall_time_s * 100.0) if wall_time_s > 0 else None
     telemetry = sampler.stop()
+    ended_at = datetime.now(timezone.utc).isoformat()
+    trial_wall_clock_time_s = max(time.perf_counter() - trial_wall_start, 0.0)
 
     records = sorted(records, key=lambda item: item.request_id)
     power_samples = _phase_power_samples(
@@ -134,6 +148,10 @@ def run_endpoint_benchmark(
         backend_capabilities_help_hash=config.backend_capabilities_help_hash,
         client_cpu_time_s=client_cpu_time_s,
         client_cpu_utilization_percent=client_cpu_utilization_percent,
+        config=config,
+        started_at=started_at,
+        ended_at=ended_at,
+        trial_wall_clock_time_s=trial_wall_clock_time_s,
     )
     write_json(run_dir / "summary.json", summary)
     if config.telemetry != "none":
@@ -178,14 +196,17 @@ def _run_requests(config: EndpointBenchmarkConfig, request_fn: RequestFn) -> lis
                     records.append(future.result())
                 except Exception as exc:
                     now = time.time()
+                    status = _request_exception_status(exc)
                     records.append(
                         RequestRecord(
                             request_id=request_id,
                             start_time=now,
                             end_time=now,
                             latency_s=0.0,
-                            status="error",
+                            status=status,
                             error=f"{exc.__class__.__name__}: {exc}",
+                            error_reason=status,
+                            client_status=status,
                             client_submit_time=submit_time,
                             client_queue_s=max(0.0, now - submit_time),
                         )
@@ -217,12 +238,15 @@ def _timed_request(
             latency_s=max(0.0, end - client_start),
             status=status,
             error=f"{exc.__class__.__name__}: {exc}",
+            error_reason=status,
+            client_status=status,
             client_submit_time=submit_time,
             client_start_time=client_start,
             client_queue_s=client_queue_s,
         )
     return replace(
         record,
+        client_status=record.client_status or record.status,
         client_submit_time=submit_time,
         client_start_time=client_start,
         client_queue_s=client_queue_s,
@@ -260,36 +284,48 @@ def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: in
         completion_tokens = _int_value(usage.get("completion_tokens"))
         total_tokens = _int_value(usage.get("total_tokens")) or prompt_tokens + completion_tokens
         end = time.time()
+        status = "ok" if 200 <= status_code < 300 else f"http_{status_code}"
         return RequestRecord(
             request_id=request_id,
             start_time=start,
             end_time=end,
             latency_s=end - start,
-            status="ok" if 200 <= status_code < 300 else f"http_{status_code}",
+            status=status,
+            error_reason=None if status == "ok" else status,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            finish_reason=_response_finish_reason(parsed),
+            http_status=status_code,
+            client_status=status,
             token_count_source="response_usage" if usage else None,
         )
     except error.HTTPError as exc:
         end = time.time()
+        status = f"http_{exc.code}"
         return RequestRecord(
             request_id=request_id,
             start_time=start,
             end_time=end,
             latency_s=end - start,
-            status=f"http_{exc.code}",
+            status=status,
             error=str(exc),
+            error_reason=status,
+            http_status=exc.code,
+            client_status=status,
         )
     except Exception as exc:
         end = time.time()
+        status = _request_exception_status(exc)
         return RequestRecord(
             request_id=request_id,
             start_time=start,
             end_time=end,
             latency_s=end - start,
-            status=_request_exception_status(exc),
+            status=status,
             error=f"{exc.__class__.__name__}: {exc}",
+            error_reason=status,
+            client_status=status,
         )
 
 
@@ -302,6 +338,7 @@ def _streaming_request_record(response: object, *, request_id: int, start: float
     usage_received = False
     first_chunk_time: float | None = None
     last_chunk_time: float | None = None
+    finish_reason: str | None = None
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="replace").strip() if isinstance(raw_line, bytes) else str(raw_line).strip()
         if not line or not line.startswith("data:"):
@@ -322,6 +359,7 @@ def _streaming_request_record(response: object, *, request_id: int, start: float
         choices = parsed.get("choices") if isinstance(parsed, dict) else None
         if not isinstance(choices, list):
             continue
+        finish_reason = finish_reason or _choices_finish_reason(choices)
         if not any(_choice_has_stream_content(choice) for choice in choices if isinstance(choice, dict)):
             continue
         chunk_time = time.time()
@@ -340,18 +378,23 @@ def _streaming_request_record(response: object, *, request_id: int, start: float
     )
     has_output = first_chunk_time is not None
     successful_status = 200 <= status_code < 300 and has_output
+    status = "ok" if successful_status else ("stream_no_output" if 200 <= status_code < 300 else f"http_{status_code}")
     return RequestRecord(
         request_id=request_id,
         start_time=start,
         end_time=end,
         latency_s=end - start,
-        status="ok" if successful_status else ("stream_no_output" if 200 <= status_code < 300 else f"http_{status_code}"),
+        status=status,
         error=None if successful_status else ("Streaming response contained no output content." if 200 <= status_code < 300 else None),
+        error_reason=None if successful_status else status,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         ttft_s=ttft_s,
         tpot_s=tpot_s,
+        finish_reason=finish_reason,
+        http_status=status_code,
+        client_status=status,
         timing_source="openai_stream_chunks" if first_chunk_time is not None else None,
         token_count_source="response_usage" if usage_received else None,
     )
@@ -365,6 +408,21 @@ def _choice_has_stream_content(choice: dict[str, object]) -> bool:
         return True
     message = choice.get("message")
     return isinstance(message, dict) and bool(message.get("content"))
+
+
+def _response_finish_reason(parsed: dict[str, object]) -> str | None:
+    choices = parsed.get("choices")
+    return _choices_finish_reason(choices) if isinstance(choices, list) else None
+
+
+def _choices_finish_reason(choices: list[object]) -> str | None:
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        reason = choice.get("finish_reason")
+        if reason is not None:
+            return str(reason)
+    return None
 
 
 def _request_exception_status(exc: Exception) -> str:
@@ -410,9 +468,25 @@ def summarize_requests(
     backend_capabilities_help_hash: str | None = None,
     client_cpu_time_s: float | None = None,
     client_cpu_utilization_percent: float | None = None,
+    config: EndpointBenchmarkConfig | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    trial_wall_clock_time_s: float | None = None,
 ) -> EndpointBenchmarkSummary:
     power_samples = power_samples or []
     telemetry = telemetry or TelemetryCapture(provider=None, samples=[], warnings=[])
+    if config is not None:
+        backend_name = backend_name or config.backend_name
+        backend_version = backend_version or config.backend_version
+        backend_launch_command = backend_launch_command or config.backend_launch_command
+        backend_launch_command_hash = backend_launch_command_hash or config.backend_launch_command_hash
+        backend_effective_values = backend_effective_values or config.backend_effective_values
+        backend_applied_configuration = backend_applied_configuration or config.backend_applied_configuration
+        backend_omitted_values = backend_omitted_values or config.backend_omitted_values
+        backend_unsupported_values = backend_unsupported_values or config.backend_unsupported_values
+        backend_unavailable_values = backend_unavailable_values or config.backend_unavailable_values
+        backend_flag_aliases = backend_flag_aliases or config.backend_flag_aliases
+        backend_capabilities_help_hash = backend_capabilities_help_hash or config.backend_capabilities_help_hash
     successful = [record for record in records if record.status == "ok"]
     measured_records = _measurement_window_records(
         records,
@@ -455,6 +529,9 @@ def summarize_requests(
         telemetry_summary.average_gpu_util_percent,
         telemetry_summary.max_gpu_util_percent,
     )
+    average_memory_bandwidth_util_percent = telemetry_summary.average_memory_util_percent
+    workload_description = _workload_description_with_actual_outputs(config, measured_successful)
+    outcome = _trial_outcome(measured_records)
     load_sufficiency = {
         "schema_version": "load-sufficiency-trial/v1",
         "gpu_utilization_available": telemetry_summary.average_gpu_util_percent is not None
@@ -519,6 +596,8 @@ def summarize_requests(
         "soak_effective_duration_s": _round_or_none(wall_time_s),
         "ttft_sample_count": len(ttfts_ms),
         "tpot_sample_count": len(tpots_ms),
+        "p99_ttft_ms": _round_or_none(_percentile(ttfts_ms, 99)),
+        "p99_tpot_ms": _round_or_none(_percentile(tpots_ms, 99)),
         "timing_source": _timing_source(measured_successful),
         "token_count_source": _token_count_source(measured_successful),
         "client_cpu_time_s": _round_or_none(client_cpu_time_s),
@@ -542,7 +621,10 @@ def summarize_requests(
         "active_tokens_per_joule": _round_or_none(active_tokens_per_joule),
         "joules_per_generated_token": _round_or_none(joules_per_generated_token),
         "active_joules_per_generated_token": _round_or_none(active_joules_per_generated_token),
+        "peak_gpu_memory_mb": telemetry_summary.max_memory_used_mb,
+        "average_memory_bandwidth_util_percent": average_memory_bandwidth_util_percent,
         "phase_energy_attribution": "unavailable_without_phase_markers",
+        "outcome": outcome,
         "stability_classification": "single_trial",
     }
     token_warnings = _token_count_warnings(measured_successful)
@@ -571,9 +653,11 @@ def summarize_requests(
         avg_ttft_ms=_round_or_none(_mean(ttfts_ms)),
         p50_ttft_ms=_round_or_none(_percentile(ttfts_ms, 50)),
         p95_ttft_ms=_round_or_none(_percentile(ttfts_ms, 95)),
+        p99_ttft_ms=_round_or_none(_percentile(ttfts_ms, 99)),
         avg_tpot_ms=_round_or_none(_mean(tpots_ms)),
         p50_tpot_ms=_round_or_none(_percentile(tpots_ms, 50)),
         p95_tpot_ms=_round_or_none(_percentile(tpots_ms, 95)),
+        p99_tpot_ms=_round_or_none(_percentile(tpots_ms, 99)),
         ttft_sample_count=len(ttfts_ms),
         tpot_sample_count=len(tpots_ms),
         timing_source=_timing_source(measured_successful),
@@ -592,6 +676,7 @@ def summarize_requests(
         measurement_average_power_watts=_round_or_none(_average_power(measurement_power_samples)),
         active_power_watts=_round_or_none(active_power),
         active_energy_joules=_round_or_none(active_energy),
+        idle_subtracted_energy_joules=_round_or_none(active_energy),
         energy_joules=telemetry_summary.energy_joules,
         energy_accounting=energy_accounting,
         joules_per_token=telemetry_summary.joules_per_token,
@@ -611,10 +696,12 @@ def summarize_requests(
         measurement_quality=measurement_quality,
         stability_classification="single_trial",
         observed_memory_mb=telemetry_summary.max_memory_used_mb,
+        peak_gpu_memory_mb=telemetry_summary.max_memory_used_mb,
         average_gpu_util_percent=telemetry_summary.average_gpu_util_percent,
         max_gpu_util_percent=telemetry_summary.max_gpu_util_percent,
         average_memory_util_percent=telemetry_summary.average_memory_util_percent,
         max_memory_util_percent=telemetry_summary.max_memory_util_percent,
+        average_memory_bandwidth_util_percent=average_memory_bandwidth_util_percent,
         average_temperature_c=telemetry_summary.average_temperature_c,
         max_temperature_c=telemetry_summary.max_temperature_c,
         temperature_rise_c=telemetry_summary.temperature_rise_c,
@@ -659,6 +746,32 @@ def summarize_requests(
         backend_unavailable_values=dict(backend_unavailable_values or {}),
         backend_flag_aliases=dict(backend_flag_aliases or {}),
         backend_capabilities_help_hash=backend_capabilities_help_hash,
+        trial_id=run_id,
+        experiment_campaign_id=config.experiment_campaign_id if config else None,
+        parent_run_id=config.parent_run_id if config else None,
+        started_at=started_at,
+        ended_at=ended_at,
+        hostname=socket.gethostname(),
+        repository_commit=_git_commit(),
+        dirty_tree=_git_dirty(),
+        python_version=platform.python_version(),
+        cuda_version=_cuda_version(),
+        gpu_driver_version=_gpu_driver_version(),
+        backend_health_status=config.backend_health_status if config else None,
+        model_id=config.model if config else None,
+        model_revision=config.model_revision if config else None,
+        model_access_status=config.model_access_status if config else None,
+        tokenizer_id=config.tokenizer_id if config else None,
+        tokenizer_revision=config.tokenizer_revision if config else None,
+        objective_mode=config.objective_mode if config else None,
+        candidate_source=config.candidate_source if config else None,
+        workload_description=workload_description,
+        backend_started_at=config.backend_started_at if config else None,
+        backend_ready_at=config.backend_ready_at if config else None,
+        backend_startup_time_s=config.backend_startup_time_s if config else None,
+        model_load_time_s=config.model_load_time_s if config else None,
+        trial_wall_clock_time_s=_round_or_none(trial_wall_clock_time_s),
+        outcome=outcome,
     )
 
 
@@ -704,7 +817,9 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         "request_rate_req_s": [_float(summary.request_rate_req_s) for summary in summaries],
         "p95_latency_s": [_float(summary.p95_latency_s) for summary in summaries],
         "p95_ttft_ms": [_float(summary.p95_ttft_ms) for summary in summaries],
+        "p99_ttft_ms": [_float(summary.p99_ttft_ms) for summary in summaries],
         "p95_tpot_ms": [_float(summary.p95_tpot_ms) for summary in summaries],
+        "p99_tpot_ms": [_float(summary.p99_tpot_ms) for summary in summaries],
         "joules_per_token": [_float(summary.joules_per_token) for summary in summaries],
         "active_joules_per_token": [_float(summary.active_joules_per_token) for summary in summaries],
         "tokens_per_joule": [_float(summary.tokens_per_joule) for summary in summaries],
@@ -790,9 +905,11 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         avg_ttft_ms=_mean([_float(summary.avg_ttft_ms) for summary in summaries if _float(summary.avg_ttft_ms) is not None]),
         p50_ttft_ms=_mean([_float(summary.p50_ttft_ms) for summary in summaries if _float(summary.p50_ttft_ms) is not None]),
         p95_ttft_ms=_mean(metric_values["p95_ttft_ms"]),
+        p99_ttft_ms=_mean(metric_values["p99_ttft_ms"]),
         avg_tpot_ms=_mean([_float(summary.avg_tpot_ms) for summary in summaries if _float(summary.avg_tpot_ms) is not None]),
         p50_tpot_ms=_mean([_float(summary.p50_tpot_ms) for summary in summaries if _float(summary.p50_tpot_ms) is not None]),
         p95_tpot_ms=_mean(metric_values["p95_tpot_ms"]),
+        p99_tpot_ms=_mean(metric_values["p99_tpot_ms"]),
         ttft_sample_count=sum(summary.ttft_sample_count for summary in summaries),
         tpot_sample_count=sum(summary.tpot_sample_count for summary in summaries),
         timing_source=_aggregate_timing_source(summaries),
@@ -809,6 +926,7 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         energy_accounting=energy_accounting,
         joules_per_token=_mean(metric_values["joules_per_token"]),
         active_energy_joules=active_energy_joules,
+        idle_subtracted_energy_joules=active_energy_joules,
         active_joules_per_token=_mean(metric_values["active_joules_per_token"]),
         joules_per_generated_token=_round_or_none(joules_per_generated_token),
         active_joules_per_generated_token=_round_or_none(active_joules_per_generated_token),
@@ -825,6 +943,14 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         temperature_rise_c=_mean([_float(summary.temperature_rise_c) for summary in summaries if _float(summary.temperature_rise_c) is not None]),
         temperature_slope_c_per_min=_mean([_float(summary.temperature_slope_c_per_min) for summary in summaries if _float(summary.temperature_slope_c_per_min) is not None]),
         thermal_stability_classification=_aggregate_thermal_classification(summaries),
+        peak_gpu_memory_mb=max([summary.peak_gpu_memory_mb for summary in summaries if summary.peak_gpu_memory_mb is not None], default=None),
+        average_memory_bandwidth_util_percent=_mean(
+            [
+                _float(summary.average_memory_bandwidth_util_percent)
+                for summary in summaries
+                if _float(summary.average_memory_bandwidth_util_percent) is not None
+            ]
+        ),
         steady_state_requests=sum(summary.steady_state_requests or 0 for summary in summaries),
         steady_state_duration_s=sum(summary.steady_state_duration_s or 0.0 for summary in summaries) or None,
         steady_state_total_tokens=sum(summary.steady_state_total_tokens or 0 for summary in summaries),
@@ -855,6 +981,11 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         max_token_backlog=_round_or_none(max_token_backlog),
         load_saturation_signal=_aggregate_load_saturation_signal(summaries),
         load_sufficiency=_aggregate_load_sufficiency(summaries),
+        trial_id=run_id,
+        started_at=_first_available([summary.started_at for summary in summaries]),
+        ended_at=_last_available([summary.ended_at for summary in summaries]),
+        trial_wall_clock_time_s=sum(summary.trial_wall_clock_time_s or 0.0 for summary in summaries) or None,
+        outcome=_aggregate_outcome(summaries),
     )
 
 
@@ -1218,6 +1349,81 @@ def _aggregate_token_count_source(summaries: list[EndpointBenchmarkSummary]) -> 
     return sources[0] if len(sources) == 1 else "mixed"
 
 
+def _workload_description_with_actual_outputs(
+    config: EndpointBenchmarkConfig | None,
+    measured_successful: list[RequestRecord],
+) -> dict[str, object]:
+    description = dict(config.workload_description) if config is not None else {}
+    actual_distribution = _token_distribution([record.completion_tokens for record in measured_successful])
+    if not description.get("actual_output_length_distribution"):
+        description["actual_output_length_distribution"] = actual_distribution
+    return description
+
+
+def _token_distribution(values: list[int]) -> dict[str, object]:
+    clean = [float(value) for value in values if value >= 0]
+    return {
+        "count": len(clean),
+        "min": int(min(clean)) if clean else None,
+        "p50": _round_or_none(_percentile(clean, 50)),
+        "p95": _round_or_none(_percentile(clean, 95)),
+        "p99": _round_or_none(_percentile(clean, 99)),
+        "max": int(max(clean)) if clean else None,
+    }
+
+
+def _trial_outcome(records: list[RequestRecord]) -> str:
+    if not records:
+        return "client_failed"
+    if all(record.status == "ok" for record in records):
+        return "completed"
+    reasons = [record.error_reason or record.status for record in records if record.status != "ok"]
+    reason_text = " ".join(reasons).lower()
+    if "request_timeout" in reasons:
+        return "timed_out"
+    if "out_of_memory" in reason_text or "cuda out of memory" in reason_text:
+        return "out_of_memory"
+    if any(reason.startswith("http_404") for reason in reasons):
+        return "model_unavailable"
+    if any(reason.startswith(("http_401", "http_403")) for reason in reasons) or "gated" in reason_text or "access denied" in reason_text:
+        return "access_denied"
+    return "client_failed"
+
+
+def _aggregate_outcome(summaries: list[EndpointBenchmarkSummary]) -> str:
+    outcomes = [summary.outcome for summary in summaries if summary.outcome]
+    if outcomes and all(outcome == "completed" for outcome in outcomes):
+        return "completed"
+    priority = [
+        "out_of_memory",
+        "invalid_config",
+        "backend_launch_failed",
+        "backend_crashed",
+        "timed_out",
+        "model_unavailable",
+        "access_denied",
+        "client_failed",
+    ]
+    for outcome in priority:
+        if outcome in outcomes:
+            return outcome
+    return outcomes[0] if outcomes else "client_failed"
+
+
+def _first_available(values: list[str | None]) -> str | None:
+    for value in values:
+        if value:
+            return value
+    return None
+
+
+def _last_available(values: list[str | None]) -> str | None:
+    for value in reversed(values):
+        if value:
+            return value
+    return None
+
+
 def _aggregate_thermal_classification(summaries: list[EndpointBenchmarkSummary]) -> str | None:
     priority = {
         "warming": 4,
@@ -1314,6 +1520,63 @@ def _int_value(value: object) -> int:
 
 def _artifact_files(run_dir: Path) -> list[str]:
     return sorted(path.name for path in run_dir.iterdir() if path.is_file())
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _git_commit() -> str | None:
+    return _git_output(["rev-parse", "HEAD"])
+
+
+def _git_dirty() -> bool | None:
+    status = _git_output(["status", "--short"])
+    if status is None:
+        return None
+    return bool(status.strip())
+
+
+def _git_output(args: list[str]) -> str | None:
+    root = _repo_root()
+    if not (root / ".git").exists():
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value else ""
+
+
+def _cuda_version() -> str | None:
+    try:
+        import torch
+    except (ImportError, OSError):
+        return None
+    version = getattr(getattr(torch, "version", None), "cuda", None)
+    return str(version) if version else None
+
+
+def _gpu_driver_version() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    line = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+    return line if completed.returncode == 0 and line else None
 
 
 def _round_or_none(value: float | int | None) -> float | None:
