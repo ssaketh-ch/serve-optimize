@@ -62,6 +62,20 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         },
         notes=["Long context synthetic workload."],
     ),
+    "long-prefill": WorkloadProfile(
+        profile_name="long-prefill",
+        input_tokens=4096,
+        output_tokens=128,
+        max_new_tokens=128,
+        concurrency=4,
+        num_requests=48,
+        dataset="synthetic-long-prefill",
+        token_distribution={
+            "input_tokens": {"p50": 4096, "p95": 8192},
+            "output_tokens": {"p50": 128, "p95": 256},
+        },
+        notes=["Long prompt and short output synthetic workload."],
+    ),
     "decode-heavy": WorkloadProfile(
         profile_name="decode-heavy",
         input_tokens=512,
@@ -92,6 +106,20 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         prefix_reuse_expected=True,
         repeated_prefix_ratio=0.75,
         notes=["Repeated prefix synthetic workload for prefix cache behavior."],
+    ),
+    "code-generation": WorkloadProfile(
+        profile_name="code-generation",
+        input_tokens=1024,
+        output_tokens=512,
+        max_new_tokens=512,
+        concurrency=8,
+        num_requests=96,
+        dataset="synthetic-code-generation",
+        token_distribution={
+            "input_tokens": {"p50": 1024, "p95": 2048},
+            "output_tokens": {"p50": 512, "p95": 1024},
+        },
+        notes=["Code generation style synthetic prompts."],
     ),
     "mixed": WorkloadProfile(
         profile_name="mixed",

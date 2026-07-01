@@ -23,6 +23,7 @@ from .aiconfigurator_bridge import run_aiconfigurator
 from .backend_status import INSTALLATION_PROFILES, check_backend_status, check_installation_profile
 from .backends.factory import MANAGED_BACKEND_CHOICES
 from .benchmark import run_dry_benchmark
+from .benchmark_matrix import BenchmarkMatrixRequest, write_benchmark_matrix_artifacts
 from .branding import LOGO, TAGLINE
 from .campaign_plan import CampaignPlanRequest, write_campaign_plan_artifacts
 from .candidates import generate_candidates
@@ -507,6 +508,40 @@ def _build_parser(*, show_advanced_help: bool = False) -> argparse.ArgumentParse
     campaign_plan.add_argument("--out", type=Path, default=Path("results/campaign-plan"), help="Campaign plan artifact directory.")
     campaign_plan.add_argument("--json", action="store_true", help="Emit JSON.")
     campaign_plan.set_defaults(func=_cmd_campaign_plan)
+
+    benchmark_matrix = subparsers.add_parser(
+        "benchmark-matrix-plan",
+        help="Write the staged journal benchmark matrix plan without launching servers.",
+    )
+    benchmark_matrix.add_argument(
+        "--stage",
+        action="append",
+        choices=["stage1", "stage2", "stage3", "stage4", "1", "2", "3", "4"],
+        dest="stages",
+        help="Matrix stage to include. Defaults to all stages.",
+    )
+    benchmark_matrix.add_argument("--output-root", type=Path, default=Path("results/benchmark-matrix/runs"), help="Root directory for planned benchmark run outputs.")
+    benchmark_matrix.add_argument("--evidence-db", type=Path, default=Path("results/benchmark-matrix/evidence.sqlite"), help="Evidence database path for planned managed runs.")
+    benchmark_matrix.add_argument("--repeats", type=int, default=1, help="Repeated run count per runnable matrix cell.")
+    benchmark_matrix.add_argument("--limit", type=int, default=5, help="Candidate limit for planned managed runs.")
+    benchmark_matrix.add_argument("--trials", type=int, default=1, help="Benchmark trials for planned managed runs.")
+    benchmark_matrix.add_argument("--telemetry", choices=["none", "nvml", "nvidia-smi", "auto"], default="auto", help="Telemetry provider for planned runs.")
+    benchmark_matrix.add_argument("--startup-timeout", type=float, default=300.0, help="Startup timeout for planned managed runs.")
+    benchmark_matrix.add_argument("--cooldown-seconds", type=float, default=5.0, help="Cooldown seconds for planned managed runs.")
+    benchmark_matrix.add_argument("--warmup-requests", type=int, default=4, help="Successful warmup requests excluded from metrics.")
+    benchmark_matrix.add_argument("--steady-state-seconds", type=float, default=None, help="Optional steady state measurement duration.")
+    benchmark_matrix.add_argument("--idle-baseline-seconds", type=float, default=15.0, help="Pre run idle baseline duration for power accounting.")
+    benchmark_matrix.add_argument("--idle-power-watts", type=float, default=None, help="Fixed idle power baseline for planned runs.")
+    benchmark_matrix.add_argument("--soak-seconds", type=float, default=None, help="Optional soak duration before measurement.")
+    benchmark_matrix.add_argument("--include-optional-large", action="store_true", help="Include optional larger model cells around 14B parameters.")
+    benchmark_matrix.add_argument("--include-gated", action="store_true", help="Include gated model cells when access is approved.")
+    benchmark_matrix.add_argument("--real-chat-manifest", type=Path, default=None, help="Permitted real chat workload manifest for Stage 2.")
+    benchmark_matrix.add_argument("--attach-base-url", default=None, help="OpenAI compatible base URL for Stage 4 Attach Mode cells.")
+    benchmark_matrix.add_argument("--small-model", default=DEFAULT_MODEL, help="Stage 1 small open model under 1B parameters.")
+    benchmark_matrix.add_argument("--medium-model", default="Qwen/Qwen2.5-7B-Instruct", help="Stage 1 medium open model around 7 to 8B parameters.")
+    benchmark_matrix.add_argument("--out", type=Path, default=Path("results/benchmark-matrix-plan"), help="Benchmark matrix plan artifact directory.")
+    benchmark_matrix.add_argument("--json", action="store_true", help="Emit JSON.")
+    benchmark_matrix.set_defaults(func=_cmd_benchmark_matrix_plan)
 
     release_check = subparsers.add_parser("release-check")
     release_check.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root to inspect.")
@@ -1600,6 +1635,59 @@ def _cmd_campaign_plan(args: argparse.Namespace) -> None:
     print(f"  text: {artifacts.get('campaign_plan_txt')}")
     print(f"  csv: {artifacts.get('campaign_matrix_csv')}")
     print(f"  commands: {artifacts.get('campaign_commands_sh')}")
+
+
+def _cmd_benchmark_matrix_plan(args: argparse.Namespace) -> None:
+    if args.repeats < 1:
+        raise SystemExit("--repeats must be at least 1.")
+    if args.limit < 1:
+        raise SystemExit("--limit must be at least 1.")
+    if args.trials < 1:
+        raise SystemExit("--trials must be at least 1.")
+    if args.idle_baseline_seconds < 0:
+        raise SystemExit("--idle-baseline-seconds must be nonnegative.")
+    if args.soak_seconds is not None and args.soak_seconds <= 0:
+        raise SystemExit("--soak-seconds must be greater than 0 when provided.")
+    try:
+        payload = write_benchmark_matrix_artifacts(
+            BenchmarkMatrixRequest(
+                stages=args.stages or ["stage1", "stage2", "stage3", "stage4"],
+                output_root=str(args.output_root),
+                evidence_db=str(args.evidence_db) if args.evidence_db is not None else None,
+                repeats=args.repeats,
+                limit=args.limit,
+                trials=args.trials,
+                telemetry=args.telemetry,
+                startup_timeout_s=args.startup_timeout,
+                cooldown_s=args.cooldown_seconds,
+                warmup_requests=args.warmup_requests,
+                steady_state_seconds=args.steady_state_seconds,
+                idle_baseline_seconds=args.idle_baseline_seconds,
+                idle_power_watts=args.idle_power_watts,
+                soak_seconds=args.soak_seconds,
+                include_optional_large=args.include_optional_large,
+                include_gated=args.include_gated,
+                real_chat_manifest=str(args.real_chat_manifest) if args.real_chat_manifest is not None else None,
+                attach_base_url=args.attach_base_url,
+                small_model=args.small_model,
+                medium_model=args.medium_model,
+            ),
+            output_dir=args.out,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        print(json.dumps(to_dict(payload), indent=2, sort_keys=True))
+        return
+    artifacts = payload.get("artifacts", {}) if isinstance(payload.get("artifacts"), dict) else {}
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    print("Benchmark matrix plan")
+    print(f"  planned cells: {summary.get('cell_count')}")
+    print(f"  runnable cells: {summary.get('runnable_cell_count')}")
+    print(f"  json: {artifacts.get('benchmark_matrix_plan_json')}")
+    print(f"  markdown: {artifacts.get('benchmark_matrix_plan_md')}")
+    print(f"  csv: {artifacts.get('benchmark_matrix_csv')}")
+    print(f"  commands: {artifacts.get('benchmark_matrix_commands_sh')}")
 
 
 def _cmd_release_check(args: argparse.Namespace) -> None:
