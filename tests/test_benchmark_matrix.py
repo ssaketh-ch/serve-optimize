@@ -31,6 +31,8 @@ def test_stage1_benchmark_matrix_matches_journal_shape() -> None:
     assert workloads == {"short", "medium", "long-prefill"}
     assert objective_labels == {"balanced", "throughput", "efficient"}
     assert "--idle-baseline-seconds" in payload["cells"][0]["command"]
+    assert "--steady-state-seconds" in payload["cells"][0]["command"]
+    assert "15" in payload["cells"][0]["command"]
 
 
 def test_stage2_tracks_optional_and_prerequisite_cells() -> None:

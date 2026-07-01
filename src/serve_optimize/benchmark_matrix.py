@@ -42,7 +42,7 @@ class BenchmarkMatrixRequest:
     startup_timeout_s: float = 300.0
     cooldown_s: float = 5.0
     warmup_requests: int = 4
-    steady_state_seconds: float | None = None
+    steady_state_seconds: float | None = 15.0
     idle_baseline_seconds: float = 15.0
     idle_power_watts: float | None = None
     soak_seconds: float | None = None

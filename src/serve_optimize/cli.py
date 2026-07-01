@@ -529,7 +529,7 @@ def _build_parser(*, show_advanced_help: bool = False) -> argparse.ArgumentParse
     benchmark_matrix.add_argument("--startup-timeout", type=float, default=300.0, help="Startup timeout for planned managed runs.")
     benchmark_matrix.add_argument("--cooldown-seconds", type=float, default=5.0, help="Cooldown seconds for planned managed runs.")
     benchmark_matrix.add_argument("--warmup-requests", type=int, default=4, help="Successful warmup requests excluded from metrics.")
-    benchmark_matrix.add_argument("--steady-state-seconds", type=float, default=None, help="Optional steady state measurement duration.")
+    benchmark_matrix.add_argument("--steady-state-seconds", type=float, default=15.0, help="Steady state measurement duration for planned runs.")
     benchmark_matrix.add_argument("--idle-baseline-seconds", type=float, default=15.0, help="Pre run idle baseline duration for power accounting.")
     benchmark_matrix.add_argument("--idle-power-watts", type=float, default=None, help="Fixed idle power baseline for planned runs.")
     benchmark_matrix.add_argument("--soak-seconds", type=float, default=None, help="Optional soak duration before measurement.")
@@ -1644,6 +1644,8 @@ def _cmd_benchmark_matrix_plan(args: argparse.Namespace) -> None:
         raise SystemExit("--limit must be at least 1.")
     if args.trials < 1:
         raise SystemExit("--trials must be at least 1.")
+    if args.steady_state_seconds is not None and args.steady_state_seconds <= 0:
+        raise SystemExit("--steady-state-seconds must be greater than 0 when provided.")
     if args.idle_baseline_seconds < 0:
         raise SystemExit("--idle-baseline-seconds must be nonnegative.")
     if args.soak_seconds is not None and args.soak_seconds <= 0:
