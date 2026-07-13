@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 
+import pytest
+
 from serve_optimize.benchmark_matrix import (
     BenchmarkMatrixRequest,
     build_benchmark_matrix_plan,
@@ -33,6 +35,26 @@ def test_stage1_benchmark_matrix_matches_journal_shape() -> None:
     assert "--idle-baseline-seconds" in payload["cells"][0]["command"]
     assert "--steady-state-seconds" in payload["cells"][0]["command"]
     assert "15" in payload["cells"][0]["command"]
+
+
+def test_benchmark_matrix_preserves_zero_warmup_and_idle_settings() -> None:
+    payload = build_benchmark_matrix_plan(
+        BenchmarkMatrixRequest(
+            stages=["stage1"],
+            warmup_requests=0,
+            idle_baseline_seconds=0,
+            steady_state_seconds=None,
+        )
+    )
+    command = payload["cells"][0]["command"]
+
+    assert command[command.index("--warmup-requests") + 1] == "0"
+    assert command[command.index("--idle-baseline-seconds") + 1] == "0"
+
+
+def test_benchmark_matrix_rejects_invalid_runtime_settings() -> None:
+    with pytest.raises(ValueError, match="warmup requests"):
+        build_benchmark_matrix_plan(BenchmarkMatrixRequest(stages=["stage1"], warmup_requests=-1))
 
 
 def test_stage2_tracks_optional_and_prerequisite_cells() -> None:

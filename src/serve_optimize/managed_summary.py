@@ -12,11 +12,13 @@ from .schemas import RecommendationResult, ServingConfig
 SUMMARY_SCHEMA_VERSION = "recommendation-summary/v2"
 
 _BASELINE_METRICS = {
-    "throughput_tokens_per_sec": ("total_tokens_s", True),
+    "throughput_tokens_per_sec": ("output_tokens_s", True),
     "p95_latency_ms": ("p95_latency_s", False),
     "average_power_w": ("average_power_watts", False),
     "joules_per_token": ("joules_per_token", False),
+    "joules_per_generated_token": ("joules_per_generated_token", False),
     "tokens_per_watt": ("tokens_per_second_per_watt", True),
+    "tokens_per_joule": ("tokens_per_joule", True),
 }
 
 
@@ -191,8 +193,12 @@ def selected_summary(recommendation: RecommendationResult, config: ServingConfig
 def metrics_summary(recommendation: RecommendationResult) -> dict[str, Any]:
     measured = recommendation.measured_metrics or {}
     telemetry = recommendation.telemetry_metrics or {}
+    output_throughput = _optional_float(measured.get("output_tokens_s"))
+    if output_throughput is None:
+        output_throughput = _optional_float(measured.get("total_tokens_s"))
     return {
-        "throughput_tokens_per_sec": _optional_float(measured.get("total_tokens_s")),
+        "throughput_tokens_per_sec": output_throughput,
+        "total_tokens_per_sec": _optional_float(measured.get("total_tokens_s")),
         "p95_latency_ms": _seconds_to_ms(measured.get("p95_latency_s")),
         "average_power_w": _optional_float(telemetry.get("average_power_watts")),
         "joules_per_token": _optional_float(telemetry.get("joules_per_token")),
@@ -227,8 +233,8 @@ def baseline_comparison(recommendation: RecommendationResult) -> dict[str, Any]:
 
     comparisons = {}
     for name, (field, higher_is_better) in _BASELINE_METRICS.items():
-        baseline_value = _optional_float(baseline.get(field))
-        selected_value = _optional_float(selected.get(field))
+        baseline_value = _baseline_metric(baseline, field)
+        selected_value = _baseline_metric(selected, field)
         if name == "p95_latency_ms":
             baseline_value = baseline_value * 1000.0 if baseline_value is not None else None
             selected_value = selected_value * 1000.0 if selected_value is not None else None
@@ -497,6 +503,19 @@ def _candidate_row(rows: list[dict[str, Any]], candidate_id: str | None) -> dict
     if candidate_id is None:
         return None
     return next((row for row in rows if row.get("candidate_id") == candidate_id), None)
+
+
+def _baseline_metric(row: dict[str, Any], field: str) -> float | None:
+    value = _optional_float(row.get(field))
+    if value is not None:
+        return value
+    fallback_fields = {
+        "output_tokens_s": "total_tokens_s",
+        "joules_per_generated_token": "joules_per_token",
+        "tokens_per_joule": "tokens_per_second_per_watt",
+    }
+    fallback = fallback_fields.get(field)
+    return _optional_float(row.get(fallback)) if fallback else None
 
 
 def _improvement_percent(

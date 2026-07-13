@@ -48,6 +48,66 @@ def test_throughput_goal_prefers_highest_measured_tokens() -> None:
     assert scores[0].candidate_id == "c2"
 
 
+def test_zero_token_counts_disqualify_latency_recommendation() -> None:
+    inputs = [
+        _input(
+            "invalid",
+            total_tokens_s=0.0,
+            p95_latency_s=0.1,
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+        ),
+        _input(
+            "valid",
+            total_tokens_s=10.0,
+            p95_latency_s=0.2,
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+        ),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.LATENCY)
+
+    invalid = next(score for score in scores if score.candidate_id == "invalid")
+    assert result.recommended_candidate_id == "valid"
+    assert "invalid_token_counts" in invalid.disqualifiers
+
+
+def test_throughput_goal_prefers_output_token_rate_over_total_token_rate() -> None:
+    inputs = [
+        _input("prompt-heavy", total_tokens_s=200.0, output_tokens_s=50.0, p95_latency_s=1.0),
+        _input("decode-fast", total_tokens_s=100.0, output_tokens_s=80.0, p95_latency_s=1.0),
+    ]
+
+    _, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+
+    assert result.recommended_candidate_id == "decode-fast"
+    assert result.optimizer_quality["bounded_baselines"]["throughput"]["candidate_id"] == "decode-fast"
+
+
+def test_ineligible_candidate_does_not_distort_valid_candidate_normalization() -> None:
+    inputs = [
+        _input("fast", total_tokens_s=100.0, p95_latency_s=2.0),
+        _input("low-latency", total_tokens_s=90.0, p95_latency_s=0.1),
+        _input(
+            "undercovered-outlier",
+            total_tokens_s=10_000.0,
+            p95_latency_s=1.0,
+            concurrency_coverage="insufficient",
+        ),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+
+    assert result.recommended_candidate_id == "fast"
+    outlier = next(score for score in scores if score.candidate_id == "undercovered-outlier")
+    assert outlier.final_score is None
+    assert outlier.throughput_score is None
+    assert result.optimizer_quality["bounded_baselines"]["throughput"]["candidate_id"] == "fast"
+
+
 def test_undercovered_concurrency_is_not_eligible_for_recommendation() -> None:
     inputs = [
         _input(
@@ -210,6 +270,28 @@ def test_compute_optimizer_quality_reports_bounded_regret() -> None:
     assert metrics["evidence_reuse_improved_search_speed"] is True
 
 
+def test_optimizer_quality_does_not_claim_speedup_from_prior_metadata_alone() -> None:
+    quality = compute_optimizer_quality(
+        goal="balanced",
+        selected_candidate_id="selected",
+        ranked_scores=[_score("selected", 1.0)],
+        candidate_table=[
+            {
+                "candidate_id": "selected",
+                "status": "eligible",
+                "total_tokens_s": 100.0,
+                "p95_latency_s": 0.5,
+            }
+        ],
+        evidence_hit_count=0,
+        evidence_reuse_candidate_count=2,
+    )
+
+    metrics = quality["recommendation_quality_metrics"]
+    assert metrics["evidence_reuse_candidate_count"] == 2
+    assert metrics["evidence_reuse_improved_search_speed"] is False
+
+
 def test_evaluated_set_fidelity_missing_power_metric_winners() -> None:
     inputs = [
         _input("c1", total_tokens_s=100.0, p95_latency_s=1.0),
@@ -299,6 +381,35 @@ def test_efficiency_goal_with_power_prefers_best_tokens_per_watt() -> None:
     assert result.alternative_recommendations["efficiency"]["candidate_id"] == "c2"
 
 
+def test_efficiency_goal_uses_generated_token_energy_metrics() -> None:
+    inputs = [
+        _input(
+            "total-token-efficient",
+            total_tokens_s=100.0,
+            p95_latency_s=1.0,
+            tokens_per_second_per_watt=10.0,
+            joules_per_token=0.1,
+            tokens_per_joule=1.0,
+            joules_per_generated_token=2.0,
+        ),
+        _input(
+            "generated-token-efficient",
+            total_tokens_s=100.0,
+            p95_latency_s=1.0,
+            tokens_per_second_per_watt=1.0,
+            joules_per_token=1.0,
+            tokens_per_joule=2.0,
+            joules_per_generated_token=1.0,
+        ),
+    ]
+
+    _, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.EFFICIENCY)
+
+    assert result.recommended_candidate_id == "generated-token-efficient"
+    assert result.alternative_recommendations["efficiency"]["candidate_id"] == "generated-token-efficient"
+    assert result.alternative_recommendations["lowest_energy"]["candidate_id"] == "generated-token-efficient"
+
+
 def test_efficiency_goal_without_power_returns_unavailable_result() -> None:
     inputs = [_input("c1", total_tokens_s=90.0, p95_latency_s=1.0)]
 
@@ -309,7 +420,8 @@ def test_efficiency_goal_without_power_returns_unavailable_result() -> None:
     assert result.power_missing_reason == "No candidate had usable power telemetry."
 
 
-def test_efficiency_goal_rejects_poor_power_telemetry() -> None:
+@pytest.mark.parametrize("telemetry_quality", ["poor", "failed"])
+def test_efficiency_goal_rejects_bad_power_telemetry(telemetry_quality: str) -> None:
     inputs = [
         _input(
             "noisy",
@@ -317,7 +429,7 @@ def test_efficiency_goal_rejects_poor_power_telemetry() -> None:
             p95_latency_s=1.0,
             tokens_per_second_per_watt=2.0,
             joules_per_token=0.005,
-            telemetry_quality="poor",
+            telemetry_quality=telemetry_quality,
         )
     ]
 
@@ -339,6 +451,45 @@ def test_all_candidates_failed_produce_no_recommendation() -> None:
     assert result.recommended_candidate_id is None
     assert all(score.final_score is None for score in scores)
     assert all("no_successful_requests" in score.disqualifiers for score in scores)
+
+
+def test_throughput_goal_treats_partial_request_failures_as_hard_penalty() -> None:
+    inputs = [
+        _input(
+            "flaky-fast",
+            total_tokens_s=200.0,
+            p95_latency_s=0.5,
+            successful_requests=9,
+            failed_requests=1,
+            total_requests=10,
+        ),
+        _input("reliable", total_tokens_s=100.0, p95_latency_s=0.6),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+
+    flaky = next(score for score in scores if score.candidate_id == "flaky-fast")
+    assert result.recommended_candidate_id == "reliable"
+    assert "nonzero_failed_request_rate" in flaky.disqualifiers
+
+
+def test_power_from_ineligible_candidate_does_not_change_balanced_weights() -> None:
+    inputs = [
+        _input("valid", total_tokens_s=100.0, p95_latency_s=1.0),
+        _input(
+            "undercovered-with-power",
+            total_tokens_s=200.0,
+            p95_latency_s=0.5,
+            tokens_per_second_per_watt=2.0,
+            concurrency_coverage="insufficient",
+        ),
+    ]
+
+    _, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.BALANCED)
+
+    assert result.recommended_candidate_id == "valid"
+    assert result.power_aware is False
+    assert "power" not in result.score_weights
 
 
 def test_throughput_goal_rejects_success_without_measured_tokens() -> None:
@@ -411,6 +562,31 @@ def test_slo_throughput_violation_is_ineligible_for_recommendation() -> None:
 
     assert result.recommended_candidate_id == "ok"
     assert "slo_min_throughput_tokens_per_sec_not_met" in score_by_id["low"].disqualifiers
+
+
+def test_slo_throughput_guard_uses_output_token_rate() -> None:
+    inputs = [
+        _input(
+            "prompt-heavy",
+            total_tokens_s=200.0,
+            output_tokens_s=90.0,
+            p95_latency_s=0.4,
+            raw=_slo_raw({"min_throughput_tokens_per_sec": 100}),
+        ),
+        _input(
+            "decode-fast",
+            total_tokens_s=120.0,
+            output_tokens_s=110.0,
+            p95_latency_s=0.7,
+            raw=_slo_raw({"min_throughput_tokens_per_sec": 100}),
+        ),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.THROUGHPUT)
+    score_by_id = {score.candidate_id: score for score in scores}
+
+    assert result.recommended_candidate_id == "decode-fast"
+    assert "slo_min_throughput_tokens_per_sec_not_met" in score_by_id["prompt-heavy"].disqualifiers
 
 
 def test_slo_failed_request_rate_violation_is_ineligible_for_recommendation() -> None:
@@ -894,6 +1070,7 @@ def _input(
     candidate_id: str,
     *,
     total_tokens_s: float,
+    output_tokens_s: float | None = None,
     p95_latency_s: float | None,
     source: str = "test",
     concurrency: int = 16,
@@ -902,8 +1079,13 @@ def _input(
     successful_requests: int = 4,
     failed_requests: int = 0,
     total_requests: int = 4,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
     tokens_per_second_per_watt: float | None = None,
     joules_per_token: float | None = None,
+    tokens_per_joule: float | None = None,
+    joules_per_generated_token: float | None = None,
     telemetry_quality: str | None = None,
     telemetry_capabilities: dict[str, object] | None = None,
     concurrency_coverage: str | None = None,
@@ -962,14 +1144,20 @@ def _input(
             "successful_requests": successful_requests,
             "failed_requests": failed_requests,
             "request_rate_req_s": request_rate,
+            "output_tokens_s": total_tokens_s if output_tokens_s is None else output_tokens_s,
             "total_tokens_s": total_tokens_s,
             "avg_latency_s": p95_latency_s,
             "p95_latency_s": p95_latency_s,
             "concurrency_coverage": concurrency_coverage,
+            **({"prompt_tokens": prompt_tokens} if prompt_tokens is not None else {}),
+            **({"completion_tokens": completion_tokens} if completion_tokens is not None else {}),
+            **({"total_tokens": total_tokens} if total_tokens is not None else {}),
         },
         telemetry_metrics={
             "tokens_per_second_per_watt": tokens_per_second_per_watt,
             "joules_per_token": joules_per_token,
+            "tokens_per_joule": tokens_per_joule,
+            "joules_per_generated_token": joules_per_generated_token,
             "average_power_watts": total_tokens_s / tokens_per_second_per_watt if tokens_per_second_per_watt else None,
             "telemetry_quality": telemetry_quality or ("good" if tokens_per_second_per_watt is not None else "unavailable"),
             "power_sample_count": 10 if tokens_per_second_per_watt is not None else 0,

@@ -473,9 +473,9 @@ The scoring goals are:
 
 | Goal | Primary Bias |
 |---|---|
-| Throughput | Maximize total token throughput, with reliability, latency, and power as supporting signals. |
+| Throughput | Maximize output token throughput, with reliability, latency, and power as supporting signals. |
 | Latency | Minimize p95 latency, with reliability and power as supporting signals. |
-| Efficiency | Maximize power efficiency and minimize joules per token, then consider reliability and latency. |
+| Efficiency | Maximize tokens per joule and minimize joules per generated token, then consider reliability and latency. |
 | Balanced | Combine throughput, latency, reliability, and power when power telemetry is usable. |
 
 Candidates can be disqualified before scoring if they have no successful requests, missing required metrics, missing power telemetry for efficiency, or SLO violations.

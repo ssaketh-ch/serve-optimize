@@ -192,7 +192,9 @@ def slo_disqualifiers(item: RecommendationInput) -> list[str]:
         elif p95_latency_s * 1000.0 > p95_limit:
             disqualifiers.append("slo_p95_latency_ms_exceeded")
     throughput_floor = _optional_float(constraints.get("min_throughput_tokens_per_sec"))
-    throughput = _optional_float(item.measured_metrics.get("total_tokens_s"))
+    throughput = _optional_float(item.measured_metrics.get("output_tokens_s"))
+    if throughput is None:
+        throughput = _optional_float(item.measured_metrics.get("total_tokens_s"))
     if throughput_floor is not None:
         if throughput is None:
             disqualifiers.append("slo_min_throughput_tokens_per_sec_missing")

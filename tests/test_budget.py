@@ -54,7 +54,7 @@ def test_top_goal_score_candidate_is_promoted() -> None:
 
 
 def test_backend_default_baseline_is_preserved() -> None:
-    candidates = [_config("baseline"), _config("better"), _config("other")]
+    candidates = [_config("better"), _config("baseline", backend_defaults=True), _config("other")]
     decisions = select_promotion_decisions(
         candidates=candidates,
         results=[
@@ -72,6 +72,7 @@ def test_backend_default_baseline_is_preserved() -> None:
     baseline = next(decision for decision in decisions if decision.candidate_id == "baseline")
     assert baseline.promoted is True
     assert "baseline" in baseline.reason
+    assert {decision.candidate_id for decision in decisions if decision.promoted} == {"baseline", "better"}
 
 
 def test_prior_only_candidate_does_not_promote_without_measured_result() -> None:
@@ -96,6 +97,24 @@ def test_prior_only_candidate_does_not_promote_without_measured_result() -> None
     assert not any(decision.promoted for decision in decisions)
 
 
+def test_failed_baseline_does_not_displace_measured_candidate() -> None:
+    candidates = [_config("baseline", backend_defaults=True), _config("measured"), _config("other")]
+    decisions = select_promotion_decisions(
+        candidates=candidates,
+        results=[
+            _result("measured", throughput=100.0, energy=None),
+            _result("other", throughput=90.0, energy=None),
+        ],
+        prior_by_config_id={},
+        goal=Goal.PERFORMANCE,
+        from_rung=_rung("probe"),
+        to_rung=_rung("measure", index=1),
+        policy=ManagedBudgetPolicy.default(),
+    )
+
+    assert {decision.candidate_id for decision in decisions if decision.promoted} == {"measured"}
+
+
 def _rung(name: str, index: int = 0) -> EvaluationRung:
     return EvaluationRung(index=index, name=name, purpose=name)
 
@@ -115,7 +134,7 @@ def _result(candidate_id: str, throughput: float, energy: float | None) -> RungR
     )
 
 
-def _config(config_id: str) -> ServingConfig:
+def _config(config_id: str, *, backend_defaults: bool = False) -> ServingConfig:
     return ServingConfig(
         id=config_id,
         backend="vllm",
@@ -126,4 +145,5 @@ def _config(config_id: str) -> ServingConfig:
         max_context_tokens=2048,
         kv_cache_policy="paged",
         scheduler="continuous-batching",
+        extra={"backend_defaults": True} if backend_defaults else {},
     )

@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 
+import pytest
+
 from serve_optimize.campaign_plan import CampaignPlanRequest, build_campaign_plan, write_campaign_plan_artifacts
 from serve_optimize.cli import main
 
@@ -32,6 +34,35 @@ def test_campaign_plan_builds_matrix_and_commands() -> None:
     assert "--stream" in first["command"]
     assert "validate-campaign" in payload["post_commands"]["validate_campaign"]
     assert "results/campaign/*/*" in payload["post_commands"]["validate_campaign"]
+
+
+def test_campaign_plan_preserves_explicit_zero_and_nonstreaming_settings() -> None:
+    payload = build_campaign_plan(
+        CampaignPlanRequest(
+            models=["model-a"],
+            backends=["vllm"],
+            goals=["balanced"],
+            workload_profiles=["short"],
+        )
+    )
+    command = payload["runs"][0]["command"]
+
+    assert command[command.index("--warmup-requests") + 1] == "0"
+    assert command[command.index("--idle-baseline-seconds") + 1] == "0"
+    assert "--no-stream" in command
+
+
+def test_campaign_plan_rejects_invalid_runtime_settings() -> None:
+    with pytest.raises(ValueError, match="startup timeout"):
+        build_campaign_plan(
+            CampaignPlanRequest(
+                models=["model-a"],
+                backends=["vllm"],
+                goals=["balanced"],
+                workload_profiles=["short"],
+                startup_timeout_s=0,
+            )
+        )
 
 
 def test_campaign_plan_writes_artifacts(tmp_path) -> None:

@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .endpoint_benchmark import RequestFn, TelemetryCollectorFactory, make_run_id, run_endpoint_benchmark
+from .endpoint_benchmark import (
+    RequestFn,
+    TelemetryCollectorFactory,
+    benchmark_failure_reason,
+    make_run_id,
+    run_endpoint_benchmark,
+)
 from .io import write_json
 from .schemas import (
     CandidateEvaluationPlan,
@@ -51,6 +57,7 @@ def run_evaluation_plan_dir(
     total_requests = 0
     successful_requests = 0
     failed_requests = 0
+    completed_candidates = 0
 
     for plan in plans:
         if plan.benchmark_plan is None:
@@ -58,8 +65,9 @@ def run_evaluation_plan_dir(
                 {
                     "candidate_id": plan.candidate_id,
                     "rank": plan.rank,
-                    "status": "skipped",
-                    "reason": "Evaluation plan does not contain a benchmark plan.",
+                    "status": "failed",
+                    "reason": "invalid_plan",
+                    "error": "Evaluation plan does not contain a benchmark plan.",
                 }
             )
             continue
@@ -86,9 +94,12 @@ def run_evaluation_plan_dir(
         )
         comparison = compare_candidate_to_summary(plan.candidate, run.summary)
         write_json(run.run_dir / "comparison.json", comparison)
+        failure_reason = benchmark_failure_reason(run.summary)
         row = {
             "candidate_id": plan.candidate_id,
             "rank": plan.rank,
+            "status": "failed" if failure_reason else "completed",
+            "reason": failure_reason,
             "concurrency": config.concurrency,
             "summary_path": str(run.run_dir / "summary.json"),
             "telemetry_summary_path": str(run.run_dir / "telemetry_summary.json") if telemetry != "none" else None,
@@ -108,17 +119,23 @@ def run_evaluation_plan_dir(
         total_requests += run.summary.total_requests
         successful_requests += run.summary.successful_requests
         failed_requests += run.summary.failed_requests
+        if failure_reason is None:
+            completed_candidates += 1
 
-    failed = total_requests > 0 and successful_requests == 0
+    failed = completed_candidates == 0
     summary: dict[str, object] = {
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "plan_dir": str(plan_dir),
         "candidate_count": len(plans),
+        "completed_candidate_count": completed_candidates,
+        "failed_candidate_count": len(plans) - completed_candidates,
         "total_requests": total_requests,
         "successful_requests": successful_requests,
         "failed_requests": failed_requests,
-        "all_requests_failed": failed,
+        "all_requests_failed": total_requests > 0 and successful_requests == 0,
+        "evaluation_failed": failed,
+        "status": "failed" if failed else "success",
         "candidates": rows,
     }
     write_json(run_dir / "summary.json", summary)

@@ -49,6 +49,26 @@ class EndpointBenchmarkRun:
     comparison: PredictionComparison | None
 
 
+def benchmark_failure_reason(summary: EndpointBenchmarkSummary | dict[str, object]) -> str | None:
+    row = summary if isinstance(summary, dict) else to_dict(summary)
+    measured_requests = _int_value(
+        row.get("measured_requests") if row.get("measured_requests") is not None else row.get("total_requests")
+    )
+    successful_requests = _int_value(
+        row.get("measured_successful_requests")
+        if row.get("measured_successful_requests") is not None
+        else row.get("successful_requests")
+    )
+    if measured_requests <= 0:
+        return "benchmark_no_measurement_requests"
+    if successful_requests <= 0:
+        outcome = str(row.get("outcome") or "")
+        return outcome if outcome and outcome != "completed" else "client_failed"
+    if any(_int_value(row.get(field)) <= 0 for field in ("prompt_tokens", "completion_tokens", "total_tokens")):
+        return "invalid_measurement"
+    return None
+
+
 def make_run_id(prefix: str = "endpoint") -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{prefix}-{timestamp}-{uuid.uuid4().hex[:8]}"
@@ -265,10 +285,14 @@ def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: in
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    authorization = _authorization_header(config.api_key_env)
+    if authorization is not None:
+        headers["Authorization"] = authorization
     http_request = request.Request(
         _endpoint_url(config.base_url, config.endpoint),
         data=data,
-        headers={"Content-Type": "application/json", "Authorization": _authorization_header(config.api_key_env)},
+        headers=headers,
         method="POST",
     )
     try:
@@ -800,11 +824,26 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
     prompt_tokens = sum(summary.prompt_tokens for summary in summaries)
     completion_tokens = sum(summary.completion_tokens for summary in summaries)
     total_tokens = sum(summary.total_tokens for summary in summaries)
-    energy_joules = sum([summary.energy_joules for summary in summaries if summary.energy_joules is not None]) or None
-    active_energy_joules = sum([summary.active_energy_joules for summary in summaries if summary.active_energy_joules is not None]) or None
-    energy_accounting = "idle_subtracted" if active_energy_joules is not None else "raw"
+    measurement_duration_s = sum(summary.measurement_duration_s or 0.0 for summary in summaries) or None
+    energy_values = [summary.energy_joules for summary in summaries if summary.energy_joules is not None]
+    active_energy_values = [summary.active_energy_joules for summary in summaries if summary.active_energy_joules is not None]
+    energy_joules = sum(energy_values) if len(energy_values) == len(summaries) else None
+    active_energy_joules = sum(active_energy_values) if len(active_energy_values) == len(summaries) else None
+    energy_accounting = (
+        "idle_subtracted"
+        if active_energy_joules is not None
+        else "raw"
+        if energy_joules is not None
+        else "unavailable"
+    )
     tokens_per_joule = total_tokens / energy_joules if energy_joules not in {None, 0} else None
     active_tokens_per_joule = total_tokens / active_energy_joules if active_energy_joules not in {None, 0} else None
+    joules_per_token = energy_joules / total_tokens if energy_joules is not None and total_tokens > 0 else None
+    active_joules_per_token = (
+        active_energy_joules / total_tokens
+        if active_energy_joules is not None and total_tokens > 0
+        else None
+    )
     joules_per_generated_token = energy_joules / completion_tokens if energy_joules is not None and completion_tokens > 0 else None
     active_joules_per_generated_token = (
         active_energy_joules / completion_tokens
@@ -862,7 +901,7 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
             "active_tokens_per_joule": _round_or_none(active_tokens_per_joule),
             "joules_per_generated_token": _round_or_none(joules_per_generated_token),
             "active_joules_per_generated_token": _round_or_none(active_joules_per_generated_token),
-            "measurement_duration_s": sum(summary.measurement_duration_s or 0.0 for summary in summaries) or None,
+            "measurement_duration_s": measurement_duration_s,
             "measured_requests": sum(summary.measured_requests or 0 for summary in summaries),
             "measured_successful_requests": sum(summary.measured_successful_requests or 0 for summary in summaries),
             "measured_failed_requests": sum(summary.measured_failed_requests or 0 for summary in summaries),
@@ -914,7 +953,24 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         tpot_sample_count=sum(summary.tpot_sample_count for summary in summaries),
         timing_source=_aggregate_timing_source(summaries),
         power_sample_count=sum(summary.power_sample_count for summary in summaries),
-        average_power_watts=_mean([_float(summary.average_power_watts) for summary in summaries if _float(summary.average_power_watts) is not None]),
+        average_power_watts=(
+            energy_joules / measurement_duration_s
+            if energy_joules is not None and measurement_duration_s is not None and measurement_duration_s > 0
+            else None
+        ),
+        idle_power_watts=(
+            (energy_joules - active_energy_joules) / measurement_duration_s
+            if energy_joules is not None
+            and active_energy_joules is not None
+            and measurement_duration_s is not None
+            and measurement_duration_s > 0
+            else None
+        ),
+        active_power_watts=(
+            active_energy_joules / measurement_duration_s
+            if active_energy_joules is not None and measurement_duration_s is not None and measurement_duration_s > 0
+            else None
+        ),
         peak_power_watts=max([summary.peak_power_watts for summary in summaries if summary.peak_power_watts is not None], default=None),
         warmup_power_sample_count=sum(summary.warmup_power_sample_count for summary in summaries),
         measurement_power_sample_count=sum(summary.measurement_power_sample_count for summary in summaries),
@@ -924,20 +980,14 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         ),
         energy_joules=energy_joules,
         energy_accounting=energy_accounting,
-        joules_per_token=_mean(metric_values["joules_per_token"]),
+        joules_per_token=_round_or_none(joules_per_token),
         active_energy_joules=active_energy_joules,
         idle_subtracted_energy_joules=active_energy_joules,
-        active_joules_per_token=_mean(metric_values["active_joules_per_token"]),
+        active_joules_per_token=_round_or_none(active_joules_per_token),
         joules_per_generated_token=_round_or_none(joules_per_generated_token),
         active_joules_per_generated_token=_round_or_none(active_joules_per_generated_token),
-        tokens_per_second_per_watt=_mean([_float(summary.tokens_per_second_per_watt) for summary in summaries if _float(summary.tokens_per_second_per_watt) is not None]),
-        active_tokens_per_second_per_watt=_mean(
-            [
-                _float(summary.active_tokens_per_second_per_watt)
-                for summary in summaries
-                if _float(summary.active_tokens_per_second_per_watt) is not None
-            ]
-        ),
+        tokens_per_second_per_watt=_round_or_none(tokens_per_joule),
+        active_tokens_per_second_per_watt=_round_or_none(active_tokens_per_joule),
         tokens_per_joule=_round_or_none(tokens_per_joule),
         active_tokens_per_joule=_round_or_none(active_tokens_per_joule),
         temperature_rise_c=_mean([_float(summary.temperature_rise_c) for summary in summaries if _float(summary.temperature_rise_c) is not None]),
@@ -961,7 +1011,7 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         stability_classification=stability,
         confidence_intervals=confidence_intervals,
         warnings=sorted({warning for summary in summaries for warning in summary.warnings}),
-        measurement_duration_s=sum(summary.measurement_duration_s or 0.0 for summary in summaries) or None,
+        measurement_duration_s=measurement_duration_s,
         measured_requests=sum(summary.measured_requests or 0 for summary in summaries),
         measured_successful_requests=sum(summary.measured_successful_requests or 0 for summary in summaries),
         measured_failed_requests=sum(summary.measured_failed_requests or 0 for summary in summaries),
@@ -981,6 +1031,8 @@ def aggregate_benchmark_summaries(run_id: str, summaries: list[EndpointBenchmark
         max_token_backlog=_round_or_none(max_token_backlog),
         load_saturation_signal=_aggregate_load_saturation_signal(summaries),
         load_sufficiency=_aggregate_load_sufficiency(summaries),
+        telemetry_available=all(summary.telemetry_available for summary in summaries),
+        telemetry_quality=_aggregate_telemetry_quality(summaries),
         trial_id=run_id,
         started_at=_first_available([summary.started_at for summary in summaries]),
         ended_at=_last_available([summary.ended_at for summary in summaries]),
@@ -1050,9 +1102,9 @@ def _endpoint_url(base_url: str, endpoint: str) -> str:
     return base + endpoint
 
 
-def _authorization_header(api_key_env: str | None) -> str:
+def _authorization_header(api_key_env: str | None) -> str | None:
     if api_key_env is None:
-        return "Bearer EMPTY"
+        return None
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise ValueError(f"API key environment variable is unset or empty: {api_key_env}")
@@ -1380,13 +1432,13 @@ def _trial_outcome(records: list[RequestRecord]) -> str:
     reasons = [record.error_reason or record.status for record in records if record.status != "ok"]
     reason_text = " ".join(reasons).lower()
     if "request_timeout" in reasons:
-        return "timed_out"
+        return "request_timeout"
     if "out_of_memory" in reason_text or "cuda out of memory" in reason_text:
         return "out_of_memory"
     if any(reason.startswith("http_404") for reason in reasons):
-        return "model_unavailable"
+        return "unavailable_model"
     if any(reason.startswith(("http_401", "http_403")) for reason in reasons) or "gated" in reason_text or "access denied" in reason_text:
-        return "access_denied"
+        return "unavailable_gated_access"
     return "client_failed"
 
 
@@ -1399,9 +1451,10 @@ def _aggregate_outcome(summaries: list[EndpointBenchmarkSummary]) -> str:
         "invalid_config",
         "backend_launch_failed",
         "backend_crashed",
-        "timed_out",
-        "model_unavailable",
-        "access_denied",
+        "benchmark_timeout",
+        "request_timeout",
+        "unavailable_model",
+        "unavailable_gated_access",
         "client_failed",
     ]
     for outcome in priority:
@@ -1495,6 +1548,14 @@ def _stability_classification(metric_values: dict[str, list[float]]) -> str:
     if worst <= 0.15:
         return "mostly_stable"
     return "unstable"
+
+
+def _aggregate_telemetry_quality(summaries: list[EndpointBenchmarkSummary]) -> str:
+    quality_rank = {"failed": 0, "unavailable": 0, "poor": 1, "limited": 2, "good": 3}
+    return min(
+        (str(summary.telemetry_quality or "unavailable") for summary in summaries),
+        key=lambda quality: quality_rank.get(quality, 0),
+    )
 
 
 def _mean(values: list[float | None]) -> float | None:

@@ -216,7 +216,15 @@ def apply_managed_prior_policy(
         add(baseline.id)
 
     if policy.preserve_backend_default:
-        add(candidates[0].id)
+        backend_default = next(
+            (
+                config
+                for config in candidates
+                if (config.extra or {}).get("backend_defaults") is True
+            ),
+            candidates[0],
+        )
+        add(backend_default.id)
 
     if policy.preserve_low_memory_candidate:
         low_memory = min(

@@ -117,6 +117,49 @@ def test_evaluation_failure_accounting(tmp_path) -> None:
     assert result.failed is True
 
 
+def test_evaluation_with_no_plans_is_failed(tmp_path) -> None:
+    plan_dir = tmp_path / "empty-plan"
+    plan_dir.mkdir()
+    (plan_dir / "evaluation_plans.jsonl").write_text("", encoding="utf-8")
+
+    result = run_evaluation_plan_dir(plan_dir=plan_dir, out_dir=tmp_path / "evaluations")
+
+    assert result.failed is True
+    assert result.summary["status"] == "failed"
+    assert result.summary["candidate_count"] == 0
+
+
+def test_evaluation_missing_benchmark_plan_is_failed_not_skipped(tmp_path) -> None:
+    plan_dir = _write_plan_dir(tmp_path)
+    path = plan_dir / "evaluation_plans.jsonl"
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row["benchmark_plan"] = None
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    result = run_evaluation_plan_dir(plan_dir=plan_dir, out_dir=tmp_path / "evaluations")
+
+    assert result.failed is True
+    assert result.summary["candidates"][0]["status"] == "failed"
+    assert result.summary["candidates"][0]["reason"] == "invalid_plan"
+
+
+def test_evaluation_zero_token_measurement_is_failed(tmp_path) -> None:
+    result = run_evaluation_plan_dir(
+        plan_dir=_write_plan_dir(tmp_path),
+        out_dir=tmp_path / "evaluations",
+        request_fn=lambda _config, request_id: RequestRecord(
+            request_id=request_id,
+            start_time=0.0,
+            end_time=0.1,
+            latency_s=0.1,
+            status="ok",
+        ),
+    )
+
+    assert result.failed is True
+    assert result.summary["candidates"][0]["reason"] == "invalid_measurement"
+
+
 def test_evaluation_telemetry_failure_keeps_benchmark_results(tmp_path) -> None:
     result = run_evaluation_plan_dir(
         plan_dir=_write_plan_dir(tmp_path),

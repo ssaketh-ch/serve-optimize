@@ -8,6 +8,7 @@ from serve_optimize.endpoint_benchmark import (
     _endpoint_url,
     _run_requests,
     aggregate_benchmark_summaries,
+    benchmark_failure_reason,
     compare_prediction,
     run_endpoint_benchmark,
     send_chat_completion_request,
@@ -448,6 +449,37 @@ def test_aggregate_benchmark_summaries_adds_trial_statistics_and_confidence() ->
     assert aggregate.avg_client_queue_s == pytest.approx(0.02)
 
 
+def test_aggregate_energy_requires_power_for_every_trial() -> None:
+    samples = [
+        PowerSampleRecord(float(index) / 10.0, "active", 100.0, "nvml", gpu_util_percent=70.0)
+        for index in range(5)
+    ]
+    with_power = summarize_requests(
+        "with_power",
+        [RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30)],
+        wall_time_s=1.0,
+        power_samples=samples,
+        telemetry=TelemetryCapture(provider="nvml", samples=samples, warnings=[]),
+    )
+    without_power = summarize_requests(
+        "without_power",
+        [RequestRecord(0, 0.0, 1.0, 1.0, "ok", prompt_tokens=10, completion_tokens=20, total_tokens=30)],
+        wall_time_s=1.0,
+    )
+
+    aggregate = aggregate_benchmark_summaries("aggregate", [with_power, without_power])
+
+    assert aggregate.total_tokens == 60
+    assert aggregate.energy_joules is None
+    assert aggregate.joules_per_token is None
+    assert aggregate.joules_per_generated_token is None
+    assert aggregate.tokens_per_joule is None
+    assert aggregate.tokens_per_second_per_watt is None
+    assert aggregate.energy_accounting == "unavailable"
+    assert aggregate.telemetry_available is False
+    assert aggregate.telemetry_quality == "unavailable"
+
+
 def test_telemetry_summary_with_full_fields_is_good() -> None:
     samples = [
         PowerSampleRecord(
@@ -822,6 +854,36 @@ def test_request_timeout_is_recorded_separately_from_generic_error(monkeypatch: 
     assert summary.successful_requests == 0
     assert summary.failed_requests == 1
     assert summary.total_tokens_s == 0.0
+    assert summary.outcome == "request_timeout"
+    assert benchmark_failure_reason(summary) == "request_timeout"
+
+
+def test_successful_requests_with_zero_token_counts_fail_measurement_validation() -> None:
+    summary = summarize_requests(
+        "run-zero-tokens",
+        [RequestRecord(0, 0.0, 0.1, 0.1, "ok")],
+        wall_time_s=0.1,
+    )
+
+    assert benchmark_failure_reason(summary) == "invalid_measurement"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("http_404", "unavailable_model"),
+        ("http_403", "unavailable_gated_access"),
+    ],
+)
+def test_endpoint_access_failures_preserve_failure_taxonomy(status: str, expected: str) -> None:
+    summary = summarize_requests(
+        "run-access-failure",
+        [RequestRecord(0, 0.0, 0.1, 0.1, status, error_reason=status)],
+        wall_time_s=0.1,
+    )
+
+    assert summary.outcome == expected
+    assert benchmark_failure_reason(summary) == expected
 
 
 @pytest.mark.parametrize("base_url", ["file:///tmp/model", "ftp://example.com/v1", "example.com/v1"])
@@ -833,6 +895,31 @@ def test_endpoint_url_rejects_non_http_schemes(base_url: str) -> None:
 def test_endpoint_url_rejects_embedded_credentials() -> None:
     with pytest.raises(ValueError, match="must not be embedded"):
         _endpoint_url("https://user:secret@example.com/v1", "/v1/chat/completions")
+
+
+def test_endpoint_request_omits_authorization_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_urlopen(http_request, timeout):
+        del timeout
+        captured["authorization"] = http_request.get_header("Authorization")
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", fake_urlopen)
+    config = EndpointBenchmarkConfig(
+        run_id="run-anonymous",
+        base_url="https://example.com/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+    )
+
+    send_chat_completion_request(config, request_id=0)
+
+    assert captured["authorization"] is None
 
 
 def test_endpoint_auth_reads_secret_from_environment_without_storing_it(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

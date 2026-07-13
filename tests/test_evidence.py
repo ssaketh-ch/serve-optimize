@@ -1,5 +1,8 @@
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from serve_optimize.backends.vllm import VLLMArgumentCapabilities
 from serve_optimize.evidence import (
@@ -190,6 +193,76 @@ def test_measurement_from_summary_uses_idle_subtracted_energy_and_stability() ->
     assert measurement.is_stable is True
 
 
+def test_invalid_token_measurement_is_not_reusable_measured_evidence() -> None:
+    summary = EndpointBenchmarkSummary(
+        run_id="run-invalid",
+        total_requests=1,
+        successful_requests=1,
+        failed_requests=0,
+        wall_time_s=1.0,
+        request_rate_req_s=1.0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        output_tokens_s=0.0,
+        total_tokens_s=0.0,
+        avg_latency_s=1.0,
+        p50_latency_s=1.0,
+        p95_latency_s=1.0,
+        p99_latency_s=1.0,
+    )
+
+    measurement = measurement_from_summary(run_id="run-test", context=_context(), summary=summary)
+
+    assert measurement.is_measured is False
+
+
+def test_exact_fresh_measurement_without_power_is_reusable_for_throughput(tmp_path) -> None:
+    store = EvidenceStore(tmp_path / "evidence.sqlite")
+    context = _context()
+    measurement = replace(
+        _measurement(context),
+        average_power_w=None,
+        joules_per_token=None,
+        tokens_per_watt=None,
+        power_measurement_type="unavailable",
+        telemetry_source=None,
+    )
+    store.insert_measurement(measurement)
+
+    lookup = store.lookup_evidence(context, freshness_hours=24.0)
+    throughput_decision = classify_evidence_lookup(
+        lookup,
+        candidate_id="cfg_test",
+        context=context,
+        goal="throughput",
+    )
+    efficiency_decision = classify_evidence_lookup(
+        lookup,
+        candidate_id="cfg_test",
+        context=context,
+        goal="efficiency",
+    )
+    store.close()
+
+    assert lookup.hit_type == EvidenceHitType.EXACT_FRESH_HIT
+    assert throughput_decision.used_as_exact is True
+    assert efficiency_decision.used_as_exact is False
+    assert efficiency_decision.classification == EvidenceCompatibilityClassification.INCOMPATIBLE
+
+
+def test_invalid_and_synthetic_rows_are_excluded_from_evidence_lookup(tmp_path) -> None:
+    store = EvidenceStore(tmp_path / "evidence.sqlite")
+    context = _context()
+    store.insert_measurement(replace(_measurement(context), measurement_id="invalid", is_measured=False))
+    store.insert_measurement(replace(_measurement(context), measurement_id="synthetic", is_synthetic=True))
+
+    lookup = store.lookup_evidence(context, freshness_hours=24.0)
+    store.close()
+
+    assert lookup.hit_type == EvidenceHitType.MISS
+
+
 def test_exact_fresh_hit_classification(tmp_path) -> None:
     store = EvidenceStore(tmp_path / "evidence.sqlite")
     context = _context()
@@ -293,6 +366,28 @@ def test_poor_telemetry_prevents_power_goal_exact_reuse(tmp_path) -> None:
     assert decision.used_as_exact is False
 
 
+@pytest.mark.parametrize(("confidence", "used_as_exact"), [("good", True), (None, False)])
+def test_power_goal_exact_reuse_requires_known_telemetry_quality(
+    tmp_path,
+    confidence: str | None,
+    used_as_exact: bool,
+) -> None:
+    store = EvidenceStore(tmp_path / "evidence.sqlite")
+    context = _context()
+    store.insert_measurement(_measurement(context, confidence=confidence))
+
+    lookup = store.lookup_evidence(context, freshness_hours=24.0)
+    decision = classify_evidence_lookup(
+        lookup,
+        candidate_id="cfg_test",
+        context=context,
+        goal=Goal.EFFICIENT.value,
+    )
+    store.close()
+
+    assert decision.used_as_exact is used_as_exact
+
+
 def test_miss_classification(tmp_path) -> None:
     store = EvidenceStore(tmp_path / "evidence.sqlite")
 
@@ -323,6 +418,7 @@ def test_backend_version_change_prevents_exact_reuse(tmp_path) -> None:
 
     assert decision.classification == EvidenceCompatibilityClassification.RUNTIME_DRIFT
     assert decision.used_as_exact is False
+    assert decision.used_as_prior is False
 
 
 def test_torch_version_change_prevents_exact_reuse(tmp_path) -> None:

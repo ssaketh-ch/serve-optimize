@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .endpoint_benchmark import benchmark_failure_reason
 from .runtime_environment import build_runtime_evidence_fingerprint
 from .schemas import (
     EndpointBenchmarkConfig,
@@ -418,7 +419,7 @@ def measurement_from_summary(
     if not isinstance(row, dict):
         row = {}
     telemetry_summary = row.get("telemetry_summary") if isinstance(row.get("telemetry_summary"), dict) else {}
-    power_type = "idle_subtracted" if row.get("active_energy_joules") is not None else ("measured" if row.get("average_power_watts") is not None else "unavailable")
+    power_type = "idle_subtracted" if row.get("active_energy_joules") is not None else ("measured" if row.get("energy_joules") is not None else "unavailable")
     telemetry_source = row.get("telemetry_provider") or telemetry_summary.get("telemetry_provider")
     created_at = datetime.now(timezone.utc).isoformat()
     return EvidenceMeasurementRecord(
@@ -463,7 +464,7 @@ def measurement_from_summary(
         confidence=str(row.get("telemetry_quality")) if row.get("telemetry_quality") is not None else None,
         power_measurement_type=power_type,
         telemetry_source=str(telemetry_source) if telemetry_source is not None else None,
-        is_measured=True,
+        is_measured=benchmark_failure_reason(row) is None,
         is_synthetic=False,
         is_stable=_is_stable(row.get("stability_classification")),
         raw_json=raw_json or row,
@@ -630,8 +631,9 @@ class EvidenceStore:
             if _is_fresh(str(latest["created_at"]), freshness_hours):
                 return EvidenceLookupResult(EvidenceHitType.EXACT_FRESH_HIT, "Fresh measured evidence matched exactly.", latest)
             return EvidenceLookupResult(EvidenceHitType.EXACT_STALE_HIT, "Measured evidence matched exactly but is stale.", latest)
-        if exact_rows:
-            return EvidenceLookupResult(EvidenceHitType.PRIOR_ONLY_HIT, "Exact evidence exists but is not usable measured power evidence.", _normalize_measurement_row(exact_rows[0]))
+        prior_exact = next((row for row in exact_rows if _is_usable_prior(row)), None)
+        if prior_exact is not None:
+            return EvidenceLookupResult(EvidenceHitType.PRIOR_ONLY_HIT, "Exact measured evidence exists but is not eligible for exact reuse.", _normalize_measurement_row(prior_exact))
 
         near_rows = self._fetch_measurements(
             """
@@ -640,6 +642,7 @@ class EvidenceStore:
               AND backend_fingerprint = ?
               AND model_fingerprint = ?
               AND is_measured = 1
+              AND is_synthetic = 0
             ORDER BY created_at DESC
             LIMIT 5
             """,
@@ -658,6 +661,8 @@ class EvidenceStore:
             SELECT * FROM evidence_measurements
             WHERE backend = ?
               AND model = ?
+              AND is_measured = 1
+              AND is_synthetic = 0
             ORDER BY created_at DESC
             LIMIT 5
             """,
@@ -733,7 +738,7 @@ def classify_evidence_lookup(
             evidence_key=context.evidence_key,
             classification=classification,
             used_as_exact=False,
-            used_as_prior=bool(measurement),
+            used_as_prior=lookup.hit_type in {EvidenceHitType.EXACT_STALE_HIT, EvidenceHitType.NEAR_COMPATIBLE_HIT},
             freshness_status=_freshness_status(lookup),
             compatibility_reasons=[lookup.reason],
             rejection_reason=rejection_reason,
@@ -747,7 +752,7 @@ def classify_evidence_lookup(
             evidence_key=context.evidence_key,
             classification=EvidenceCompatibilityClassification.UNSUPPORTED_UNDER_CURRENT_BACKEND,
             used_as_exact=False,
-            used_as_prior=lookup.hit_type in {EvidenceHitType.EXACT_STALE_HIT, EvidenceHitType.NEAR_COMPATIBLE_HIT, EvidenceHitType.PRIOR_ONLY_HIT},
+            used_as_prior=lookup.hit_type in {EvidenceHitType.EXACT_STALE_HIT, EvidenceHitType.NEAR_COMPATIBLE_HIT},
             freshness_status=_freshness_status(lookup),
             compatibility_reasons=[lookup.reason],
             rejection_reason=unsupported,
@@ -1030,9 +1035,13 @@ def _is_usable_exact(row: sqlite3.Row) -> bool:
     )
     return (
         bool(row["is_measured"])
-        and row["power_measurement_type"] != "unavailable"
+        and not bool(row["is_synthetic"])
         and bool(runtime_fingerprint)
     )
+
+
+def _is_usable_prior(row: sqlite3.Row) -> bool:
+    return bool(row["is_measured"]) and not bool(row["is_synthetic"])
 
 
 def _is_fresh(created_at: str, freshness_hours: float) -> bool:
@@ -1146,14 +1155,14 @@ def _freshness_status(lookup: EvidenceLookupResult) -> str:
 
 
 def _telemetry_rejection_for_goal(measurement: dict[str, Any], goal: str | None) -> str | None:
-    if str(goal or "").lower() not in {"balanced", "efficient", "efficiency"}:
+    if str(goal or "").lower() not in {"efficient", "efficiency"}:
         return None
     if not measurement:
         return "No measurement metadata was available for power aware evidence reuse."
     if measurement.get("power_measurement_type") == "unavailable":
         return "Power telemetry is unavailable for a power aware goal."
     confidence = str(measurement.get("confidence") or "").lower()
-    if confidence in {"poor", "unavailable", "failed"}:
+    if confidence not in {"good", "limited"}:
         return f"Telemetry quality '{confidence}' is not acceptable for exact power aware reuse."
     return None
 

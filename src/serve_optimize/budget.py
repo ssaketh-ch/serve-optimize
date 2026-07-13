@@ -106,12 +106,23 @@ def select_promotion_decisions(
     reasons: dict[str, list[str]] = {candidate_id: [] for candidate_id in candidate_ids}
 
     if policy.preserve_baseline and candidate_ids:
-        _promote(candidate_ids[0], promoted_ids, reasons, "baseline")
+        baseline_id = next(
+            (
+                candidate.id
+                for candidate in candidates
+                if (candidate.extra or {}).get("backend_defaults") is True
+            ),
+            candidate_ids[0],
+        )
+        if baseline_id in results_by_candidate:
+            _promote(baseline_id, promoted_ids, reasons, "baseline")
 
     for candidate_id in _nondominated_candidate_ids(results_by_candidate.values()):
         _promote(candidate_id, promoted_ids, reasons, "nondominated")
 
-    for candidate_id in _top_goal_candidate_ids(results_by_candidate.values(), goal, limit=target_count):
+    for candidate_id in _top_goal_candidate_ids(results_by_candidate.values(), goal, limit=len(results_by_candidate)):
+        if len(promoted_ids) >= target_count:
+            break
         _promote(candidate_id, promoted_ids, reasons, "top_goal_score")
 
     for candidate in candidates:

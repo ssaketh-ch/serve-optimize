@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from rich.console import Console
@@ -153,11 +153,11 @@ class PlainTextReporter:
                     str(row.get("candidate_id") or "unknown"),
                     str(row.get("source") or "unknown"),
                     str(row.get("concurrency") or "n/a"),
-                    _fmt_metric(row.get("total_tokens_s"), "tok/s"),
+                    _fmt_metric(_output_throughput(row), "tok/s"),
                     _fmt_metric(_ms_from_seconds(row.get("p95_latency_s")), "ms"),
                     _fmt_metric(row.get("average_power_watts"), "W"),
-                    _fmt_metric(row.get("joules_per_token"), "J/tok"),
-                    _fmt_metric(row.get("tokens_per_second_per_watt"), "tok/s/W"),
+                    _fmt_metric(_generated_token_energy(row), "J/tok"),
+                    _fmt_metric(_tokens_per_joule(row), "tok/J"),
                     str(row.get("failed_requests") if row.get("failed_requests") is not None else "n/a"),
                     _fmt_metric(row.get("throughput_score"), None),
                     _fmt_metric(row.get("latency_score"), None),
@@ -174,11 +174,11 @@ class PlainTextReporter:
                     "candidate_id",
                     "source",
                     "conc",
-                    "tokens/s",
+                    "output/s",
                     "p95",
                     "watts",
-                    "J/tok",
-                    "tok/s/W",
+                    "J/gen",
+                    "tok/J",
                     "fail",
                     "thr",
                     "lat",
@@ -213,10 +213,10 @@ class PlainTextReporter:
             (
                 str(row.get("candidate_id") or "unknown"),
                 str(row.get("concurrency") or "n/a"),
-                _fmt_metric(row.get("total_tokens_s"), "tok/s"),
+                _fmt_metric(_output_throughput(row), "tok/s"),
                 _fmt_metric(_ms_from_seconds(row.get("p95_latency_s")), "ms"),
-                _fmt_metric(row.get("joules_per_token"), "J/tok"),
-                _fmt_metric(row.get("tokens_per_second_per_watt"), "tok/s/W"),
+                _fmt_metric(_generated_token_energy(row), "J/tok"),
+                _fmt_metric(_tokens_per_joule(row), "tok/J"),
                 _fmt_metric(row.get("score"), None),
             )
             for row in result.pareto_frontier
@@ -224,7 +224,7 @@ class PlainTextReporter:
         lines.append(
             format_metric_table(
                 rows=rows,
-                headers=("candidate_id", "conc", "tokens/s", "p95", "J/tok", "tok/s/W", "score"),
+                headers=("candidate_id", "conc", "output/s", "p95", "J/gen", "tok/J", "score"),
             )
         )
         return "\n".join(lines)
@@ -362,16 +362,16 @@ class PlainTextReporter:
                     objective,
                     str(row.get("candidate_id") or "unknown"),
                     str(row.get("concurrency") or "n/a"),
-                    _fmt_metric(row.get("total_tokens_s"), "tok/s"),
+                    _fmt_metric(_output_throughput(row), "tok/s"),
                     _fmt_metric(_ms_from_seconds(row.get("p95_latency_s")), "ms"),
-                    _fmt_metric(row.get("tokens_per_second_per_watt"), "tok/s/W"),
+                    _fmt_metric(_tokens_per_joule(row), "tok/J"),
                     str(row.get("reason") or ""),
                 )
             )
         lines.append(
             format_metric_table(
                 rows=rows,
-                headers=("objective", "candidate_id", "conc", "tokens/s", "p95", "tok/s/W", "reason"),
+                headers=("objective", "candidate_id", "conc", "output/s", "p95", "tok/J", "reason"),
             )
         )
         return "\n".join(lines)
@@ -501,7 +501,7 @@ class RichReporter:
 
     def _candidates_table(self, result: RecommendationResult) -> Table:
         table = Table(show_header=True, header_style="bold magenta")
-        for column in ("candidate_id", "source", "conc", "tokens/s", "p95", "watts", "J/tok", "tok/s/W", "fail", "thr", "lat", "power", "rel", "score", "pareto"):
+        for column in ("candidate_id", "source", "conc", "output/s", "p95", "watts", "J/gen", "tok/J", "fail", "thr", "lat", "power", "rel", "score", "pareto"):
             justify = "right" if column not in {"candidate_id", "source"} else "left"
             table.add_column(column, justify=justify)
         for row in result.candidate_table:
@@ -509,11 +509,11 @@ class RichReporter:
                 str(row.get("candidate_id") or "unknown"),
                 str(row.get("source") or "unknown"),
                 str(row.get("concurrency") or "n/a"),
-                _fmt_metric(row.get("total_tokens_s"), "tok/s"),
+                _fmt_metric(_output_throughput(row), "tok/s"),
                 _fmt_metric(_ms_from_seconds(row.get("p95_latency_s")), "ms"),
                 _fmt_metric(row.get("average_power_watts"), "W"),
-                _fmt_metric(row.get("joules_per_token"), "J/tok"),
-                _fmt_metric(row.get("tokens_per_second_per_watt"), "tok/s/W"),
+                _fmt_metric(_generated_token_energy(row), "J/tok"),
+                _fmt_metric(_tokens_per_joule(row), "tok/J"),
                 str(row.get("failed_requests") if row.get("failed_requests") is not None else "n/a"),
                 _fmt_metric(row.get("throughput_score"), None),
                 _fmt_metric(row.get("latency_score"), None),
@@ -540,17 +540,17 @@ class RichReporter:
         if not result.pareto_frontier:
             return Text("No Pareto frontier was recorded.")
         table = Table(show_header=True, header_style="bold magenta")
-        for column in ("candidate_id", "conc", "tokens/s", "p95", "J/tok", "tok/s/W", "score"):
+        for column in ("candidate_id", "conc", "output/s", "p95", "J/gen", "tok/J", "score"):
             justify = "right" if column != "candidate_id" else "left"
             table.add_column(column, justify=justify)
         for row in result.pareto_frontier:
             table.add_row(
                 str(row.get("candidate_id") or "unknown"),
                 str(row.get("concurrency") or "n/a"),
-                _fmt_metric(row.get("total_tokens_s"), "tok/s"),
+                _fmt_metric(_output_throughput(row), "tok/s"),
                 _fmt_metric(_ms_from_seconds(row.get("p95_latency_s")), "ms"),
-                _fmt_metric(row.get("joules_per_token"), "J/tok"),
-                _fmt_metric(row.get("tokens_per_second_per_watt"), "tok/s/W"),
+                _fmt_metric(_generated_token_energy(row), "J/tok"),
+                _fmt_metric(_tokens_per_joule(row), "tok/J"),
                 _fmt_metric(row.get("score"), None),
             )
         return table
@@ -677,17 +677,17 @@ class RichReporter:
 
     def _objective_alternatives_table(self, result: RecommendationResult) -> Table:
         table = Table(show_header=True, header_style="bold magenta")
-        for column in ("objective", "candidate_id", "conc", "tokens/s", "p95", "tok/s/W", "reason"):
-            justify = "right" if column in {"conc", "tokens/s", "p95", "tok/s/W"} else "left"
+        for column in ("objective", "candidate_id", "conc", "output/s", "p95", "tok/J", "reason"):
+            justify = "right" if column in {"conc", "output/s", "p95", "tok/J"} else "left"
             table.add_column(column, justify=justify)
         for objective, row in result.alternative_recommendations.items():
             table.add_row(
                 objective,
                 str(row.get("candidate_id") or "unknown"),
                 str(row.get("concurrency") or "n/a"),
-                _fmt_metric(row.get("total_tokens_s"), "tok/s"),
+                _fmt_metric(_output_throughput(row), "tok/s"),
                 _fmt_metric(_ms_from_seconds(row.get("p95_latency_s")), "ms"),
-                _fmt_metric(row.get("tokens_per_second_per_watt"), "tok/s/W"),
+                _fmt_metric(_tokens_per_joule(row), "tok/J"),
                 str(row.get("reason") or ""),
             )
         return table
@@ -866,6 +866,21 @@ def _capability_payload(value: object) -> dict[str, object]:
 def _ms_from_seconds(value: object) -> float | None:
     if value is None:
         return None
+
+
+def _output_throughput(row: Mapping[str, object]) -> object:
+    value = row.get("output_tokens_s")
+    return value if value is not None else row.get("total_tokens_s")
+
+
+def _generated_token_energy(row: Mapping[str, object]) -> object:
+    value = row.get("joules_per_generated_token")
+    return value if value is not None else row.get("joules_per_token")
+
+
+def _tokens_per_joule(row: Mapping[str, object]) -> object:
+    value = row.get("tokens_per_joule")
+    return value if value is not None else row.get("tokens_per_second_per_watt")
     try:
         return float(value) * 1000.0
     except (TypeError, ValueError):

@@ -818,8 +818,15 @@ def score_recommendation_inputs(
         )
         return [], result
 
-    has_any_power = any(_usable_power_telemetry(item) for item in inputs)
     effective_goal = goal
+    disqualifiers_by_id = {
+        item.candidate_id: _disqualifiers(item, effective_goal, False)
+        for item in inputs
+    }
+    eligible_inputs = [
+        item for item in inputs if not disqualifiers_by_id[item.candidate_id]
+    ]
+    has_any_power = any(_usable_power_telemetry(item) for item in eligible_inputs)
     if goal == RecommendationGoal.EFFICIENCY and not has_any_power:
         if not allow_efficiency_fallback:
             warnings.append("Efficiency recommendation is unavailable because no candidate has usable power telemetry.")
@@ -827,11 +834,12 @@ def score_recommendation_inputs(
                 _make_unavailable_score(
                     item,
                     goal,
-                    (
+                    disqualifiers_by_id[item.candidate_id]
+                    or [
                         "poor_power_telemetry"
-                        if _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt"))
+                        if _has_power_efficiency_metric(item)
                         else "missing_power_telemetry"
-                    ),
+                    ],
                 )
                 for item in inputs
             ]
@@ -874,16 +882,24 @@ def score_recommendation_inputs(
             return scores, result
         effective_goal = RecommendationGoal.BALANCED
         warnings.append("Efficiency goal fell back to balanced scoring because no candidate had usable power telemetry.")
+        disqualifiers_by_id = {
+            item.candidate_id: _disqualifiers(item, effective_goal, False)
+            for item in inputs
+        }
+        eligible_inputs = [
+            item for item in inputs if not disqualifiers_by_id[item.candidate_id]
+        ]
+        has_any_power = any(_usable_power_telemetry(item) for item in eligible_inputs)
 
-    throughput_scores = _normalize_higher(inputs, lambda item: _optional_float(item.measured_metrics.get("total_tokens_s")))
-    latency_scores = _normalize_lower(inputs, lambda item: _latency_value(item))
+    throughput_scores = _normalize_higher(eligible_inputs, _throughput_value)
+    latency_scores = _normalize_lower(eligible_inputs, _latency_value)
     efficiency_scores = _normalize_higher(
-        inputs,
-        lambda item: _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")) if _usable_power_telemetry(item) else None,
+        eligible_inputs,
+        lambda item: _energy_efficiency_value(item) if _usable_power_telemetry(item) else None,
     )
     joules_scores = _normalize_lower(
-        inputs,
-        lambda item: _optional_float(item.telemetry_metrics.get("joules_per_token")) if _usable_power_telemetry(item) else None,
+        eligible_inputs,
+        lambda item: _energy_cost_value(item) if _usable_power_telemetry(item) else None,
     )
     reliability_scores = {item.candidate_id: _reliability_score(item) for item in inputs}
     prediction_accuracy_scores = {item.candidate_id: _prediction_accuracy_score(item) for item in inputs}
@@ -898,7 +914,7 @@ def score_recommendation_inputs(
 
     scores: list[RecommendationScore] = []
     for item in inputs:
-        disqualifiers = _disqualifiers(item, effective_goal, has_any_power)
+        disqualifiers = disqualifiers_by_id[item.candidate_id]
         reasons: list[str] = []
         missing_metric_penalties = _missing_metric_penalties(item, effective_goal, has_any_power)
         if disqualifiers:
@@ -949,7 +965,7 @@ def score_recommendation_inputs(
                 )
             )
             reasons.append(
-                "Throughput scoring emphasized measured total_tokens_s with reliability, p95 latency, and power as tie-breakers when available."
+                "Throughput scoring emphasized measured output token throughput with reliability, p95 latency, and power as tie-breakers when available."
             )
         elif effective_goal == RecommendationGoal.LATENCY:
             final_score = _weighted_sum(
@@ -968,7 +984,7 @@ def score_recommendation_inputs(
                     (latency_score, weights["latency"]),
                 )
             )
-            reasons.append("Efficiency scoring emphasized measured tokens/sec/watt and joules/token, then penalized failures and high p95 latency.")
+            reasons.append("Efficiency scoring emphasized measured tokens/joule and joules/generated token, then penalized failures and high p95 latency.")
         else:
             balanced_score = _weighted_sum(
                 (
@@ -1216,7 +1232,7 @@ def compute_optimizer_quality(
             "trials_required_to_reach_recommendation": trial_count,
             "number_of_failed_trials_avoided_by_pruning": failed_trials_avoided_by_pruning,
             "number_of_trials_avoided_by_pruning": pruned_candidate_count,
-            "evidence_reuse_improved_search_speed": bool(evidence_hit_count or evidence_reuse_candidate_count),
+            "evidence_reuse_improved_search_speed": evidence_hit_count > 0,
             "evidence_reuse_candidate_count": evidence_reuse_candidate_count,
             "evidence_hit_count": evidence_hit_count,
             "recommendation_changed_after_new_evidence": recommendation_changed_after_new_evidence,
@@ -1311,8 +1327,10 @@ def audit_recommendation_quality(recommendation: RecommendationResult) -> dict[s
 
 def _metric_winners(candidate_table: list[dict[str, float | int | str | None]]) -> dict[str, dict[str, object] | None]:
     return {
-        "throughput": _metric_winner(candidate_table, "total_tokens_s", maximize=True),
+        "throughput": _metric_winner(candidate_table, "output_tokens_s", maximize=True),
         "lowest_latency": _metric_winner(candidate_table, "p95_latency_s", maximize=False),
+        "lowest_energy_per_generated_token": _metric_winner(candidate_table, "joules_per_generated_token", maximize=False),
+        "best_tokens_per_joule": _metric_winner(candidate_table, "tokens_per_joule", maximize=True),
         "lowest_energy_per_token": _metric_winner(candidate_table, "joules_per_token", maximize=False),
         "best_tokens_per_watt": _metric_winner(candidate_table, "tokens_per_second_per_watt", maximize=True),
         "lowest_power": _metric_winner(candidate_table, "average_power_watts", maximize=False),
@@ -1326,9 +1344,11 @@ def _metric_winner(
     maximize: bool,
 ) -> dict[str, object] | None:
     rows = [
-        (str(row.get("candidate_id")), _optional_float(row.get(metric)))
+        (str(row.get("candidate_id")), _candidate_metric(row, metric))
         for row in candidate_table
-        if row.get("candidate_id") is not None and _optional_float(row.get(metric)) is not None
+        if row.get("status", "eligible") == "eligible"
+        and row.get("candidate_id") is not None
+        and _candidate_metric(row, metric) is not None
     ]
     if not rows:
         return None
@@ -1355,12 +1375,14 @@ def _metric_regret_percent(
             "p95_latency": None,
             "tokens_per_watt": None,
             "joules_per_token": None,
+            "tokens_per_joule": None,
+            "joules_per_generated_token": None,
         }
     return {
         "throughput": _metric_percent_regret(
             selected_row,
             metric_winners.get("throughput"),
-            "total_tokens_s",
+            "output_tokens_s",
             maximize=True,
         ),
         "p95_latency": _metric_percent_regret(
@@ -1381,6 +1403,18 @@ def _metric_regret_percent(
             "joules_per_token",
             maximize=False,
         ),
+        "tokens_per_joule": _metric_percent_regret(
+            selected_row,
+            metric_winners.get("best_tokens_per_joule"),
+            "tokens_per_joule",
+            maximize=True,
+        ),
+        "joules_per_generated_token": _metric_percent_regret(
+            selected_row,
+            metric_winners.get("lowest_energy_per_generated_token"),
+            "joules_per_generated_token",
+            maximize=False,
+        ),
     }
 
 
@@ -1393,7 +1427,7 @@ def _metric_percent_regret(
 ) -> float | None:
     if winner is None:
         return None
-    selected_value = _optional_float(selected_row.get(metric))
+    selected_value = _candidate_metric(selected_row, metric)
     winner_value = _optional_float(winner.get("value"))
     regret = _relative_regret(winner_value, selected_value, maximize=maximize)
     return round(regret * 100.0, 6) if regret is not None else None
@@ -1407,6 +1441,16 @@ def _relative_regret(best_value: float | None, selected_value: float | None, *, 
     else:
         regret = (selected_value - best_value) / abs(best_value)
     return max(0.0, regret)
+
+
+def _candidate_metric(
+    row: dict[str, float | int | str | None],
+    metric: str,
+) -> float | None:
+    value = _optional_float(row.get(metric))
+    if value is None and metric == "output_tokens_s":
+        return _optional_float(row.get("total_tokens_s"))
+    return value
 
 
 def _safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
@@ -1479,6 +1523,7 @@ def _write_pareto_csv(path: Path, rows: list[dict[str, float | int | str | None]
         "candidate_id",
         "source",
         "concurrency",
+        "output_tokens_s",
         "total_tokens_s",
         "p95_latency_s",
         "failed_requests",
@@ -1704,7 +1749,11 @@ def _disqualifiers(item: RecommendationInput, goal: RecommendationGoal, has_any_
     total = _optional_int(item.measured_metrics.get("total_requests")) or 0
     if total <= 0 or successful <= 0:
         disqualifiers.append("no_successful_requests")
-    throughput = _optional_float(item.measured_metrics.get("total_tokens_s"))
+    if _invalid_token_counts(item):
+        disqualifiers.append("invalid_token_counts")
+    if goal == RecommendationGoal.THROUGHPUT and _failed_request_count(item) > 0:
+        disqualifiers.append("nonzero_failed_request_rate")
+    throughput = _throughput_value(item)
     if goal in {RecommendationGoal.THROUGHPUT, RecommendationGoal.BALANCED} and (throughput is None or throughput <= 0):
         disqualifiers.append("missing_throughput_metric")
     if goal == RecommendationGoal.LATENCY and _latency_value(item) is None:
@@ -1716,7 +1765,7 @@ def _disqualifiers(item: RecommendationInput, goal: RecommendationGoal, has_any_
     if goal == RecommendationGoal.EFFICIENCY and not _usable_power_telemetry(item):
         disqualifiers.append(
             "poor_power_telemetry"
-            if _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt"))
+            if _has_power_efficiency_metric(item)
             else "missing_power_telemetry"
         )
     disqualifiers.extend(slo_disqualifiers(item))
@@ -1810,6 +1859,51 @@ def _latency_value(item: RecommendationInput) -> float | None:
     return p95 if p95 is not None else _optional_float(item.measured_metrics.get("avg_latency_s"))
 
 
+def _throughput_value(item: RecommendationInput) -> float | None:
+    output_tokens_s = _optional_float(item.measured_metrics.get("output_tokens_s"))
+    if output_tokens_s is not None:
+        return output_tokens_s
+    return _optional_float(item.measured_metrics.get("total_tokens_s"))
+
+
+def _energy_efficiency_value(item: RecommendationInput) -> float | None:
+    tokens_per_joule = _optional_float(item.telemetry_metrics.get("tokens_per_joule"))
+    if tokens_per_joule is not None and tokens_per_joule > 0:
+        return tokens_per_joule
+    tokens_per_watt = _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt"))
+    return tokens_per_watt if tokens_per_watt is not None and tokens_per_watt > 0 else None
+
+
+def _energy_cost_value(item: RecommendationInput) -> float | None:
+    generated_token_cost = _optional_float(item.telemetry_metrics.get("joules_per_generated_token"))
+    if generated_token_cost is not None and generated_token_cost > 0:
+        return generated_token_cost
+    token_cost = _optional_float(item.telemetry_metrics.get("joules_per_token"))
+    return token_cost if token_cost is not None and token_cost > 0 else None
+
+
+def _has_power_efficiency_metric(item: RecommendationInput) -> bool:
+    return _energy_efficiency_value(item) is not None or _energy_cost_value(item) is not None
+
+
+def _failed_request_count(item: RecommendationInput) -> int:
+    failed = _optional_int(item.measured_metrics.get("failed_requests"))
+    if failed is not None:
+        return max(0, failed)
+    total = _optional_int(item.measured_metrics.get("total_requests")) or 0
+    successful = _optional_int(item.measured_metrics.get("successful_requests")) or 0
+    return max(0, total - successful)
+
+
+def _invalid_token_counts(item: RecommendationInput) -> bool:
+    fields = ("prompt_tokens", "completion_tokens", "total_tokens")
+    return any(
+        field in item.measured_metrics
+        and (_optional_int(item.measured_metrics.get(field)) or 0) <= 0
+        for field in fields
+    )
+
+
 def _insufficient_concurrency_coverage(item: RecommendationInput) -> bool:
     coverage = item.measured_metrics.get("concurrency_coverage")
     if coverage is not None:
@@ -1865,8 +1959,8 @@ def _power_score(efficiency_score: float | None, joules_score: float | None) -> 
 
 def _missing_metric_penalties(item: RecommendationInput, goal: RecommendationGoal, has_any_power: bool) -> list[str]:
     penalties: list[str] = []
-    if _optional_float(item.measured_metrics.get("total_tokens_s")) is None:
-        penalties.append("missing_total_tokens_s")
+    if _throughput_value(item) is None:
+        penalties.append("missing_output_token_throughput")
     if _latency_value(item) is None:
         penalties.append("missing_latency")
     if _reliability_score(item) is None:
@@ -1919,7 +2013,11 @@ def _with_pareto_flag(score: RecommendationScore, pareto_optimal: bool) -> Recom
     )
 
 
-def _make_unavailable_score(item: RecommendationInput, goal: RecommendationGoal, disqualifier: str) -> RecommendationScore:
+def _make_unavailable_score(
+    item: RecommendationInput,
+    goal: RecommendationGoal,
+    disqualifiers: list[str],
+) -> RecommendationScore:
     return RecommendationScore(
         candidate_id=item.candidate_id,
         goal=goal.value,
@@ -1932,10 +2030,10 @@ def _make_unavailable_score(item: RecommendationInput, goal: RecommendationGoal,
         final_score=None,
         power_score=None,
         weights_used=_weights_for_goal(goal, has_any_power=False),
-        missing_metric_penalties=[disqualifier],
+        missing_metric_penalties=list(disqualifiers),
         score_breakdown=_score_breakdown(None, None, None, None, _reliability_score(item), _prediction_accuracy_score(item)),
         reasons=list(item.warnings) + ["Candidate could not be scored for the requested goal."],
-        disqualifiers=[disqualifier],
+        disqualifiers=list(disqualifiers),
     )
 
 
@@ -1965,9 +2063,9 @@ def _selection_reasons(
     if has_any_power and goal in {RecommendationGoal.BALANCED, RecommendationGoal.EFFICIENCY}:
         reasons.append("Power telemetry was included in the scoring policy for this goal.")
 
-    throughput = _optional_float(selected_input.measured_metrics.get("total_tokens_s"))
+    throughput = _throughput_value(selected_input)
     if throughput is not None:
-        peak_throughput = max((_optional_float(item.measured_metrics.get("total_tokens_s")) or 0.0) for item in valid_inputs)
+        peak_throughput = max((_throughput_value(item) or 0.0) for item in valid_inputs)
         if was_comparative and throughput >= peak_throughput:
             reasons.append(f"It achieved the highest measured throughput at {_format_rate(throughput)} tokens/s.")
         else:
@@ -1989,7 +2087,7 @@ def _selection_reasons(
             reasons.append(f"It had the lowest measured p95 latency at {_format_seconds(selected_p95)}.")
         high_concurrency = _highest_concurrency_input(valid_inputs, exclude_candidate_id=selected_input.candidate_id)
         high_p95 = _optional_float(high_concurrency.measured_metrics.get("p95_latency_s")) if high_concurrency else None
-        high_throughput = _optional_float(high_concurrency.measured_metrics.get("total_tokens_s")) if high_concurrency else None
+        high_throughput = _throughput_value(high_concurrency) if high_concurrency else None
         if high_p95 is not None and high_p95 > selected_p95 and high_throughput not in {None, 0} and throughput is not None:
             improvement = (high_p95 - selected_p95) / high_p95
             retained = throughput / high_throughput
@@ -1998,17 +2096,17 @@ def _selection_reasons(
                 f"while retaining {_format_percent(retained)} of that candidate's throughput."
             )
 
-    efficiency = _optional_float(selected_input.telemetry_metrics.get("tokens_per_second_per_watt"))
+    efficiency = _energy_efficiency_value(selected_input)
     if efficiency is not None:
         valid_efficiency = [
-            _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt"))
+            _energy_efficiency_value(item)
             for item in valid_inputs
         ]
         valid_efficiency = [value for value in valid_efficiency if value is not None]
         if has_any_power and valid_efficiency and efficiency >= max(valid_efficiency):
-            reasons.append(f"It had the best measured efficiency at {_format_rate(efficiency)} tokens/s/W.")
+            reasons.append(f"It had the best measured efficiency at {_format_rate(efficiency)} tokens/J.")
         elif has_any_power:
-            reasons.append(f"Power telemetry was available and measured {_format_rate(efficiency)} tokens/s/W.")
+            reasons.append(f"Power telemetry was available and measured {_format_rate(efficiency)} tokens/J.")
 
     predicted_ratio = _optional_float(selected_input.comparison_metrics.get("measured_over_predicted_tokens_ratio"))
     if predicted_ratio is not None:
@@ -2034,6 +2132,7 @@ def _candidate_table(
             "measured_requests": _optional_int(item.measured_metrics.get("total_requests")),
             "successful_requests": _optional_int(item.measured_metrics.get("successful_requests")),
             "concurrency_coverage": _concurrency_coverage_label(item),
+            "output_tokens_s": _throughput_value(item),
             "total_tokens_s": _optional_float(item.measured_metrics.get("total_tokens_s")),
             "p95_latency_s": _optional_float(item.measured_metrics.get("p95_latency_s")),
             "average_power_watts": _optional_float(item.telemetry_metrics.get("average_power_watts")),
@@ -2143,6 +2242,7 @@ def _pareto_frontier(
             "measured_requests": _optional_int(item.measured_metrics.get("total_requests")),
             "successful_requests": _optional_int(item.measured_metrics.get("successful_requests")),
             "concurrency_coverage": _concurrency_coverage_label(item),
+            "output_tokens_s": _throughput_value(item),
             "total_tokens_s": _optional_float(item.measured_metrics.get("total_tokens_s")),
             "p95_latency_s": _optional_float(item.measured_metrics.get("p95_latency_s")),
             "failed_requests": _optional_int(item.measured_metrics.get("failed_requests")),
@@ -2179,15 +2279,15 @@ def _dominates(left: RecommendationInput, right: RecommendationInput, *, has_any
 
 def _pareto_values(item: RecommendationInput, *, has_any_power: bool) -> tuple[float, ...]:
     values = [
-        _optional_float(item.measured_metrics.get("total_tokens_s")) or 0.0,
+        _throughput_value(item) or 0.0,
         -(_latency_value(item) if _latency_value(item) is not None else float("inf")),
         -float(_optional_int(item.measured_metrics.get("failed_requests")) or 0),
     ]
     if has_any_power:
         values.extend(
             [
-                _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")) or 0.0,
-                -(_optional_float(item.telemetry_metrics.get("joules_per_token")) or float("inf")),
+                _energy_efficiency_value(item) or 0.0,
+                -(_energy_cost_value(item) or float("inf")),
             ]
         )
     return tuple(values)
@@ -2205,8 +2305,8 @@ def _alternative_recommendations(
     if not valid:
         return alternatives
     alternatives["throughput"] = _objective_row(
-        max(valid, key=lambda item: (_optional_float(item.measured_metrics.get("total_tokens_s")) or -1.0, item.candidate_id)),
-        "highest measured total_tokens_s",
+        max(valid, key=lambda item: (_throughput_value(item) or -1.0, item.candidate_id)),
+        "highest measured output token throughput",
     )
     latency_valid = [item for item in valid if _latency_value(item) is not None]
     if latency_valid:
@@ -2215,17 +2315,17 @@ def _alternative_recommendations(
             "lowest measured p95 or average latency",
         )
     if has_any_power:
-        efficiency_valid = [item for item in valid if _positive_number(item.telemetry_metrics.get("tokens_per_second_per_watt"))]
+        efficiency_valid = [item for item in valid if _energy_efficiency_value(item) is not None]
         if efficiency_valid:
             alternatives["efficiency"] = _objective_row(
-                max(efficiency_valid, key=lambda item: (_optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")) or -1.0, item.candidate_id)),
-                "highest measured tokens/sec/watt",
+                max(efficiency_valid, key=lambda item: (_energy_efficiency_value(item) or -1.0, item.candidate_id)),
+                "highest measured tokens/joule",
             )
-        energy_valid = [item for item in valid if _positive_number(item.telemetry_metrics.get("joules_per_token"))]
+        energy_valid = [item for item in valid if _energy_cost_value(item) is not None]
         if energy_valid:
             alternatives["lowest_energy"] = _objective_row(
-                min(energy_valid, key=lambda item: (_optional_float(item.telemetry_metrics.get("joules_per_token")) or float("inf"), item.candidate_id)),
-                "lowest measured joules/token",
+                min(energy_valid, key=lambda item: (_energy_cost_value(item) or float("inf"), item.candidate_id)),
+                "lowest measured joules/generated token",
             )
     balanced = _balanced_winner_input(valid, has_any_power=has_any_power)
     if balanced is not None:
@@ -2238,10 +2338,13 @@ def _objective_row(item: RecommendationInput, reason: str) -> dict[str, float | 
         "candidate_id": item.candidate_id,
         "source": item.candidate_source,
         "concurrency": item.benchmark_plan.concurrency if item.benchmark_plan else None,
+        "output_tokens_s": _throughput_value(item),
         "total_tokens_s": _optional_float(item.measured_metrics.get("total_tokens_s")),
         "p95_latency_s": _optional_float(item.measured_metrics.get("p95_latency_s")),
         "tokens_per_second_per_watt": _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")),
+        "tokens_per_joule": _optional_float(item.telemetry_metrics.get("tokens_per_joule")),
         "joules_per_token": _optional_float(item.telemetry_metrics.get("joules_per_token")),
+        "joules_per_generated_token": _optional_float(item.telemetry_metrics.get("joules_per_generated_token")),
         "reason": reason,
     }
 
@@ -2249,10 +2352,10 @@ def _objective_row(item: RecommendationInput, reason: str) -> dict[str, float | 
 def _balanced_winner_input(inputs: list[RecommendationInput], *, has_any_power: bool) -> RecommendationInput | None:
     if not inputs:
         return None
-    throughput_scores = _normalize_higher(inputs, lambda item: _optional_float(item.measured_metrics.get("total_tokens_s")))
+    throughput_scores = _normalize_higher(inputs, _throughput_value)
     latency_scores = _normalize_lower(inputs, lambda item: _latency_value(item))
-    efficiency_scores = _normalize_higher(inputs, lambda item: _optional_float(item.telemetry_metrics.get("tokens_per_second_per_watt")))
-    joules_scores = _normalize_lower(inputs, lambda item: _optional_float(item.telemetry_metrics.get("joules_per_token")))
+    efficiency_scores = _normalize_higher(inputs, _energy_efficiency_value)
+    joules_scores = _normalize_lower(inputs, _energy_cost_value)
     reliability_scores = {item.candidate_id: _reliability_score(item) for item in inputs}
     weights = BALANCED_WITH_POWER_WEIGHTS if has_any_power else BALANCED_NO_POWER_WEIGHTS
 
@@ -2483,16 +2586,9 @@ def _optional_str(value: object) -> str | None:
     return None
 
 
-def _positive_number(value: object) -> bool:
-    parsed = _optional_float(value)
-    return parsed is not None and parsed > 0
-
-
 def _usable_power_telemetry(item: RecommendationInput) -> bool:
     quality = str(item.telemetry_metrics.get("telemetry_quality") or "unavailable").lower()
-    return quality not in {"poor", "unavailable"} and _positive_number(
-        item.telemetry_metrics.get("tokens_per_second_per_watt")
-    )
+    return quality in {"good", "limited"} and _has_power_efficiency_metric(item)
 
 
 def _ratio(measured: float | None, predicted: float | None) -> float | None:

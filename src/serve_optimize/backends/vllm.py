@@ -316,6 +316,7 @@ class VllmAdapter:
             time.sleep(0.1)
         if process is not None and process.poll() is None:
             self._killpg_fn(handle.pgid, signal.SIGKILL)
+            process.wait()
         returncode = process.returncode if process is not None else None
         self._launched_pgids.discard(handle.pgid)
         self._processes.pop(handle.pid, None)

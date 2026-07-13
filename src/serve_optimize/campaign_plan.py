@@ -268,18 +268,15 @@ def _managed_command(
     ]
     if request.evidence_db:
         command.extend(["--evidence-db", request.evidence_db])
-    if request.warmup_requests:
-        command.extend(["--warmup-requests", str(request.warmup_requests)])
+    command.extend(["--warmup-requests", str(request.warmup_requests)])
     if request.steady_state_seconds is not None:
         command.extend(["--steady-state-seconds", _number(request.steady_state_seconds)])
-    if request.idle_baseline_seconds:
-        command.extend(["--idle-baseline-seconds", _number(request.idle_baseline_seconds)])
+    command.extend(["--idle-baseline-seconds", _number(request.idle_baseline_seconds)])
     if request.idle_power_watts is not None:
         command.extend(["--idle-power-watts", _number(request.idle_power_watts)])
     if request.soak_seconds is not None:
         command.extend(["--soak-seconds", _number(request.soak_seconds)])
-    if request.stream:
-        command.append("--stream")
+    command.append("--stream" if request.stream else "--no-stream")
     return command
 
 
@@ -318,5 +315,17 @@ def _validate_request(request: CampaignPlanRequest) -> None:
         raise ValueError("limit must be at least 1.")
     if request.trials < 1:
         raise ValueError("trials must be at least 1.")
+    if request.startup_timeout_s <= 0:
+        raise ValueError("startup timeout must be greater than 0.")
+    if request.cooldown_s < 0:
+        raise ValueError("cooldown seconds must be nonnegative.")
+    if request.warmup_requests < 0:
+        raise ValueError("warmup requests must be nonnegative.")
+    if request.steady_state_seconds is not None and request.steady_state_seconds <= 0:
+        raise ValueError("steady state seconds must be greater than 0 when provided.")
+    if request.idle_baseline_seconds < 0:
+        raise ValueError("idle baseline seconds must be nonnegative.")
+    if request.idle_power_watts is not None and request.idle_power_watts < 0:
+        raise ValueError("idle power watts must be nonnegative when provided.")
     if request.soak_seconds is not None and request.soak_seconds <= 0:
         raise ValueError("soak seconds must be greater than 0 when provided.")

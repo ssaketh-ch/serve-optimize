@@ -27,7 +27,7 @@ from .benchmark_matrix import BenchmarkMatrixRequest, write_benchmark_matrix_art
 from .branding import LOGO, TAGLINE
 from .campaign_plan import CampaignPlanRequest, write_campaign_plan_artifacts
 from .candidates import generate_candidates
-from .endpoint_benchmark import DEFAULT_ENDPOINT_PROMPT, make_run_id, run_endpoint_benchmark
+from .endpoint_benchmark import DEFAULT_ENDPOINT_PROMPT, benchmark_failure_reason, make_run_id, run_endpoint_benchmark
 from .evaluation import run_evaluation_plan_dir
 from .evidence import DEFAULT_EVIDENCE_DB_PATH, list_evidence_measurements
 from .hardware import detect_hardware
@@ -50,7 +50,14 @@ from .release_check import write_release_check_artifacts
 from .repeatability import write_repeatability_artifacts
 from .reporting import RichReporter, RichTelemetryCheckReporter, format_recommendation_report
 from .research_package import write_research_package_artifacts
-from .schemas import EndpointBenchmarkConfig, Goal, Recommendation, RecommendationGoal, to_dict
+from .schemas import (
+    EndpointBenchmarkConfig,
+    EndpointBenchmarkSummary,
+    Goal,
+    Recommendation,
+    RecommendationGoal,
+    to_dict,
+)
 from .telemetry_check import run_telemetry_check
 from .validation_campaign import write_validation_campaign_artifacts
 from .workloads import load_workload_profile, workload_profile_choices
@@ -64,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     cleaned_argv, show_advanced_help = _preprocess_argv(argv)
     parser = _build_parser(show_advanced_help=show_advanced_help)
     args = parser.parse_args(cleaned_argv)
+    args.invocation = ["serve-optimize", *(sys.argv[1:] if cleaned_argv is None else cleaned_argv)]
     if _show_branding(args):
         _print_launch_banner()
     args.func(args)
@@ -908,29 +916,34 @@ def _cmd_prepare_models(args: argparse.Namespace) -> None:
 
 
 def _cmd_aiconfig(args: argparse.Namespace) -> None:
-    run = run_aiconfigurator(
-        mode=args.mode,
-        model=args.model,
-        system=args.system,
-        backend=args.backend,
-        output_dir=args.output_dir,
-        isl=args.isl,
-        osl=args.osl,
-        batch_size=args.batch_size,
-        total_gpus=args.total_gpus,
-    )
+    try:
+        run = run_aiconfigurator(
+            mode=args.mode,
+            model=args.model,
+            system=args.system,
+            backend=args.backend,
+            output_dir=args.output_dir,
+            isl=args.isl,
+            osl=args.osl,
+            batch_size=args.batch_size,
+            total_gpus=args.total_gpus,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
     if args.json:
         print(json.dumps(to_dict(run), indent=2, sort_keys=True))
-        return
-    print("AIConfigurator run")
-    print(f"  command: {' '.join(run.command)}")
-    print(f"  returncode: {run.returncode}")
-    if run.output_path:
-        print(f"  output: {run.output_path}")
-    if run.stdout.strip():
-        print(run.stdout.strip())
-    if run.stderr.strip():
-        print(run.stderr.strip())
+    else:
+        print("AIConfigurator run")
+        print(f"  command: {' '.join(run.command)}")
+        print(f"  returncode: {run.returncode}")
+        if run.output_path:
+            print(f"  output: {run.output_path}")
+        if run.stdout.strip():
+            print(run.stdout.strip())
+        if run.stderr.strip():
+            print(run.stderr.strip())
+    if run.returncode != 0:
+        raise SystemExit(run.returncode)
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
@@ -994,6 +1007,8 @@ def _cmd_endpoint_bench(args: argparse.Namespace) -> None:
     hardware = detect_hardware()
     run = run_endpoint_benchmark(config=config, out_dir=args.out, prediction=prediction, hardware=hardware)
     _print_endpoint_run(run.run_dir, run.summary, run.comparison)
+    if benchmark_failure_reason(run.summary) is not None:
+        raise SystemExit(1)
 
 
 def _cmd_telemetry_check(args: argparse.Namespace) -> None:
@@ -1019,6 +1034,8 @@ def _cmd_telemetry_check(args: argparse.Namespace) -> None:
             "report_txt": str(run.run_dir / "report.txt"),
         },
     )
+    if not run.summary.telemetry_available:
+        raise SystemExit(1)
 
 
 def _cmd_plan_from_aic(args: argparse.Namespace) -> None:
@@ -1082,16 +1099,19 @@ def _cmd_run_evaluation_plan(args: argparse.Namespace) -> None:
         raise SystemExit("--override-num-requests must be at least 1 when provided.")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be greater than 0.")
-    result = run_evaluation_plan_dir(
-        plan_dir=args.plan_dir,
-        out_dir=args.out,
-        limit_candidates=args.limit_candidates,
-        override_concurrency=args.override_concurrency,
-        override_num_requests=args.override_num_requests,
-        timeout_s=args.timeout,
-        telemetry=args.telemetry,
-        api_key_env=args.api_key_env,
-    )
+    try:
+        result = run_evaluation_plan_dir(
+            plan_dir=args.plan_dir,
+            out_dir=args.out,
+            limit_candidates=args.limit_candidates,
+            override_concurrency=args.override_concurrency,
+            override_num_requests=args.override_num_requests,
+            timeout_s=args.timeout,
+            telemetry=args.telemetry,
+            api_key_env=args.api_key_env,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Could not load evaluation plan from {args.plan_dir}: {exc}") from exc
     _print_evaluation_summary(result.run_dir, result.summary)
     if result.failed:
         raise SystemExit(1)
@@ -1242,7 +1262,7 @@ def _cmd_managed_evaluate(args: argparse.Namespace) -> None:
             evidence_db_path=args.evidence_db,
             evidence_write=not args.no_evidence_write,
             evidence_freshness_hours=args.evidence_freshness_hours,
-            command=["serve-optimize", args.command, args.model],
+            command=args.invocation,
             workload_profile=workload_profile,
             warmup_requests=args.warmup_requests,
             steady_state_duration_s=args.steady_state_seconds,
@@ -1409,6 +1429,8 @@ def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None
             f"throughput {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
             f"coverage {coverage}, summary {payload.get('summary_path')}"
         )
+    if event == "workload_failed":
+        return f"workload failed: {payload.get('candidate_id')}, {payload.get('reason')}, summary {payload.get('summary_path')}"
     if event == "launch_group_failed":
         return f"launch group failed: {payload.get('group_id')}, {payload.get('stage')}, {payload.get('error')}"
     if event == "server_stop":
@@ -1544,6 +1566,8 @@ def _resolve_workload_profile(args: argparse.Namespace):
             manifest_path=args.workload_manifest,
             slo_constraints=constraints,
         )
+    except OSError as exc:
+        raise SystemExit(f"Could not read workload manifest {args.workload_manifest}: {exc}") from exc
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -1987,7 +2011,10 @@ def _emit(payload: object, as_json: bool = False) -> None:
 
 def _endpoint_prompt(args: argparse.Namespace) -> str:
     if args.prompt_file is not None:
-        return args.prompt_file.read_text(encoding="utf-8")
+        try:
+            return args.prompt_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit(f"Could not read prompt file {args.prompt_file}: {exc}") from exc
     if args.prompt is not None:
         return args.prompt
     return DEFAULT_ENDPOINT_PROMPT.strip()
@@ -2009,8 +2036,11 @@ def _parse_concurrency_sweep(value: str) -> tuple[int, ...]:
     return tuple(parsed)
 
 
-def _print_endpoint_run(run_dir: Path, summary: object, comparison: object | None) -> None:
-    print(f"Endpoint benchmark complete: {run_dir}")
+def _print_endpoint_run(run_dir: Path, summary: EndpointBenchmarkSummary, comparison: object | None) -> None:
+    failure_reason = benchmark_failure_reason(summary)
+    print(f"Endpoint benchmark {'failed' if failure_reason else 'complete'}: {run_dir}")
+    if failure_reason:
+        print(f"  failure reason: {failure_reason}")
     print("Measured")
     print(f"  requests: {summary.successful_requests}/{summary.total_requests} ok")
     print(f"  request_rate_req_s: {summary.request_rate_req_s:.3f}")
@@ -2066,7 +2096,7 @@ def _print_aic_plan_summary(run_dir: Path, candidates: list[object], serve_plans
 def _print_evaluation_summary(run_dir: Path, summary: dict[str, object]) -> None:
     print(f"Evaluation artifacts: {run_dir}")
     print(
-        "candidate_id concurrency predicted_tokens_s measured_total_tokens_s measured/predicted "
+        "candidate_id status reason concurrency predicted_tokens_s measured_total_tokens_s measured/predicted "
         "measured_request_rate avg_latency_ms p95_latency_ms failed_requests"
     )
     for row in summary.get("candidates", []):
@@ -2074,6 +2104,8 @@ def _print_evaluation_summary(run_dir: Path, summary: dict[str, object]) -> None
             continue
         print(
             f"{row.get('candidate_id', 'unknown')} "
+            f"{row.get('status', 'unknown')} "
+            f"{row.get('reason') or 'none'} "
             f"{row.get('concurrency', 'unknown')} "
             f"{_format_optional(row.get('predicted_tokens_s'))} "
             f"{_format_optional(row.get('measured_total_tokens_s'))} "

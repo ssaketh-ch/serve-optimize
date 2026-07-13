@@ -74,6 +74,27 @@ def test_prior_pruning_preserves_baseline_and_low_memory_candidate() -> None:
     assert result.candidates_pruned_by_prior == 1
 
 
+def test_prior_pruning_preserves_the_actual_backend_default_candidate() -> None:
+    candidates = [
+        _config(config_id="tuned-first"),
+        _config(config_id="backend-default", extra={"backend_defaults": True}),
+        _config(config_id="tuned-last", dtype="bf16"),
+    ]
+
+    result = apply_managed_prior_policy(
+        candidates,
+        prior_results=[],
+        evidence_priors=[],
+        policy=ManagedPriorPolicy(
+            max_prior_candidates=1,
+            preserve_low_memory_candidate=False,
+            preserve_diversity=False,
+        ),
+    )
+
+    assert [candidate.id for candidate in result.candidates] == ["backend-default"]
+
+
 def test_prior_pruning_preserves_near_compatible_evidence_metadata() -> None:
     candidates = [
         _config(config_id="cfg-a"),
@@ -158,6 +179,7 @@ def _config(
     config_id: str = "cfg-test",
     dtype: str = "fp16",
     estimated_vram_mb: int | None = None,
+    extra: dict[str, object] | None = None,
 ) -> ServingConfig:
     return ServingConfig(
         id=config_id,
@@ -170,4 +192,5 @@ def _config(
         kv_cache_policy="paged",
         scheduler="continuous-batching",
         estimated_vram_mb=estimated_vram_mb,
+        extra=extra or {},
     )

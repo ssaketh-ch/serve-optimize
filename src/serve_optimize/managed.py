@@ -27,6 +27,7 @@ from .endpoint_benchmark import (
     RequestFn,
     TelemetryCollectorFactory,
     aggregate_benchmark_summaries,
+    benchmark_failure_reason,
     make_run_id,
     run_endpoint_benchmark,
 )
@@ -2004,6 +2005,73 @@ def _evaluate_launch_groups(
                     aggregate_dir.mkdir(parents=True, exist_ok=True)
                     write_json(aggregate_dir / "summary.json", last_summary)
                     summary_paths.append(str(aggregate_dir / "summary.json"))
+                    failure_reason = benchmark_failure_reason(last_summary)
+                    if failure_reason is not None:
+                        message = f"Benchmark measurement failed validation: {failure_reason}."
+                        failure = _candidate_failure(
+                            run_id,
+                            workload.candidate_id,
+                            "benchmark",
+                            message,
+                            details={
+                                "group_id": group.group_id,
+                                "workload_id": workload.workload_id,
+                                "rung": workload.rung,
+                                "reason": failure_reason,
+                                "total_requests": last_summary.total_requests,
+                                "successful_requests": last_summary.successful_requests,
+                                "failed_requests": last_summary.failed_requests,
+                                "prompt_tokens": last_summary.prompt_tokens,
+                                "completion_tokens": last_summary.completion_tokens,
+                                "total_tokens": last_summary.total_tokens,
+                            },
+                        )
+                        state.failures.append(failure)
+                        _append_jsonl(failures_path, [failure])
+                        state.rung_results.append(
+                            replace(
+                                _rung_result_from_summary(workload, evidence_context, last_summary),
+                                status="failed",
+                            )
+                        )
+                        state.candidate_results.append(
+                            replace(
+                                _failed_result(config, failure, workload=workload),
+                                benchmark_run_dirs=benchmark_run_dirs,
+                                summary_paths=summary_paths,
+                                evidence_key=evidence_context.evidence_key,
+                            )
+                        )
+                        _append_jsonl(
+                            lifecycle_path,
+                            [
+                                _lifecycle(
+                                    run_id,
+                                    workload.candidate_id,
+                                    backend,
+                                    "benchmark",
+                                    "failed",
+                                    message=message,
+                                    details={
+                                        "group_id": group.group_id,
+                                        "workload_id": workload.workload_id,
+                                        "rung": workload.rung,
+                                        "reason": failure_reason,
+                                        "trials": workload.trials,
+                                    },
+                                )
+                            ],
+                        )
+                        _progress(
+                            progress_callback,
+                            "workload_failed",
+                            candidate_id=workload.candidate_id,
+                            workload_id=workload.workload_id,
+                            rung=workload.rung,
+                            reason=failure_reason,
+                            summary_path=summary_paths[-1],
+                        )
+                        continue
                     if evidence_store is not None:
                         try:
                             measurement = measurement_from_summary(
@@ -2232,6 +2300,7 @@ def _summary_progress_fields(summary: object | None) -> dict[str, object]:
         measured_requests = getattr(summary, "total_requests", None)
     return {
         "throughput_tokens_per_sec": _optional_float(getattr(summary, "total_tokens_s", None)),
+        "output_tokens_per_sec": _optional_float(getattr(summary, "output_tokens_s", None)),
         "request_rate": _optional_float(getattr(summary, "request_rate_req_s", None)),
         "p95_latency_s": _optional_float(getattr(summary, "p95_latency_s", None)),
         "failed_requests": _optional_int(getattr(summary, "failed_requests", None)),
@@ -2638,6 +2707,7 @@ def _managed_serve_plan(
 
 def _managed_measured_metrics(metrics: dict[str, Any]) -> dict[str, float | int | str | None]:
     return {
+        "output_tokens_s": _optional_float(metrics.get("output_tokens_per_sec")),
         "total_tokens_s": _optional_float(metrics.get("throughput_tokens_per_sec")),
         "request_rate_req_s": _optional_float(metrics.get("requests_per_sec")),
         "p50_latency_s": _seconds_from_ms(metrics.get("p50_latency_ms")),
@@ -2797,6 +2867,7 @@ def _write_managed_pareto_csv(path: Path, rows: list[dict[str, object]]) -> None
         "candidate_id",
         "source",
         "concurrency",
+        "output_tokens_s",
         "total_tokens_s",
         "p95_latency_s",
         "failed_requests",
@@ -2843,13 +2914,16 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
         row = {}
     measurement_quality = row.get("measurement_quality") if isinstance(row.get("measurement_quality"), dict) else {}
     throughput = _optional_float(row.get("total_tokens_s"))
+    output_throughput = _optional_float(row.get("output_tokens_s"))
     request_rate = _optional_float(row.get("request_rate_req_s"))
     stable_rates = _stable_rates_from_request_latencies(row) if row.get("measurement_duration_s") is None else None
     if stable_rates is not None:
         throughput = stable_rates["throughput_tokens_per_sec"]
+        output_throughput = stable_rates["output_tokens_per_sec"]
         request_rate = stable_rates["requests_per_sec"]
     return {
         "throughput_tokens_per_sec": throughput,
+        "output_tokens_per_sec": output_throughput,
         "requests_per_sec": request_rate,
         "p50_latency_ms": _latency_s_to_ms(row.get("p50_latency_s")),
         "p95_latency_ms": _latency_s_to_ms(row.get("p95_latency_s")),
@@ -2898,6 +2972,9 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
             if row.get("measured_failed_requests") is not None
             else _optional_int(row.get("failed_requests"))
         ),
+        "prompt_tokens": _optional_int(row.get("prompt_tokens")),
+        "completion_tokens": _optional_int(row.get("completion_tokens")),
+        "total_tokens": _optional_int(row.get("total_tokens")),
         "configured_concurrency": _optional_int(measurement_quality.get("configured_concurrency")),
         "effective_concurrency_limit": _optional_int(measurement_quality.get("effective_concurrency_limit")),
         "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
@@ -2922,12 +2999,13 @@ def _summary_metrics(summary: object) -> dict[str, float | int | str | None]:
     }
 
 
-def _stable_rates_from_request_latencies(row: dict[str, Any]) -> dict[str, float] | None:
+def _stable_rates_from_request_latencies(row: dict[str, Any]) -> dict[str, float | None] | None:
     wall_time_s = _optional_float(row.get("wall_time_s"))
     p95_latency_s = _optional_float(row.get("p95_latency_s"))
     avg_latency_s = _optional_float(row.get("avg_latency_s"))
     successful_requests = _optional_int(row.get("successful_requests")) or 0
     total_tokens = _optional_int(row.get("total_tokens")) or 0
+    completion_tokens = _optional_int(row.get("completion_tokens"))
     if (
         wall_time_s is None
         or p95_latency_s is None
@@ -2940,6 +3018,11 @@ def _stable_rates_from_request_latencies(row: dict[str, Any]) -> dict[str, float
     total_request_time_s = avg_latency_s * successful_requests
     return {
         "throughput_tokens_per_sec": total_tokens / total_request_time_s if total_request_time_s > 0 else 0.0,
+        "output_tokens_per_sec": (
+            completion_tokens / total_request_time_s
+            if completion_tokens is not None and total_request_time_s > 0
+            else None
+        ),
         "requests_per_sec": successful_requests / total_request_time_s if total_request_time_s > 0 else 0.0,
     }
 
@@ -2949,13 +3032,16 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
     raw_summary = raw_json.get("summary") if isinstance(raw_json.get("summary"), dict) else {}
     measurement_quality = raw_summary.get("measurement_quality") if isinstance(raw_summary.get("measurement_quality"), dict) else {}
     throughput = _optional_float(measurement.get("throughput_tokens_per_sec"))
+    output_throughput = _optional_float(raw_summary.get("output_tokens_s"))
     request_rate = _optional_float(measurement.get("requests_per_sec"))
     stable_rates = _stable_rates_from_request_latencies(raw_summary) if raw_summary.get("measurement_duration_s") is None else None
     if stable_rates is not None:
         throughput = stable_rates["throughput_tokens_per_sec"]
+        output_throughput = stable_rates["output_tokens_per_sec"]
         request_rate = stable_rates["requests_per_sec"]
     return {
         "throughput_tokens_per_sec": throughput,
+        "output_tokens_per_sec": output_throughput,
         "requests_per_sec": request_rate,
         "p50_latency_ms": _optional_float(measurement.get("p50_latency_ms")),
         "p95_latency_ms": _optional_float(measurement.get("p95_latency_ms")),
@@ -3016,6 +3102,9 @@ def _measurement_metrics(measurement: dict[str, Any]) -> dict[str, float | int |
             if raw_summary.get("measured_failed_requests") is not None
             else _optional_int(raw_summary.get("failed_requests"))
         ),
+        "prompt_tokens": _optional_int(raw_summary.get("prompt_tokens")),
+        "completion_tokens": _optional_int(raw_summary.get("completion_tokens")),
+        "total_tokens": _optional_int(raw_summary.get("total_tokens")),
         "configured_concurrency": _optional_int(measurement_quality.get("configured_concurrency")),
         "effective_concurrency_limit": _optional_int(measurement_quality.get("effective_concurrency_limit")),
         "concurrency_coverage": _optional_str(measurement_quality.get("concurrency_coverage")),
@@ -4039,7 +4128,7 @@ def _enriched_optimizer_quality(
             "trials_required_to_reach_recommendation": trial_count,
             "number_of_failed_trials_avoided_by_pruning": failed_trials_avoided_by_pruning,
             "number_of_trials_avoided_by_pruning": pruned_candidate_count,
-            "evidence_reuse_improved_search_speed": bool(evidence_hit_count or evidence_reuse_candidate_count),
+            "evidence_reuse_improved_search_speed": evidence_hit_count > 0,
             "evidence_reuse_candidate_count": evidence_reuse_candidate_count,
             "evidence_hit_count": evidence_hit_count,
             "recommendation_changed_after_new_evidence": None,
@@ -5193,9 +5282,9 @@ def _failure_reason_from_text(value: object) -> str | None:
         ),
     ):
         return "out_of_memory"
-    if _has_any(text, ("gated repo", "gated model", "requires authentication", "unauthorized", "forbidden", "permission denied", "access denied", "http_401", "http_403", " 401", " 403")):
+    if _has_any(text, ("gated repo", "gated model", "requires authentication", "unauthorized", "forbidden", "http_401", "http_403", " 401", " 403")):
         return "unavailable_gated_access"
-    if _has_any(text, ("model not found", "repository not found", "repo not found", "not found", "does not exist", "unavailable model", "http_404", " 404")):
+    if _has_any(text, ("model not found", "repository not found", "repo not found", "unavailable model", "http_404", " 404")):
         return "unavailable_model"
     return None
 

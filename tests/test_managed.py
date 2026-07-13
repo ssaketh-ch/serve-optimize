@@ -38,6 +38,7 @@ from serve_optimize.evidence import launch_config_hash, workload_config_hash
 from serve_optimize.managed import (
     _benchmark_config_from_workload,
     _client_saturation_summary,
+    _failure_reason_for_exception,
     _generate_managed_candidates,
     _load_sufficiency_summary,
     _managed_measured_metrics,
@@ -225,6 +226,7 @@ def test_managed_metrics_preserve_concurrency_coverage() -> None:
     summary_metrics = _summary_metrics(
         {
             "total_tokens_s": 100.0,
+            "output_tokens_s": 40.0,
             "request_rate_req_s": 4.0,
             "total_requests": 2,
             "successful_requests": 2,
@@ -242,6 +244,7 @@ def test_managed_metrics_preserve_concurrency_coverage() -> None:
             "requests_per_sec": 4.0,
             "raw_json": {
                 "summary": {
+                    "output_tokens_s": 40.0,
                     "total_requests": 2,
                     "successful_requests": 2,
                     "failed_requests": 0,
@@ -257,6 +260,8 @@ def test_managed_metrics_preserve_concurrency_coverage() -> None:
 
     assert summary_metrics["concurrency_coverage"] == "insufficient"
     assert evidence_metrics["concurrency_coverage"] == "insufficient"
+    assert _managed_measured_metrics(summary_metrics)["output_tokens_s"] == pytest.approx(40.0)
+    assert _managed_measured_metrics(evidence_metrics)["output_tokens_s"] == pytest.approx(40.0)
     assert _managed_measured_metrics(summary_metrics)["concurrency_coverage"] == "insufficient"
     assert _managed_measured_metrics(evidence_metrics)["configured_concurrency"] == 4
 
@@ -874,6 +879,32 @@ def test_stop_only_kills_launched_process_group() -> None:
     assert calls == [(222, signal.SIGTERM)]
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_forced_backend_stop_reaps_process(backend) -> None:
+    calls: list[tuple[int, int]] = []
+    process = _FakeProcess(pid=111)
+
+    def killpg(pgid: int, sig: int) -> None:
+        calls.append((pgid, sig))
+        if sig == signal.SIGKILL:
+            process.returncode = -sig
+
+    adapter = VllmAdapter(killpg_fn=killpg) if backend == "vllm" else SglangAdapter(killpg_fn=killpg, argument_capabilities=_sglang_caps())
+    adapter._processes[111] = process
+    adapter._launched_pgids.add(222)
+
+    stopped = adapter.stop_server(_handle(pid=111, pgid=222), timeout_s=0.0)
+
+    assert stopped.returncode == -signal.SIGKILL
+    assert process.wait_calls == 1
+    assert calls == [(222, signal.SIGTERM), (222, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize("message", ["shared library not found", "permission denied while starting backend"])
+def test_launch_environment_errors_are_not_model_access_failures(message) -> None:
+    assert _failure_reason_for_exception(RuntimeError(message), stage="launch") == "backend_failed_to_start"
+
+
 def test_failed_launch_records_candidate_failure_and_continues(tmp_path) -> None:
     summary = run_managed_evaluation(
         backend="vllm",
@@ -1254,6 +1285,43 @@ def test_managed_progress_callback_reports_launch_and_benchmark_steps(tmp_path) 
     assert trial["candidate_id"] == "cfg-test"
     assert trial["throughput_tokens_per_sec"] is not None
     assert complete["summary_path"]
+
+
+def test_invalid_measurement_fails_candidate_and_is_not_stored_as_evidence(tmp_path) -> None:
+    evidence_db = tmp_path / "evidence.sqlite"
+    events: list[str] = []
+
+    summary = run_managed_evaluation(
+        backend="vllm",
+        model="model-path",
+        goal=Goal.BALANCED,
+        limit=1,
+        trials=1,
+        startup_timeout_s=1.0,
+        cooldown_s=0.0,
+        host="127.0.0.1",
+        port=None,
+        out_dir=tmp_path / "runs",
+        telemetry="none",
+        adapter=_SuccessAdapter(),
+        request_fn=_ok_request,
+        candidate_provider=lambda: [_config(extra={"num_requests": 2})],
+        evidence_db_path=evidence_db,
+        evidence_write=True,
+        progress_callback=lambda event, _payload: events.append(event),
+    )
+
+    run_dir = tmp_path / "runs" / summary.run_id
+    failures = _jsonl_rows(run_dir / "candidate_failures.jsonl")
+    with sqlite3.connect(evidence_db) as connection:
+        measurement_count = connection.execute("SELECT COUNT(*) FROM evidence_measurements").fetchone()[0]
+
+    assert summary.status == "failed"
+    assert summary.completed_candidate_count == 0
+    assert summary.failed_candidate_count == 1
+    assert failures[0]["details"]["reason"] == "invalid_measurement"
+    assert measurement_count == 0
+    assert "workload_failed" in events
 
 
 def test_stop_failure_is_recorded_without_losing_measurement(tmp_path) -> None:
@@ -2422,7 +2490,7 @@ def test_optimize_cli_uses_measured_managed_defaults(tmp_path, monkeypatch, caps
     assert captured["idle_baseline_duration_s"] == 3.0
     assert captured["stream"] is True
     assert captured["workload_profile"].profile_name == "medium"
-    assert captured["command"] == ["serve-optimize", "optimize", "model-path"]
+    assert captured["command"] == ["serve-optimize", "optimize", "model-path", "--out", str(tmp_path)]
 
 
 def test_managed_evaluate_cli_help_does_not_expose_engine_surface_flags(capsys) -> None:
@@ -4418,8 +4486,13 @@ class _FakeProcess:
     def __init__(self, pid: int):
         self.pid = pid
         self.returncode = None
+        self.wait_calls = 0
 
     def poll(self):
+        return self.returncode
+
+    def wait(self):
+        self.wait_calls += 1
         return self.returncode
 
 
