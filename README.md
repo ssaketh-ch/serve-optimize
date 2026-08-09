@@ -173,6 +173,18 @@ serve-optimize campaign-plan \
 
 Campaign planning writes a managed run matrix, executable per backend scripts, a dispatcher, and a postprocessing script. Run each backend script in the matching isolated environment. Campaign planning itself does not launch servers or create measured evidence.
 
+For the staged research matrix, generate the roadmap aligned Stage 1 through Stage 4 plan separately:
+
+```bash
+serve-optimize benchmark-matrix-plan \
+  --stage stage1 \
+  --vllm-cli .venv-vllm/bin/serve-optimize \
+  --sglang-cli .venv-sglang/bin/serve-optimize \
+  --out results/benchmark-matrix-plan
+```
+
+The matrix planner writes JSON, Markdown, CSV, a dispatcher, and backend specific runners. It is a planning command and does not establish that any cell completed.
+
 Validate existing managed run artifacts:
 
 ```bash
@@ -195,12 +207,16 @@ Managed runs write inspectable artifacts, including:
 * `server_lifecycle.jsonl`
 * `candidate_failures.jsonl`
 * `evidence_decisions.jsonl`
+* `client_saturation.json`
+* `load_sufficiency.json`
+* backend capability registry and candidate generation reports
 * `managed_recommendation.json`
 * `managed_pareto_frontier.json`
 * `managed_pareto_frontier.csv`
 * `managed_report.txt`
 * `recommendation_summary.json`
 * `recommendation_summary.txt`
+* `optimizer_quality.json`
 * backend stdout and stderr logs for launched servers
 
 `recommendation_summary.txt` is the primary human facing answer. `managed_recommendation.json` is the detailed automation and audit artifact.
@@ -228,6 +244,8 @@ serve-optimize --help
 serve-optimize optimize --help
 serve-optimize validate-campaign --help
 serve-optimize campaign-plan --help
+serve-optimize benchmark-matrix-plan --help
+serve-optimize research-package --help
 ```
 
 The latest recorded verification notes are maintained in [docs/development/verification.md](docs/development/verification.md).
@@ -243,7 +261,15 @@ The latest recorded verification notes are maintained in [docs/development/verif
 * [Support matrix](docs/support_matrix.md)
 * [Security notes](docs/security.md)
 * [Research package](docs/research_package.md)
+* [Experimental methodology](docs/experiments.md)
+* [Paper scope](docs/research/paper-outline.md)
 * [Release engineering](docs/development/release.md)
+
+## Research Claim Boundary
+
+The repository contains mechanisms for multi backend and multi hardware evaluation, but publication claims must come from audited raw run artifacts. RTX PRO 6000 and H200 results should be reported as separate platform strata unless backend versions, workloads, and measurement policy are matched for a direct comparison. MIG power is board scoped unless the telemetry provider proves instance attribution.
+
+The research package indexes supplied run directories; it does not copy the raw request, telemetry, lifecycle, and backend log artifacts. A paper release must archive those raw directories with checksums alongside the generated tables and methodology.
 
 ## License
 

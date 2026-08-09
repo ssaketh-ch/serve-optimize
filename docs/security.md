@@ -17,7 +17,7 @@ The backend profile commands audit the listed pins directly. A full resolver aud
 
 ## Current advisory boundary
 
-Last checked: 2026-06-23.
+Last checked: 2026-08-09.
 
 The default project environment reported no known vulnerabilities.
 
@@ -25,10 +25,9 @@ The optional backend profile audits reported upstream advisories in the currentl
 
 | Profile | Package | Version | Advisory status |
 | --- | --- | --- | --- |
-| vLLM | vllm | 0.23.0 | Reported by pip audit, with no fixed version listed |
-| vLLM | torch | 2.11.0 | Reported by pip audit, with no compatible backend supported bump |
-| SGLang | torch | 2.11.0 | Reported by pip audit, with no compatible backend supported bump |
+| vLLM | torch | 2.11.0 | `PYSEC-2025-194`; pip audit lists `2.13.0` as the fix version |
+| SGLang | torch | 2.11.0 | `PYSEC-2025-194`; pip audit lists `2.13.0` as the fix version |
 
-The resolver shows no newer vLLM release than 0.23.0 and no newer SGLang release than 0.5.13.post1. Both current backend packages hard pin torch 2.11.0, so forcing torch 2.12.1 would make the supported profiles unsatisfiable.
+The supported vLLM 0.24.0 and SGLang 0.5.13.post1 profiles currently pin torch 2.11.0. Moving either profile to torch 2.13.0 requires dependency resolution, backend capability checks, and live validation before it can replace the supported pin.
 
 Treat backend profiles as production dependencies owned jointly with their upstream projects. Reaudit before deployment, and update the profile pins as soon as upstream publishes compatible fixed releases.

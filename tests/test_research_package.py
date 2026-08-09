@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -17,6 +18,11 @@ def test_research_package_writes_manifest_and_tables(tmp_path) -> None:
     assert (tmp_path / "package" / "methodology.md").exists()
     assert (tmp_path / "package" / "runs.csv").exists()
     assert (tmp_path / "package" / "coverage.csv").exists()
+    rows = list(csv.DictReader((tmp_path / "package" / "runs.csv").open(encoding="utf-8")))
+    assert rows[0]["backend_version"] == "0.24.0"
+    assert rows[0]["output_tokens_per_sec"] == "80.0"
+    assert rows[0]["joules_per_generated_token"] == "0.125"
+    assert payload["source"]["raw_artifacts_included"] is False
 
 
 def test_research_package_reports_supplied_coverage_only(tmp_path) -> None:
@@ -31,7 +37,7 @@ def test_research_package_reports_supplied_coverage_only(tmp_path) -> None:
     assert payload["coverage"]["workload_profiles"] == ["long", "short"]
     assert payload["summary"]["backend_count"] == 2
     assert payload["summary"]["workload_profile_count"] == 2
-    assert "Do not infer coverage" in payload["methodology"][-1]
+    assert any("Do not infer coverage" in item for item in payload["methodology"])
 
 
 def _write_run(run_dir: Path, *, backend: str, workload_profile: str) -> Path:
@@ -56,10 +62,17 @@ def _write_run(run_dir: Path, *, backend: str, workload_profile: str) -> Path:
         "score": 1.0,
         "pareto_optimal": True,
         "total_tokens_s": 100.0,
+        "output_tokens_s": 80.0,
+        "request_rate_req_s": 2.0,
         "p95_latency_s": 0.01,
+        "p95_ttft_ms": 4.0,
+        "p95_tpot_ms": 1.5,
         "average_power_watts": 200.0,
         "joules_per_token": 0.1,
+        "joules_per_generated_token": 0.125,
+        "tokens_per_joule": 8.0,
         "tokens_per_second_per_watt": 5.0,
+        "energy_accounting": "idle_subtracted",
         "failed_requests": 0,
         "telemetry_quality": "good",
     }
@@ -73,6 +86,16 @@ def _write_run(run_dir: Path, *, backend: str, workload_profile: str) -> Path:
             "candidate_source_counts": {"safe_baseline": 1},
             "workload_profile": {"profile_name": workload_profile},
             "backend_metadata": {"argument_capabilities_help_hash": f"hash-{backend}"},
+            "runtime_environment": {
+                "backend_version": "0.24.0" if backend == "vllm" else "0.5.13.post1",
+                "python_version": "3.10.12",
+                "torch_version": "2.11.0+cu130",
+                "cuda_runtime_version": "13.0",
+                "gpu_driver_version": "580.65.06",
+                "environment_fingerprint": f"runtime-{backend}",
+            },
+            "client_saturation": {"classification": "not_client_limited"},
+            "load_sufficiency": {"classification": "not_evaluated_non_throughput_goal"},
         },
     )
     _write_json(
@@ -113,10 +136,18 @@ def _write_run(run_dir: Path, *, backend: str, workload_profile: str) -> Path:
             "recommended_command": f"{backend} serve model-path",
             "metrics": {
                 "throughput_tokens_per_sec": 100.0,
+                "output_tokens_per_sec": 80.0,
+                "total_tokens_per_sec": 100.0,
+                "request_rate_req_s": 2.0,
                 "p95_latency_ms": 10.0,
+                "p95_ttft_ms": 4.0,
+                "p95_tpot_ms": 1.5,
                 "average_power_w": 200.0,
                 "joules_per_token": 0.1,
+                "joules_per_generated_token": 0.125,
+                "tokens_per_joule": 8.0,
                 "tokens_per_watt": 5.0,
+                "energy_accounting": "idle_subtracted",
                 "failed_requests": 0,
             },
             "evaluated_set_fidelity": {

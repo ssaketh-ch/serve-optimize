@@ -53,6 +53,13 @@ def candidate_to_endpoint_benchmark_plan(
     candidate: ServeCandidate,
     base_url: str,
     num_requests: int | None = None,
+    *,
+    warmup_requests: int = 0,
+    steady_state_duration_s: float | None = None,
+    idle_baseline_duration_s: float = 0.0,
+    idle_power_watts: float | None = None,
+    soak_duration_s: float | None = None,
+    stream: bool = False,
 ) -> EndpointBenchmarkPlan:
     concurrency = candidate.concurrency or 1
     output_tokens = candidate.osl or 1
@@ -66,6 +73,12 @@ def candidate_to_endpoint_benchmark_plan(
         max_tokens=output_tokens,
         expected_input_tokens=candidate.isl,
         expected_output_tokens=candidate.osl,
+        warmup_requests=warmup_requests,
+        steady_state_duration_s=steady_state_duration_s,
+        idle_baseline_duration_s=idle_baseline_duration_s,
+        idle_power_watts=idle_power_watts,
+        soak_duration_s=soak_duration_s,
+        stream=stream,
     )
 
 

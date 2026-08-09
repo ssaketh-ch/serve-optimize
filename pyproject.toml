@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "serve-optimize"
 version = "0.1.0"
-description = "Energy-aware LLM inference configuration optimization for single-GPU and MIG deployments."
+description = "Evidence-grounded LLM serving configuration search across throughput, latency, reliability, and energy objectives."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -51,7 +51,7 @@ aiconfigurator = [
   "aiconfigurator>=0.1"
 ]
 vllm = [
-  "vllm==0.23.0",
+  "vllm==0.24.0",
   "transformers==5.9.0",
   "huggingface-hub==1.17.0",
   "nvidia-ml-py==13.610.43"

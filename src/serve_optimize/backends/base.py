@@ -55,6 +55,26 @@ def _resolve_command_executable(command_name: str) -> Path | None:
     return Path(resolved).resolve() if resolved else None
 
 
+def process_exit_details(handle: ServerHandle, returncode: int | None) -> dict[str, object]:
+    details: dict[str, object] = {"process_returncode": returncode}
+    for name, path_value in (
+        ("process_stdout_tail", handle.stdout_log_path),
+        ("process_stderr_tail", handle.stderr_log_path),
+    ):
+        if not path_value:
+            continue
+        try:
+            with Path(path_value).open("rb") as handle:
+                handle.seek(0, 2)
+                handle.seek(max(0, handle.tell() - 16_384))
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        if text.strip():
+            details[name] = text[-4096:]
+    return details
+
+
 @dataclass(frozen=True)
 class BackendArgumentCapabilities:
     backend: str

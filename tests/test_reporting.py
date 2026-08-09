@@ -34,6 +34,7 @@ def test_format_recommendation_report_with_telemetry() -> None:
     assert "gpu_utilization" in report
     assert "nearly flat" in report
     assert "Checks Performed" in report
+    assert "10,528.00 ms" in report
 
 
 def test_format_recommendation_report_without_telemetry() -> None:

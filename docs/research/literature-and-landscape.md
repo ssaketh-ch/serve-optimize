@@ -9,7 +9,7 @@ This document maps research and software relevant to Serve Optimize. It is a lit
 - Category: throughput-oriented configuration optimization.
 - Role: analytical performance modeling, backend-agnostic search, launch parameter recommendation.
 - What to reuse conceptually: candidate pruning, framework abstraction, performance model calibration, fast search.
-- What Serve Optimize adds: power/energy objective functions, joules/token modeling, MIG energy caveats, power-limit search, and Pareto outputs.
+- Comparison question: whether version aware safety rules, measured failure memory, and objective specific scoring improve recommendation quality under the same trial budget. This requires a direct baseline experiment.
 - Source: https://arxiv.org/abs/2601.06288
 
 ### TokenPowerBench
@@ -17,7 +17,7 @@ This document maps research and software relevant to Serve Optimize. It is a lit
 - Category: LLM inference energy benchmark.
 - Role: declarative benchmark configuration, GPU/node/system power measurement, prefill/decode phase attribution.
 - What to reuse conceptually: phase-aligned metrics, power sampling methodology, benchmark artifact structure.
-- What Serve Optimize adds: automatic candidate generation, backend launch recommendation, Pareto optimizer, and search-cost reduction.
+- Comparison question: whether automatic candidate generation and backend lifecycle evidence reduce search cost without weakening TokenPowerBench style energy discipline. Search cost reduction is not established until equal budget baselines are complete.
 - Source: https://arxiv.org/abs/2512.03024
 
 ## Energy-Aware LLM Inference Papers
@@ -50,7 +50,7 @@ Source: https://arxiv.org/abs/2505.06371
 
 ### throttLL'eM
 
-Uses SLO-aware GPU frequency scaling for energy-efficient LLM serving. Serve Optimize should treat clocks and power limits as optional search dimensions when permissions and hardware support exist.
+Uses SLO aware GPU frequency scaling for energy efficient LLM serving. Serve Optimize does not currently control clocks or power limits; this work defines an external comparison and possible future scope.
 
 Source: https://arxiv.org/abs/2408.05235
 

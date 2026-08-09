@@ -23,6 +23,7 @@ def build_research_package(run_dirs: list[Path]) -> dict[str, Any]:
         "source": {
             "type": "existing_managed_run_artifacts",
             "run_dirs": [str(path) for path in run_dirs],
+            "raw_artifacts_included": False,
         },
         "summary": {
             "run_count": len(runs),
@@ -41,6 +42,12 @@ def build_research_package(run_dirs: list[Path]) -> dict[str, Any]:
             "dtypes": _selected_config_values(usable, "dtype"),
             "quantization": _selected_config_values(usable, "quantization"),
             "telemetry_quality": _values(usable, "telemetry_quality"),
+            "backend_versions": _values(usable, "backend_version"),
+            "python_versions": _values(usable, "python_version"),
+            "torch_versions": _values(usable, "torch_version"),
+            "cuda_runtime_versions": _values(usable, "cuda_runtime_version"),
+            "gpu_driver_versions": _values(usable, "gpu_driver_version"),
+            "runtime_environment_fingerprints": _values(usable, "runtime_environment_fingerprint"),
         },
         "validation_campaign": campaign,
         "methodology": [
@@ -49,6 +56,7 @@ def build_research_package(run_dirs: list[Path]) -> dict[str, Any]:
             "Scope recommendation claims to best among evaluated candidates.",
             "Record backend, runtime, workload, telemetry, evidence, and optimizer quality metadata with each package.",
             "Do not infer coverage for models, hardware, workloads, or backends not present in the supplied artifacts.",
+            "Archive the supplied raw managed run directories separately because this package indexes but does not copy them.",
         ],
         "required_tables": [
             "runs.csv",
@@ -56,6 +64,7 @@ def build_research_package(run_dirs: list[Path]) -> dict[str, Any]:
         ],
         "notes": [
             "Research package creation does not launch servers or run benchmarks.",
+            "The package is not a self contained raw data archive.",
             "Broader research claims require additional fresh runtime fingerprinted evidence.",
         ],
     }
@@ -117,18 +126,35 @@ def _write_runs_csv(path: Path, runs: object) -> None:
     columns = [
         "run_dir",
         "backend",
+        "backend_version",
+        "model",
         "goal",
         "status",
+        "python_version",
+        "torch_version",
+        "cuda_runtime_version",
+        "gpu_driver_version",
+        "runtime_environment_fingerprint",
         "selected_candidate_id",
         "selected_score",
         "selected_rank",
         "selected_is_best_evaluated",
         "throughput_tokens_per_sec",
+        "output_tokens_per_sec",
+        "total_tokens_per_sec",
+        "request_rate_req_s",
         "p95_latency_ms",
+        "p95_ttft_ms",
+        "p95_tpot_ms",
         "average_power_w",
         "joules_per_token",
+        "joules_per_generated_token",
+        "tokens_per_joule",
         "tokens_per_watt",
+        "energy_accounting",
         "telemetry_quality",
+        "client_saturation_classification",
+        "load_sufficiency_classification",
         "workload_profile_name",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)

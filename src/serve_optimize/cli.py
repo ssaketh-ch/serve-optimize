@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -334,14 +335,14 @@ def _build_parser(*, show_advanced_help: bool = False) -> argparse.ArgumentParse
     recommend.add_argument(
         "--isl",
         type=int,
-        default=512,
-        help=_help("Expected input token count.", show_advanced_help=show_advanced_help, advanced=True),
+        default=None,
+        help=_help("Expected input token count. Defaults to the workload profile.", show_advanced_help=show_advanced_help, advanced=True),
     )
     recommend.add_argument(
         "--osl",
         type=int,
-        default=128,
-        help=_help("Expected output token count.", show_advanced_help=show_advanced_help, advanced=True),
+        default=None,
+        help=_help("Expected output token count. Defaults to the workload profile.", show_advanced_help=show_advanced_help, advanced=True),
     )
     recommend.add_argument(
         "--ttft",
@@ -432,6 +433,7 @@ def _build_parser(*, show_advanced_help: bool = False) -> argparse.ArgumentParse
     )
     recommend.add_argument("--dry-run", action="store_true", help="Write a preflight plan without endpoint health checks or benchmarks.")
     _add_workload_args(recommend, show_advanced_help=show_advanced_help)
+    _add_measurement_quality_args(recommend, show_advanced_help=show_advanced_help)
     recommend.add_argument("--out", type=Path, default=Path("results/recommendations"), help="Recommendation output root directory.")
     recommend.set_defaults(func=_cmd_recommend)
 
@@ -530,6 +532,8 @@ def _build_parser(*, show_advanced_help: bool = False) -> argparse.ArgumentParse
     )
     benchmark_matrix.add_argument("--output-root", type=Path, default=Path("results/benchmark-matrix/runs"), help="Root directory for planned benchmark run outputs.")
     benchmark_matrix.add_argument("--evidence-db", type=Path, default=Path("results/benchmark-matrix/evidence.sqlite"), help="Evidence database path for planned managed runs.")
+    benchmark_matrix.add_argument("--vllm-cli", default="serve-optimize", help="Serve Optimize executable for vLLM matrix cells.")
+    benchmark_matrix.add_argument("--sglang-cli", default="serve-optimize", help="Serve Optimize executable for SGLang matrix cells.")
     benchmark_matrix.add_argument("--repeats", type=int, default=1, help="Repeated run count per runnable matrix cell.")
     benchmark_matrix.add_argument("--limit", type=int, default=5, help="Candidate limit for planned managed runs.")
     benchmark_matrix.add_argument("--trials", type=int, default=1, help="Benchmark trials for planned managed runs.")
@@ -808,7 +812,7 @@ def _add_workload_args(parser: argparse.ArgumentParser, *, show_advanced_help: b
         type=float,
         default=None,
         help=_help(
-            "Minimum total token throughput for recommendation eligibility.",
+            "Minimum output token throughput for recommendation eligibility.",
             show_advanced_help=show_advanced_help,
             advanced=True,
         ),
@@ -1119,12 +1123,11 @@ def _cmd_run_evaluation_plan(args: argparse.Namespace) -> None:
 
 def _cmd_recommend(args: argparse.Namespace) -> None:
     args.model = _required_model(args)
+    _validate_measurement_quality_args(args)
     if args.top_k < 1:
         raise SystemExit("--top-k must be at least 1.")
     if args.total_gpus < 1:
         raise SystemExit("--total-gpus must be at least 1.")
-    if args.isl < 1 or args.osl < 1:
-        raise SystemExit("--isl and --osl must both be at least 1.")
     if args.override_concurrency is not None and args.override_concurrency < 1:
         raise SystemExit("--override-concurrency must be at least 1 when provided.")
     if args.override_num_requests is not None and args.override_num_requests < 1:
@@ -1133,6 +1136,16 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
         raise SystemExit("--timeout must be greater than 0.")
     concurrency_sweep = _parse_concurrency_sweep(args.concurrency_sweep)
     workload_profile = _resolve_workload_profile(args)
+    isl = args.isl if args.isl is not None else workload_profile.input_tokens or 512
+    osl = args.osl if args.osl is not None else workload_profile.max_new_tokens or workload_profile.output_tokens or 128
+    if isl < 1 or osl < 1:
+        raise SystemExit("--isl and --osl must both be at least 1.")
+    workload_profile = replace(
+        workload_profile,
+        input_tokens=isl,
+        output_tokens=osl,
+        max_new_tokens=osl,
+    )
 
     try:
         if args.dry_run:
@@ -1142,8 +1155,8 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
                 backend=args.backend,
                 system=args.system,
                 total_gpus=args.total_gpus,
-                isl=args.isl,
-                osl=args.osl,
+                isl=isl,
+                osl=osl,
                 ttft=args.ttft,
                 tpot=args.tpot,
                 goal=RecommendationGoal(args.goal),
@@ -1159,6 +1172,12 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
                 allow_efficiency_fallback=args.allow_efficiency_fallback,
                 workload_profile=workload_profile,
                 api_key_env=args.api_key_env,
+                warmup_requests=args.warmup_requests,
+                steady_state_duration_s=args.steady_state_seconds,
+                idle_baseline_duration_s=args.idle_baseline_seconds,
+                idle_power_watts=args.idle_power_watts,
+                soak_duration_s=args.soak_seconds,
+                stream=args.stream,
             )
             _print_preflight(run.payload)
             return
@@ -1168,8 +1187,8 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
             backend=args.backend,
             system=args.system,
             total_gpus=args.total_gpus,
-            isl=args.isl,
-            osl=args.osl,
+            isl=isl,
+            osl=osl,
             ttft=args.ttft,
             tpot=args.tpot,
             goal=RecommendationGoal(args.goal),
@@ -1185,6 +1204,12 @@ def _cmd_recommend(args: argparse.Namespace) -> None:
             allow_efficiency_fallback=args.allow_efficiency_fallback,
             workload_profile=workload_profile,
             api_key_env=args.api_key_env,
+            warmup_requests=args.warmup_requests,
+            steady_state_duration_s=args.steady_state_seconds,
+            idle_baseline_duration_s=args.idle_baseline_seconds,
+            idle_power_watts=args.idle_power_watts,
+            soak_duration_s=args.soak_seconds,
+            stream=args.stream,
         )
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -1413,7 +1438,8 @@ def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None
         client_text = f", {client_cpu}" if client_cpu != "n/a" else ""
         return (
             f"trial {payload.get('trial')}/{payload.get('trials')} complete: {payload.get('candidate_id')}, "
-            f"throughput {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
+            f"total {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
+            f"output {_format_metric(payload.get('output_tokens_per_sec'), ' tok/s', decimals=0)}, "
             f"p95 {_format_metric(_latency_ms(payload.get('p95_latency_s')), ' ms', decimals=1)}, "
             f"failed {payload.get('failed_requests')}{client_text}"
         )
@@ -1426,7 +1452,8 @@ def _managed_progress_message(event: str, payload: dict[str, Any]) -> str | None
         coverage = _display_text(payload.get("concurrency_coverage"))
         return (
             f"workload complete: {payload.get('candidate_id')}, "
-            f"throughput {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
+            f"total {_format_metric(payload.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}, "
+            f"output {_format_metric(payload.get('output_tokens_per_sec'), ' tok/s', decimals=0)}, "
             f"coverage {coverage}, summary {payload.get('summary_path')}"
         )
     if event == "workload_failed":
@@ -1695,6 +1722,8 @@ def _cmd_benchmark_matrix_plan(args: argparse.Namespace) -> None:
                 include_gated=args.include_gated,
                 real_chat_manifest=str(args.real_chat_manifest) if args.real_chat_manifest is not None else None,
                 attach_base_url=args.attach_base_url,
+                vllm_cli=args.vllm_cli,
+                sglang_cli=args.sglang_cli,
                 small_model=args.small_model,
                 medium_model=args.medium_model,
             ),
@@ -1768,7 +1797,9 @@ def _print_managed_recommendation_summary(summary) -> None:
     print(f"  {command}")
     print("")
     print("Measured:")
-    print(f"  throughput: {_format_metric(metrics.get('throughput_tokens_per_sec'), ' tok/s', decimals=0)}")
+    output_throughput = metrics.get("output_tokens_per_sec", metrics.get("throughput_tokens_per_sec"))
+    print(f"  output throughput: {_format_metric(output_throughput, ' tok/s', decimals=0)}")
+    print(f"  total throughput: {_format_metric(metrics.get('total_tokens_per_sec'), ' tok/s', decimals=0)}")
     print(f"  p95 latency: {_format_metric(metrics.get('p95_latency_ms'), ' ms', decimals=1)}")
     print(f"  avg power: {_format_metric(metrics.get('average_power_w'), ' W', decimals=1)}")
     print(f"  energy/token: {_format_metric(metrics.get('joules_per_token'), ' J/token', decimals=4)}")
@@ -1782,7 +1813,7 @@ def _print_managed_recommendation_summary(summary) -> None:
         energy = baseline_metrics.get("joules_per_token", {})
         print("")
         print("Change from default baseline:")
-        print(f"  throughput: {_format_change(throughput)}")
+        print(f"  output throughput: {_format_change(throughput)}")
         print(f"  energy/token: {_format_change(energy)}")
     print("")
     print(f"Confidence: {_display_text(payload.get('confidence')).upper()}")

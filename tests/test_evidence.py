@@ -332,6 +332,26 @@ def test_near_compatible_decision_is_prior_only(tmp_path) -> None:
     assert decision.used_as_prior is True
 
 
+def test_different_launch_config_is_near_compatible_on_the_same_runtime(tmp_path) -> None:
+    store = EvidenceStore(tmp_path / "evidence.sqlite")
+    old_context = _context(launch_config=_config(gpu_memory_utilization=0.7))
+    current_context = _context(launch_config=_config(gpu_memory_utilization=0.8))
+    store.insert_measurement(_measurement(old_context))
+
+    lookup = store.lookup_evidence(current_context, freshness_hours=24.0)
+    decision = classify_evidence_lookup(
+        lookup,
+        candidate_id="cfg-test",
+        context=current_context,
+        goal=Goal.BALANCED.value,
+    )
+    store.close()
+
+    assert lookup.hit_type == EvidenceHitType.NEAR_COMPATIBLE_HIT
+    assert decision.classification == EvidenceCompatibilityClassification.NEAR_COMPATIBLE
+    assert decision.used_as_prior is True
+
+
 def test_unsupported_backend_decision_is_not_exact(tmp_path) -> None:
     store = EvidenceStore(tmp_path / "evidence.sqlite")
     context = _context(launch_config=_config(block_size=16))
@@ -413,7 +433,7 @@ def test_backend_version_change_prevents_exact_reuse(tmp_path) -> None:
     decision = _runtime_drift_decision(
         tmp_path,
         _context(backend_version="0.10.0"),
-        _context(backend_version="0.23.0"),
+        _context(backend_version="0.24.0"),
     )
 
     assert decision.classification == EvidenceCompatibilityClassification.RUNTIME_DRIFT

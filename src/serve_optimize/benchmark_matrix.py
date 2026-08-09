@@ -46,10 +46,13 @@ class BenchmarkMatrixRequest:
     idle_baseline_seconds: float = 15.0
     idle_power_watts: float | None = None
     soak_seconds: float | None = None
+    stream: bool = True
     include_optional_large: bool = False
     include_gated: bool = False
     real_chat_manifest: str | None = None
     attach_base_url: str | None = None
+    vllm_cli: str = "serve-optimize"
+    sglang_cli: str = "serve-optimize"
     small_model: str = "Qwen/Qwen3-0.6B"
     medium_model: str = "Qwen/Qwen2.5-7B-Instruct"
     notes: list[str] = field(default_factory=list)
@@ -234,11 +237,15 @@ def _stage2_cells(request: BenchmarkMatrixRequest, *, start_index: int) -> list[
         MatrixModel("Qwen/Qwen2.5-1.5B-Instruct", "small_instruction_1_to_3b", "Qwen"),
         MatrixModel("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "small_instruction_1_to_3b", "DeepSeek"),
         MatrixModel("ibm-granite/granite-3.3-2b-instruct", "small_instruction_1_to_3b", "Granite"),
-        MatrixModel("Qwen/Qwen2.5-7B-Instruct", "medium_instruction_7_to_8b", "Qwen"),
+        MatrixModel(
+            "Qwen/Qwen2.5-7B-Instruct",
+            "medium_instruction_7_to_8b_and_long_context",
+            "Qwen",
+            notes=["Representative medium model and long context model."],
+        ),
         MatrixModel("mistralai/Mistral-7B-Instruct-v0.3", "medium_instruction_7_to_8b", "Mistral"),
         MatrixModel("ibm-granite/granite-3.3-8b-instruct", "medium_instruction_7_to_8b", "Granite"),
         MatrixModel("Qwen/Qwen2.5-14B-Instruct", "larger_around_14b", "Qwen", optional=True),
-        MatrixModel("Qwen/Qwen2.5-7B-Instruct", "long_context_model", "Qwen"),
         MatrixModel("meta-llama/Llama-3.1-8B-Instruct", "gated_if_access_approved", "Llama", access="gated", optional=True),
     ]
     selected_models = [
@@ -258,7 +265,14 @@ def _stage2_cells(request: BenchmarkMatrixRequest, *, start_index: int) -> list[
         scenario="single_gpu_generality",
     )
     real_chat_index = start_index + len(cells)
-    cells.extend(_real_chat_cells(request, start_index=real_chat_index, models=selected_models[:2]))
+    real_chat_models = [selected_models[0]]
+    medium_model = next(
+        (model for model in selected_models if model.model_class.startswith("medium_instruction_7_to_8b")),
+        None,
+    )
+    if medium_model is not None and medium_model.model != real_chat_models[0].model:
+        real_chat_models.append(medium_model)
+    cells.extend(_real_chat_cells(request, start_index=real_chat_index, models=real_chat_models))
     return cells
 
 
@@ -295,18 +309,20 @@ def _stage4_cells(request: BenchmarkMatrixRequest, *, start_index: int) -> list[
     base_model = MatrixModel(request.small_model, "small_open_under_1b", "Qwen")
     index = start_index
     for backend in MANAGED_BACKENDS:
-        cells.append(
-            _attach_cell(
-                request,
-                stage_id="stage_4_production_realism",
-                index=index,
-                model=base_model,
-                backend=backend,
-                workload_profile="mixed",
-                scenario="attached_mode_observing_manual_service",
+        for repeat in range(1, request.repeats + 1):
+            cells.append(
+                _attach_cell(
+                    request,
+                    stage_id="stage_4_production_realism",
+                    index=index,
+                    model=base_model,
+                    backend=backend,
+                    workload_profile="mixed",
+                    scenario="attached_mode_observing_manual_service",
+                    repeat=repeat,
+                )
             )
-        )
-        index += 1
+            index += 1
     managed_specs = [
         ("managed_mode_launching_services", "medium", Goal.BALANCED.value, {}),
         ("mixed_prompt_lengths", "mixed", Goal.BALANCED.value, {}),
@@ -317,8 +333,8 @@ def _stage4_cells(request: BenchmarkMatrixRequest, *, start_index: int) -> list[
     ]
     for backend in MANAGED_BACKENDS:
         for scenario, workload, goal, overrides in managed_specs:
-            cells.append(
-                _managed_cell(
+            for repeat in range(1, request.repeats + 1):
+                cell = _managed_cell(
                     request,
                     stage_id="stage_4_production_realism",
                     index=index,
@@ -327,10 +343,20 @@ def _stage4_cells(request: BenchmarkMatrixRequest, *, start_index: int) -> list[
                     goal=goal,
                     workload_profile=workload,
                     scenario=scenario,
+                    repeat=repeat,
                     overrides=overrides,
                 )
-            )
-            index += 1
+                if scenario == "high_concurrency_saturation":
+                    cell["load_sufficiency"] = {
+                        "status": "requires_runtime_evidence",
+                        "method": "managed_performance_candidate_sweep",
+                        "concurrency_levels": [16, 32, 64],
+                        "minimum_concurrency_levels": 3,
+                        "source": "managed performance candidate generation applies workload_concurrency at 2x, 4x, and 8x the medium profile concurrency.",
+                        "not_claimed": "The plan does not claim server saturation before measurement.",
+                    }
+                cells.append(cell)
+                index += 1
     cells.append(
         _manual_cell(
             request,
@@ -386,6 +412,7 @@ def _managed_matrix_cells(
                                 workload_profile=workload,
                                 scenario=scenario,
                                 repeat=repeat,
+                                overrides={"limit": max(request.limit, 8)} if goal == Goal.PERFORMANCE.value else None,
                             )
                         )
                         index += 1
@@ -416,6 +443,7 @@ def _managed_cell(
         goal=goal,
         workload_profile=workload_profile,
         out_dir=out_dir,
+        repeat=repeat,
         workload_manifest=workload_manifest,
         overrides=overrides,
     )
@@ -452,10 +480,22 @@ def _attach_cell(
     backend: str,
     workload_profile: str,
     scenario: str,
+    repeat: int = 1,
 ) -> dict[str, Any]:
     cell_id = _cell_id(index, stage_id, backend, "balanced", workload_profile, model.model)
     runnable = bool(request.attach_base_url)
-    command = _attach_command(request, model=model.model, backend=backend, workload_profile=workload_profile) if runnable else []
+    out_dir = str(Path(request.output_root) / stage_id / cell_id)
+    command = (
+        _attach_command(
+            request,
+            model=model.model,
+            backend=backend,
+            workload_profile=workload_profile,
+            out_dir=out_dir,
+        )
+        if runnable
+        else []
+    )
     return {
         "index": index,
         "stage_id": stage_id,
@@ -470,10 +510,10 @@ def _attach_cell(
         "goal": Goal.BALANCED.value,
         "objective_label": Goal.BALANCED.value,
         "workload_profile": workload_profile,
-        "repeat": 1,
+        "repeat": repeat,
         "runnable": runnable,
         "prerequisite": None if runnable else "Provide --attach-base-url for a manually launched OpenAI compatible service.",
-        "out_dir": str(Path(request.output_root) / stage_id / cell_id),
+        "out_dir": out_dir,
         "command": command,
         "shell_command": " ".join(shlex.quote(part) for part in command),
         "success_criteria": _cell_success_criteria(stage_id),
@@ -487,35 +527,41 @@ def _real_chat_cells(
     models: list[MatrixModel],
 ) -> list[dict[str, Any]]:
     cells: list[dict[str, Any]] = []
-    for offset, model in enumerate(models):
-        if request.real_chat_manifest:
+    index = start_index
+    for model in models:
+        for backend in MANAGED_BACKENDS:
+            if request.real_chat_manifest:
+                for repeat in range(1, request.repeats + 1):
+                    cells.append(
+                        _managed_cell(
+                            request,
+                            stage_id="stage_2_broad_single_gpu",
+                            index=index,
+                            model=model,
+                            backend=backend,
+                            goal=Goal.BALANCED.value,
+                            workload_profile="medium",
+                            repeat=repeat,
+                            workload_manifest=request.real_chat_manifest,
+                            scenario="real_chat_trace_permitted_dataset",
+                        )
+                    )
+                    index += 1
+                continue
             cells.append(
-                _managed_cell(
+                _manual_cell(
                     request,
                     stage_id="stage_2_broad_single_gpu",
-                    index=start_index + offset,
-                    model=model,
-                    backend="vllm",
-                    goal=Goal.BALANCED.value,
-                    workload_profile="medium",
-                    workload_manifest=request.real_chat_manifest,
+                    index=index,
                     scenario="real_chat_trace_permitted_dataset",
+                    prerequisite="Provide --real-chat-manifest for a permitted dataset before running this cell.",
+                    model=model.model,
+                    backend=backend,
+                    workload_profile="medium",
+                    success_criteria=["Dataset source and license status are recorded in workload metadata."],
                 )
             )
-            continue
-        cells.append(
-            _manual_cell(
-                request,
-                stage_id="stage_2_broad_single_gpu",
-                index=start_index + offset,
-                scenario="real_chat_trace_permitted_dataset",
-                prerequisite="Provide --real-chat-manifest for a permitted dataset before running this cell.",
-                model=model.model,
-                backend="vllm",
-                workload_profile="medium",
-                success_criteria=["Dataset source and license status are recorded in workload metadata."],
-            )
-        )
+            index += 1
     return cells
 
 
@@ -566,12 +612,13 @@ def _managed_command(
     goal: str,
     workload_profile: str,
     out_dir: str,
+    repeat: int = 1,
     workload_manifest: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> list[str]:
     overrides = dict(overrides or {})
     command = [
-        "serve-optimize",
+        _backend_cli(request, backend),
         "managed-evaluate",
         "--backend",
         backend,
@@ -594,8 +641,9 @@ def _managed_command(
         "--out",
         out_dir,
     ]
-    if request.evidence_db:
-        command.extend(["--evidence-db", request.evidence_db])
+    evidence_db = _evidence_db_for_repeat(request.evidence_db, repeat)
+    if evidence_db:
+        command.extend(["--evidence-db", evidence_db])
     if workload_manifest:
         command.extend(["--workload-manifest", workload_manifest])
     command.extend(["--warmup-requests", str(request.warmup_requests)])
@@ -621,9 +669,10 @@ def _attach_command(
     model: str,
     backend: str,
     workload_profile: str,
+    out_dir: str,
 ) -> list[str]:
-    return [
-        "serve-optimize",
+    command = [
+        _backend_cli(request, backend),
         "recommend",
         model,
         "--base-url",
@@ -632,13 +681,36 @@ def _attach_command(
         backend,
         "--goal",
         Goal.BALANCED.value,
+        "--top-k",
+        str(request.limit),
         "--workload-profile",
         workload_profile,
         "--telemetry",
         request.telemetry,
         "--out",
-        str(Path(request.output_root) / "stage_4_production_realism" / "attach"),
+        out_dir,
     ]
+    command.extend(["--warmup-requests", str(request.warmup_requests)])
+    if request.steady_state_seconds is not None:
+        command.extend(["--steady-state-seconds", _number(request.steady_state_seconds)])
+    command.extend(["--idle-baseline-seconds", _number(request.idle_baseline_seconds)])
+    if request.idle_power_watts is not None:
+        command.extend(["--idle-power-watts", _number(request.idle_power_watts)])
+    if request.soak_seconds is not None:
+        command.extend(["--soak-seconds", _number(request.soak_seconds)])
+    command.append("--stream" if request.stream else "--no-stream")
+    return command
+
+
+def _backend_cli(request: BenchmarkMatrixRequest, backend: str) -> str:
+    return request.vllm_cli if backend == "vllm" else request.sglang_cli
+
+
+def _evidence_db_for_repeat(evidence_db: str | None, repeat: int) -> str | None:
+    if evidence_db is None or repeat <= 1:
+        return evidence_db
+    path = Path(evidence_db)
+    return str(path.with_name(f"{path.stem}-repeat-{repeat:02d}{path.suffix}"))
 
 
 def _stage_payload(stage: str, cells: list[dict[str, Any]]) -> dict[str, Any]:
@@ -831,3 +903,5 @@ def _validate_request(request: BenchmarkMatrixRequest) -> None:
         raise ValueError("idle power watts must be nonnegative when provided.")
     if request.soak_seconds is not None and request.soak_seconds <= 0:
         raise ValueError("soak seconds must be greater than 0 when provided.")
+    if not request.vllm_cli.strip() or not request.sglang_cli.strip():
+        raise ValueError("backend CLI paths must be nonempty.")

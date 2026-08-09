@@ -105,13 +105,15 @@ from .synthesis import (
     synthesis_result_to_artifact,
 )
 from .validation import CandidateValidationResult, validate_managed_candidate
-from .workloads import slo_note
+from .workloads import slo_note, workload_prompts
 
 CandidateProvider = Callable[[], list[ServingConfig]]
 ManagedProgressCallback = Callable[[str, dict[str, Any]], None]
 WORKLOAD_EXTRA_KEYS = {
     "benchmark_duration_s",
     "dataset",
+    "dataset_source",
+    "dataset_license",
     "input_length",
     "max_new_tokens",
     "num_prompts",
@@ -131,7 +133,9 @@ WORKLOAD_EXTRA_KEYS = {
     "workload_extra",
     "workload_id",
     "workload_prompt",
+    "prompts",
     "workload_profile",
+    "synthetic_or_real",
     "prior_confidence",
     "prior_notes",
     "prior_source",
@@ -159,6 +163,9 @@ LOAD_SUFFICIENCY_MIN_CONCURRENCY_LEVELS = 3
 LOAD_SUFFICIENCY_FLAT_THROUGHPUT_CV = 0.05
 LOAD_SUFFICIENCY_GPU_THRESHOLD_PERCENT = 85.0
 LOAD_SUFFICIENCY_PRESSURE_GROWTH_RATIO = 1.2
+LOAD_SUFFICIENCY_RECOMMENDABLE_CLASSIFICATIONS = frozenset(
+    {"load_sufficient_gpu_saturated", "load_sufficient_throughput_plateau"}
+)
 
 
 class _ManagedExecutionState:
@@ -324,6 +331,7 @@ def run_managed_evaluation(
     write_json(recommendation_ablation_plan_path, {})
 
     hardware = detect_hardware()
+    requested_workload_profile = workload_profile
     workload_profile = workload_profile or WorkloadProfile()
     backend_metadata = _backend_metadata(adapter, backend)
     vllm_argument_capabilities = _backend_argument_capabilities(adapter, backend)
@@ -427,6 +435,8 @@ def run_managed_evaluation(
     candidate_generation = _provided_candidate_generation()
     if candidate_provider is not None:
         candidate_pool = candidate_provider()
+        if requested_workload_profile is not None and requested_workload_profile != WorkloadProfile():
+            candidate_pool = _with_workload_profile(candidate_pool, requested_workload_profile)
         candidate_pool = _with_measurement_quality_options(
             candidate_pool,
             warmup_requests=warmup_requests,
@@ -452,6 +462,8 @@ def run_managed_evaluation(
             workload_profile=workload_profile,
         )
         candidate_pool = candidate_generation.candidates
+        if requested_workload_profile is not None and requested_workload_profile != WorkloadProfile():
+            candidate_pool = _with_workload_profile(candidate_pool, requested_workload_profile)
         candidate_pool = _with_measurement_quality_options(
             candidate_pool,
             warmup_requests=warmup_requests,
@@ -929,7 +941,7 @@ def run_managed_evaluation(
         runtime_environment=runtime_environment,
         client_saturation=client_saturation,
         load_sufficiency=load_sufficiency,
-        trial_count=len(state.rung_results),
+        trial_count=state.workload_measurement_count,
         failed_trials_avoided_by_pruning=_int_from_mapping(candidate_pruning_report, "failed_trials_avoided_by_pruning"),
         evidence_hit_count=state.evidence_hits,
         evidence_reuse_candidate_count=len(exact_fresh_ids) + len(evidence_priors),
@@ -954,6 +966,8 @@ def run_managed_evaluation(
 
     completed_candidate_count = _unique_result_count(state.candidate_results, statuses={"completed", "evidence_hit", "resumed"})
     status = _run_status(completed_candidate_count, len(state.failures))
+    if status == "success" and _throughput_load_warning(goal, load_sufficiency) is not None:
+        status = "warning"
     artifacts = {
         "run_dir": str(run_dir),
         "managed_run_json": str(run_dir / "managed_run.json"),
@@ -1123,6 +1137,7 @@ def build_managed_preflight(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     hardware = detect_hardware()
+    requested_workload_profile = workload_profile
     workload_profile = workload_profile or WorkloadProfile()
     backend_metadata = _backend_metadata(adapter, backend)
     vllm_argument_capabilities = _backend_argument_capabilities(adapter, backend)
@@ -1134,6 +1149,8 @@ def build_managed_preflight(
     model_metadata = infer_model_capability_metadata(model)
     if candidate_provider is not None:
         candidate_pool = candidate_provider()[:limit]
+        if requested_workload_profile is not None and requested_workload_profile != WorkloadProfile():
+            candidate_pool = _with_workload_profile(candidate_pool, requested_workload_profile)
         candidate_pool = _with_measurement_quality_options(
             candidate_pool,
             warmup_requests=warmup_requests,
@@ -1158,6 +1175,8 @@ def build_managed_preflight(
             workload_profile=workload_profile,
         )
         candidate_pool = candidate_generation.candidates
+        if requested_workload_profile is not None and requested_workload_profile != WorkloadProfile():
+            candidate_pool = _with_workload_profile(candidate_pool, requested_workload_profile)
         candidate_pool = _with_measurement_quality_options(
             candidate_pool,
             warmup_requests=warmup_requests,
@@ -2419,6 +2438,13 @@ def _write_managed_recommendation_artifacts(
             *_load_sufficiency_notes(load_sufficiency),
         ],
     )
+    load_warning = _throughput_load_warning(goal, load_sufficiency)
+    if recommendation.recommended_candidate_id is not None and load_warning is not None:
+        recommendation = replace(
+            recommendation,
+            status="warning",
+            warnings=[*recommendation.warnings, load_warning],
+        )
     recommendation = _managed_recommendation_result(
         recommendation,
         backend=backend,
@@ -2450,7 +2476,7 @@ def _write_managed_recommendation_artifacts(
         "schema_version": "managed-recommendation/v1",
         "run_id": run_id,
         "status": recommendation.status if recommendation.recommended_candidate_id else "unavailable",
-        "reason": None if recommendation.recommended_candidate_id else _unavailable_recommendation_reason(recommendation),
+        "reason": load_warning if recommendation.recommended_candidate_id else _unavailable_recommendation_reason(recommendation),
         "selected_evidence_key": selected.get("evidence_key") if selected else None,
         "selected_measurement_id": selected.get("measurement_id") if selected else None,
         "selected_source": selected.get("source") if selected else None,
@@ -2504,7 +2530,7 @@ def _write_managed_recommendation_artifacts(
             selected=selected or {},
         )
     selected_score = recommendation.selected_score.final_score if recommendation.selected_score else None
-    status = "success" if recommendation.recommended_candidate_id is not None else "unavailable"
+    status = recommendation.status if recommendation.recommended_candidate_id is not None else "unavailable"
     return _ManagedRecommendationArtifacts(
         status=status,
         reason=payload["reason"],
@@ -3444,6 +3470,16 @@ def _load_sufficiency_notes(load_sufficiency: dict[str, Any]) -> list[str]:
     return []
 
 
+def _throughput_load_warning(goal: Goal, load_sufficiency: dict[str, Any]) -> str | None:
+    if goal != Goal.PERFORMANCE:
+        return None
+    classification = str(load_sufficiency.get("classification") or "insufficient_evidence")
+    if classification in LOAD_SUFFICIENCY_RECOMMENDABLE_CLASSIFICATIONS:
+        return None
+    reason = str(load_sufficiency.get("reason") or "Server saturation was not established.")
+    return f"Throughput recommendation is provisional because load sufficiency was not established. {reason}"
+
+
 def _coefficient_of_variation(values: list[float]) -> float | None:
     if len(values) < 2:
         return None
@@ -3563,6 +3599,10 @@ def serving_config_to_workload_config(
     requested_num_requests = _positive_int(extra.get("num_requests") or profile.get("num_requests"), default=max(128, 2 * concurrency))
     minimum_num_requests = concurrency + warmup_requests
     num_requests = max(requested_num_requests, minimum_num_requests)
+    fallback_prompt = str(extra.get("workload_prompt") or DEFAULT_ENDPOINT_PROMPT)
+    profile_name = str(profile.get("profile_name") or "default").replace("_", "-").lower()
+    profile_drives_prompts = profile_name != "default" or bool(profile.get("prompts"))
+    prompts = workload_prompts(profile, count=num_requests, fallback_prompt=fallback_prompt) if profile_drives_prompts else []
     workload_extra = dict(extra.get("workload_extra") or {}) if isinstance(extra.get("workload_extra"), dict) else {}
     for key in (
         "candidate_source",
@@ -3576,6 +3616,10 @@ def serving_config_to_workload_config(
     ):
         if key in extra:
             workload_extra[key] = extra[key]
+        if key in profile and profile[key] is not None:
+            workload_extra.setdefault(key, profile[key])
+    if prompts:
+        workload_extra["prompts"] = prompts
     if requested_num_requests < minimum_num_requests:
         workload_extra["requested_num_requests"] = requested_num_requests
         workload_extra["num_requests_adjusted_reason"] = "raised_to_match_concurrency"
@@ -3589,7 +3633,7 @@ def serving_config_to_workload_config(
         concurrency=concurrency,
         num_requests=num_requests,
         max_new_tokens=max_new_tokens,
-        prompt=str(extra.get("workload_prompt") or DEFAULT_ENDPOINT_PROMPT),
+        prompt=prompts[0] if prompts else fallback_prompt,
         timeout_s=_positive_float(extra.get("timeout_s"), default=request_timeout_s),
         trials=_positive_int(extra.get("trials"), default=trials),
         request_rate=_optional_float(extra.get("request_rate")),
@@ -3649,12 +3693,17 @@ def _generate_managed_candidate_generation(
     sglang_argument_capabilities: SGLangArgumentCapabilities | None = None,
     workload_profile: WorkloadProfile | None = None,
 ) -> ManagedCandidateGenerationResult:
+    model_spec = infer_model_spec(
+        model,
+        max_context_tokens=model_metadata.max_context_tokens if model_metadata is not None else None,
+    )
     return generate_managed_candidates_from_capabilities(
         CapabilityContext(
             backend=backend,
             model=model,
             goal=goal,
             hardware=hardware,
+            model_spec=model_spec,
             model_metadata=model_metadata,
             backend_metadata=backend_metadata or {},
             vllm_argument_capabilities=vllm_argument_capabilities,
@@ -3804,7 +3853,7 @@ def _candidate_generation_report(
     evidence_prior_count: int,
     synthesis_summary: dict[str, object],
 ) -> dict[str, object]:
-    model_spec = infer_model_spec(model)
+    model_spec = infer_model_spec(model, max_context_tokens=model_metadata.max_context_tokens)
     best_gpu = hardware.best_gpu
     estimated_vram_values = [config.estimated_vram_mb for config in generated_candidates if config.estimated_vram_mb is not None]
     source_counts = _candidate_source_counts(generated_candidates)
@@ -4935,6 +4984,7 @@ def _workload_description(workload: WorkloadConfig) -> dict[str, object]:
         "dataset_license_status": extra.get("dataset_license") or ("synthetic" if "synthetic" in str(dataset).lower() else "unknown"),
         "number_prompts": workload.num_prompts or workload.num_requests,
         "prompt_length_distribution": input_distribution or _length_distribution(workload.input_length),
+        "prompt_length_target_scope": "user_content_whitespace_tokens",
         "requested_output_length_distribution": output_distribution or _length_distribution(workload.output_length or workload.max_new_tokens),
         "actual_output_length_distribution": {},
         "sampling_parameters": sampling_parameters or {"temperature": 0, "max_tokens": workload.max_new_tokens},
@@ -4943,9 +4993,12 @@ def _workload_description(workload: WorkloadConfig) -> dict[str, object]:
         "warmup_duration_s": workload.warmup_duration_s,
         "measurement_duration_s": workload.benchmark_duration_s,
         "warmup_requests": workload.warmup_requests,
-        "random_seed": extra.get("random_seed"),
+        "random_seed": extra.get("random_seed", 0),
         "streaming": workload.stream,
-        "prefix_reuse": _optional_bool(extra.get("prefix_reuse"), default=False),
+        "prefix_reuse": _optional_bool(
+            extra.get("prefix_reuse"),
+            default=bool(profile.get("prefix_reuse_expected")),
+        ),
         "synthetic_or_real": extra.get("synthetic_or_real") or ("synthetic" if "synthetic" in str(dataset).lower() else "unknown"),
     }
 
@@ -4969,6 +5022,19 @@ def _benchmark_config_from_workload(
 ) -> EndpointBenchmarkConfig:
     run_id = workload.workload_id if workload.trials == 1 else f"{workload.workload_id}-trial-{trial + 1:02d}"
     launch_provenance = launch_provenance or {}
+    profile = workload.extra.get("workload_profile") if isinstance(workload.extra.get("workload_profile"), dict) else {}
+    raw_prompts = workload.extra.get("prompts")
+    prompts = (
+        workload_prompts({"prompts": raw_prompts}, count=workload.num_requests, fallback_prompt=workload.prompt)
+        if raw_prompts is not None
+        else []
+    )
+    if not prompts and profile and str(profile.get("profile_name") or "default") != "default":
+        prompts = workload_prompts(
+            profile,
+            count=workload.num_requests,
+            fallback_prompt=workload.prompt,
+        )
     return EndpointBenchmarkConfig(
         run_id=run_id,
         base_url=base_url,
@@ -5015,6 +5081,7 @@ def _benchmark_config_from_workload(
         backend_ready_at=_optional_str(launch_provenance.get("backend_ready_at")),
         backend_startup_time_s=_optional_float(launch_provenance.get("backend_startup_time_s")),
         model_load_time_s=_optional_float(launch_provenance.get("model_load_time_s")),
+        prompts=prompts,
     )
 
 
@@ -5054,6 +5121,17 @@ def _with_measurement_quality_options(
             extra["stream"] = True
         updated.append(replace(config, extra=extra))
     return updated
+
+
+def _with_workload_profile(
+    candidates: list[ServingConfig],
+    profile: WorkloadProfile,
+) -> list[ServingConfig]:
+    payload = to_dict(profile)
+    return [
+        replace(config, extra={**dict(config.extra or {}), "workload_profile": payload})
+        for config in candidates
+    ]
 
 
 def _positive_int(value: object, *, default: int) -> int:
@@ -5251,6 +5329,21 @@ def _failure_reason_for_health(health: HealthCheckResult) -> str:
     classified = _failure_reason_from_text(payload)
     if classified is not None:
         return classified
+    lowered = payload.lower()
+    if _has_any(
+        lowered,
+        (
+            "modulenotfounderror",
+            "no module named",
+            "permission denied",
+            "no such file or directory",
+            "cannot execute",
+            "error while loading shared libraries",
+        ),
+    ):
+        return "backend_failed_to_start"
+    if _has_any(lowered, ("unrecognized arguments", "invalid choice", "expected one argument")):
+        return "invalid_config"
     if health.status == "process_exited" or "process_returncode" in details:
         return "backend_crashed_during_load"
     return "backend_failed_to_start"
@@ -5279,6 +5372,8 @@ def _failure_reason_from_text(value: object) -> str | None:
             "failed to allocate",
             "not enough memory",
             "insufficient memory",
+            "less than desired gpu memory utilization",
+            "decrease gpu memory utilization",
         ),
     ):
         return "out_of_memory"

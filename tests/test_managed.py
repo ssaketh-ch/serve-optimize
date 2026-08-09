@@ -1,12 +1,14 @@
 import json
+import shlex
 import signal
 import socket
 import sqlite3
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
 
-from serve_optimize.backends.base import environment_with_command_dir
+from serve_optimize.backends.base import environment_with_command_dir, process_exit_details
 from serve_optimize.backends.factory import (
     ATTACH_ONLY_BACKENDS,
     MANAGED_BACKEND_CHOICES,
@@ -39,12 +41,15 @@ from serve_optimize.managed import (
     _benchmark_config_from_workload,
     _client_saturation_summary,
     _failure_reason_for_exception,
+    _failure_reason_for_health,
+    _generate_managed_candidate_generation,
     _generate_managed_candidates,
     _load_sufficiency_summary,
     _managed_measured_metrics,
     _managed_telemetry_metrics,
     _measurement_metrics,
     _summary_metrics,
+    _throughput_load_warning,
     build_managed_preflight,
     group_candidates_by_launch_config,
     run_managed_evaluation,
@@ -62,6 +67,7 @@ from serve_optimize.schemas import (
     ManagedLifecycleRecord,
     ManagedRunSummary,
     ModelCapabilityMetadata,
+    ModelSpec,
     PowerSampleRecord,
     PriorCandidate,
     PriorResult,
@@ -89,7 +95,8 @@ def test_vllm_managed_launch_spec_builds_command_and_logs(tmp_path) -> None:
         log_dir=tmp_path / "logs",
     )
 
-    assert spec.command[:3] == ["vllm", "serve", "model-path"]
+    assert spec.command[0].rsplit("/", 1)[-1] == "vllm"
+    assert spec.command[1:3] == ["serve", "model-path"]
     assert spec.command[spec.command.index("--dtype") + 1] == "bfloat16"
     assert spec.command[spec.command.index("--host") + 1] == "127.0.0.1"
     assert spec.command[spec.command.index("--port") + 1] == str(port)
@@ -110,6 +117,45 @@ def test_vllm_launch_prefers_executable_beside_active_python(tmp_path, monkeypat
     command = vllm_command(_config(), capabilities=_all_engine_caps())
 
     assert command[0] == str(executable)
+
+
+def test_vllm_launch_uses_the_capability_checked_module_fallback(tmp_path, monkeypatch) -> None:
+    broken = tmp_path / "vllm"
+    broken.touch(mode=0o755)
+
+    def fake_run(command, **_kwargs):
+        if command[0] == str(broken):
+            return subprocess.CompletedProcess(command, 1, "", "broken launcher")
+        return subprocess.CompletedProcess(command, 0, "--dtype --gpu-memory-utilization", "")
+
+    monkeypatch.setattr("serve_optimize.backends.vllm.subprocess.run", fake_run)
+    capabilities = detect_vllm_argument_capabilities(executable=str(broken), timeout_s=0.01)
+
+    command = vllm_command(_config(), capabilities=capabilities)
+
+    assert capabilities.launch_command == (
+        capabilities.executable,
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "serve",
+    )
+    assert command[:4] == [capabilities.executable, "-m", "vllm.entrypoints.cli.main", "serve"]
+
+
+def test_vllm_capability_detection_requests_full_help(tmp_path, monkeypatch) -> None:
+    executable = tmp_path / "vllm"
+    executable.touch(mode=0o755)
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "--dtype --gpu-memory-utilization", "")
+
+    monkeypatch.setattr("serve_optimize.backends.vllm.subprocess.run", fake_run)
+
+    detect_vllm_argument_capabilities(executable=str(executable), timeout_s=0.02)
+
+    assert commands[0][-1] == "--help=all"
 
 
 def test_backend_launch_environment_prepends_command_directory(tmp_path) -> None:
@@ -403,6 +449,21 @@ def test_load_sufficiency_summary_marks_flat_runs_without_pressure_growth() -> N
     assert summary["flat_throughput"] is True
     assert summary["pressure_applied"] is False
     assert summary["zero_change_pressure_check"]["load_generator_applied_pressure"] is False
+
+
+def test_throughput_load_warning_requires_saturation_evidence() -> None:
+    warning = _throughput_load_warning(
+        Goal.PERFORMANCE,
+        {"classification": "not_saturated", "reason": "No saturation signal was observed."},
+    )
+
+    assert warning is not None
+    assert "provisional" in warning
+    assert _throughput_load_warning(
+        Goal.PERFORMANCE,
+        {"classification": "load_sufficient_throughput_plateau"},
+    ) is None
+    assert _throughput_load_warning(Goal.BALANCED, {"classification": "not_saturated"}) is None
 
 
 def test_sglang_capability_detection_unavailable_nonfatal(monkeypatch) -> None:
@@ -1117,6 +1178,53 @@ def test_health_process_exit_records_backend_crashed_during_load(tmp_path) -> No
 
 
 @pytest.mark.parametrize(
+    ("stderr_tail", "expected"),
+    [
+        ("ModuleNotFoundError: No module named 'vllm'", "backend_failed_to_start"),
+        ("error: unrecognized arguments: --old-flag", "invalid_config"),
+        ("Free memory is less than desired GPU memory utilization", "out_of_memory"),
+    ],
+)
+def test_health_process_exit_uses_log_evidence_for_failure_reason(stderr_tail, expected) -> None:
+    health = HealthCheckResult(
+        config_id="cfg-test",
+        backend="vllm",
+        base_url="http://127.0.0.1:8000/v1",
+        healthy=False,
+        status="process_exited",
+        attempts=1,
+        started_at=datetime.now(timezone.utc).isoformat(),
+        ended_at=datetime.now(timezone.utc).isoformat(),
+        error="server process exited with return code 1",
+        details={"process_returncode": 1, "process_stderr_tail": stderr_tail},
+    )
+
+    assert _failure_reason_for_health(health) == expected
+
+
+def test_process_exit_details_reads_bounded_log_tails(tmp_path) -> None:
+    stderr_path = tmp_path / "stderr.log"
+    stderr_path.write_text("x" * 5000 + " final error", encoding="utf-8")
+    handle = ServerHandle(
+        config_id="cfg-test",
+        backend="vllm",
+        pid=1,
+        pgid=1,
+        host="127.0.0.1",
+        port=8000,
+        base_url="http://127.0.0.1:8000/v1",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        stderr_log_path=str(stderr_path),
+    )
+
+    details = process_exit_details(handle, 1)
+
+    assert details["process_returncode"] == 1
+    assert len(details["process_stderr_tail"]) == 4096
+    assert str(details["process_stderr_tail"]).endswith("final error")
+
+
+@pytest.mark.parametrize(
     ("status", "error", "expected_reason"),
     [
         ("http_404", "model not found", "unavailable_model"),
@@ -1554,7 +1662,8 @@ def test_managed_preflight_renders_without_launching(tmp_path) -> None:
     assert payload["evidence"]["write_enabled"] is True
     assert payload["candidates"]["valid_count"] == 1
     assert payload["budget"]["planned_workload_measurements"] == 1
-    assert rendered_rows[0]["command"][:3] == ["vllm", "serve", "model-path"]
+    assert rendered_rows[0]["command"][0].rsplit("/", 1)[-1] == "vllm"
+    assert rendered_rows[0]["command"][1:3] == ["serve", "model-path"]
     assert "will launch servers: no" in text
 
 
@@ -1597,6 +1706,28 @@ def test_capability_generation_for_bf16_model_emits_multiple_none_candidates(tmp
     assert any(config.block_size == 16 for config in result.candidates[1:])
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_capability_generation_adds_available_memory_candidate_on_shared_gpu(tmp_path, backend) -> None:
+    model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
+    metadata = infer_model_capability_metadata(str(model_dir))
+    context = CapabilityContext(
+        backend=backend,
+        model=str(model_dir),
+        goal=Goal.BALANCED,
+        hardware=_managed_hardware(free_memory_mb=54_000),
+        model_metadata=metadata,
+        vllm_argument_capabilities=_all_engine_caps() if backend == "vllm" else None,
+        sglang_argument_capabilities=_sglang_caps() if backend == "sglang" else None,
+    )
+
+    result = generate_managed_candidates_from_capabilities(context, limit=2)
+
+    assert result.candidates[0].extra["candidate_source"] == "safe_baseline"
+    assert result.candidates[1].extra["candidate_source"] == "available_memory_conservative"
+    assert result.candidates[1].gpu_memory_utilization == 0.62
+    assert result.candidates[1].extra["workload_concurrency"] == result.candidates[0].extra["workload_concurrency"]
+
+
 def test_vllm_medium_profile_scales_scheduler_capacity(tmp_path) -> None:
     model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
     metadata = infer_model_capability_metadata(str(model_dir))
@@ -1625,6 +1756,107 @@ def test_vllm_medium_profile_scales_scheduler_capacity(tmp_path) -> None:
         config.max_num_batched_tokens is None or config.max_num_batched_tokens >= 8192
         for config in result.candidates[1:]
     )
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_long_profile_context_floor_applies_to_all_generated_candidates(tmp_path, backend) -> None:
+    model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
+    metadata = infer_model_capability_metadata(str(model_dir))
+    profile = WorkloadProfile(
+        profile_name="long",
+        input_tokens=4096,
+        output_tokens=512,
+        max_new_tokens=512,
+        concurrency=4,
+    )
+    model_spec = ModelSpec(
+        model_id=str(model_dir),
+        parameter_count_b=1.0,
+        max_context_tokens=8192,
+    )
+
+    result = generate_managed_candidates_from_capabilities(
+        CapabilityContext(
+            backend=backend,
+            model=str(model_dir),
+            goal=Goal.PERFORMANCE,
+            hardware=_managed_hardware(),
+            model_spec=model_spec,
+            model_metadata=metadata,
+            vllm_argument_capabilities=_all_engine_caps() if backend == "vllm" else None,
+            sglang_argument_capabilities=_sglang_caps() if backend == "sglang" else None,
+            workload_profile=profile,
+        ),
+        limit=32,
+    )
+
+    required_context = 4096 + 512 + 128
+    assert result.candidates
+    assert all(config.max_context_tokens >= required_context for config in result.candidates)
+    assert all(config.max_context_tokens <= model_spec.max_context_tokens for config in result.candidates)
+    assert all(config.extra["required_context_tokens"] == required_context for config in result.candidates)
+    assert all(config.extra["context_requirement_status"] == "supported" for config in result.candidates)
+
+
+def test_managed_generation_uses_context_length_from_model_metadata(tmp_path) -> None:
+    model_dir = _model_dir(
+        tmp_path,
+        {"torch_dtype": "bfloat16", "max_position_embeddings": 40960},
+    )
+    metadata = infer_model_capability_metadata(str(model_dir))
+    profile = WorkloadProfile(
+        profile_name="long-prefill",
+        input_tokens=4096,
+        output_tokens=128,
+        max_new_tokens=128,
+    )
+
+    result = _generate_managed_candidate_generation(
+        backend="vllm",
+        model=str(model_dir),
+        goal=Goal.BALANCED,
+        limit=5,
+        hardware=_managed_hardware(),
+        model_metadata=metadata,
+        vllm_argument_capabilities=_all_engine_caps(),
+        workload_profile=profile,
+    )
+
+    assert result.candidates
+    assert all(config.max_context_tokens >= 4352 for config in result.candidates)
+    assert all(config.extra["context_requirement_status"] == "supported" for config in result.candidates)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_long_profile_over_model_cap_is_marked_unsupported(tmp_path, backend) -> None:
+    model_dir = _model_dir(tmp_path, {"torch_dtype": "bfloat16"})
+    metadata = infer_model_capability_metadata(str(model_dir))
+    profile = WorkloadProfile(profile_name="long", input_tokens=4096, max_new_tokens=512)
+    model_spec = ModelSpec(
+        model_id=str(model_dir),
+        parameter_count_b=1.0,
+        max_context_tokens=4096,
+    )
+
+    result = generate_managed_candidates_from_capabilities(
+        CapabilityContext(
+            backend=backend,
+            model=str(model_dir),
+            goal=Goal.BALANCED,
+            hardware=_managed_hardware(),
+            model_spec=model_spec,
+            model_metadata=metadata,
+            vllm_argument_capabilities=_all_engine_caps() if backend == "vllm" else None,
+            sglang_argument_capabilities=_sglang_caps() if backend == "sglang" else None,
+            workload_profile=profile,
+        ),
+        limit=32,
+    )
+
+    assert result.candidates
+    assert all(config.max_context_tokens == model_spec.max_context_tokens for config in result.candidates)
+    assert all(config.extra["context_requirement_status"] == "unsupported_model_context" for config in result.candidates)
+    assert all("unsupported_model_context" in " ".join(config.notes) for config in result.candidates)
 
 
 def test_vllm_omit_max_num_seqs_uses_backend_scheduler_default() -> None:
@@ -2658,6 +2890,7 @@ def test_managed_evaluate_cli_prints_recommended_command(tmp_path, monkeypatch, 
                 "trial": 1,
                 "trials": 1,
                 "throughput_tokens_per_sec": 9125.02,
+                "output_tokens_per_sec": 3210.5,
                 "p95_latency_s": 0.05484,
                 "failed_requests": 0,
             },
@@ -2707,6 +2940,8 @@ def test_managed_evaluate_cli_prints_recommended_command(tmp_path, monkeypatch, 
     assert "run created: managed-test" in output
     assert "launching server: cfg-test-measure" in output
     assert "trial 1/1 complete: cfg-test" in output
+    assert "total 9,125 tok/s, output 3,210 tok/s" in output
+    assert "output throughput: 9,125 tok/s" in output
     assert "Debug artifacts:" in output
     assert f"server lifecycle: {run_dir / 'server_lifecycle.jsonl'}" in output
     assert "Recommended configuration:" in output
@@ -2807,6 +3042,15 @@ def test_workload_profile_affects_workload_fingerprint_when_non_default() -> Non
 
     assert workload_config_hash(first) != workload_config_hash(second)
     assert second.extra["workload_profile"]["profile_name"] == "repeated_prefix"
+
+    config = _benchmark_config_from_workload(
+        workload=second,
+        base_url="http://127.0.0.1:8000",
+        model="model-path",
+        trial=0,
+    )
+    assert config.workload_description["prefix_reuse"] is True
+    assert config.workload_description["random_seed"] == 0
 
 
 def test_workload_profile_preserves_dataset_distribution_and_slos() -> None:
@@ -2915,7 +3159,55 @@ def test_benchmark_config_from_workload_carries_data_collection_metadata() -> No
     assert config.workload_description["dataset_license_status"] == "synthetic"
     assert config.workload_description["prompt_length_distribution"]["p50"] == 128
     assert config.workload_description["requested_output_length_distribution"]["p95"] == 128
+    assert config.workload_description["prompt_length_target_scope"] == "user_content_whitespace_tokens"
     assert config.workload_description["random_seed"] == 123
+    assert len(config.prompts) == 8
+    assert all(config.prompts)
+    assert len({len(prompt) for prompt in config.prompts}) == 1
+
+
+def test_manifest_prompts_reach_managed_benchmark_config_in_order() -> None:
+    workload = serving_config_to_workload_config(
+        _config(
+            extra={
+                "num_requests": 4,
+                "workload_profile": {
+                    "profile_name": "real-chat",
+                    "prompts": ["first", "second"],
+                    "dataset_source": "permitted-set",
+                    "dataset_license": "research-only",
+                    "synthetic_or_real": "real",
+                },
+            }
+        ),
+        trials=1,
+        request_timeout_s=30.0,
+        telemetry="none",
+    )
+
+    config = _benchmark_config_from_workload(
+        workload=workload,
+        base_url="http://127.0.0.1:8000",
+        model="model-path",
+        trial=0,
+    )
+
+    assert config.prompts == ["first", "second", "first", "second"]
+    assert config.workload_description["dataset_source"] == "permitted-set"
+    assert config.workload_description["dataset_license_status"] == "research-only"
+    assert config.workload_description["synthetic_or_real"] == "real"
+    launch = serving_config_to_launch_config(
+        _config(
+            extra={
+                "prompts": ["first", "second"],
+                "dataset_source": "permitted-set",
+                "dataset_license": "research-only",
+                "synthetic_or_real": "real",
+            }
+        )
+    )
+    assert "prompts" not in launch.extra
+    assert "dataset_source" not in launch.extra
 
 
 def test_named_workload_profile_controls_load_across_candidates() -> None:
@@ -3147,7 +3439,9 @@ def test_managed_measured_candidate_writes_recommendation_artifacts(tmp_path) ->
     assert (run_dir / "recommendation_summary.json").exists()
     assert managed_run["artifacts"]["recommendation_summary_txt"].endswith("recommendation_summary.txt")
     assert managed_run["recommendation_summary_txt_path"].endswith("recommendation_summary.txt")
-    assert summary_json["recommended_command"].startswith("vllm serve model-path")
+    recommended_command = shlex.split(summary_json["recommended_command"])
+    assert recommended_command[0].rsplit("/", 1)[-1] == "vllm"
+    assert recommended_command[1:3] == ["serve", "model-path"]
     assert summary_json["selected"]["candidate_id"] == "cfg-test"
     assert summary_json["selected"]["backend"] == "vllm"
     assert summary_json["selected"]["block_size"] == 16
@@ -3418,7 +3712,9 @@ def test_exact_fresh_evidence_hit_produces_managed_recommendation_without_launch
     assert recommendation["selected_measurement_id"] is not None
     assert summary_json["status"] == "success"
     assert summary_json["recommendation_type"] == "exact fresh measured evidence recommendation"
-    assert summary_json["recommended_command"].startswith("vllm serve model-path")
+    recommended_command = shlex.split(summary_json["recommended_command"])
+    assert recommended_command[0].rsplit("/", 1)[-1] == "vllm"
+    assert recommended_command[1:3] == ["serve", "model-path"]
     assert decisions
     assert any(row["classification"] == "exact_fresh" and row["used_as_exact"] is True for row in decisions)
     assert managed_run["artifacts"]["evidence_decisions_jsonl"].endswith("evidence_decisions.jsonl")
@@ -3533,7 +3829,7 @@ def test_managed_lifecycle_launches_once_for_group_with_multiple_workloads(tmp_p
         model="model-path",
         goal=Goal.BALANCED,
         limit=2,
-        trials=1,
+        trials=2,
         startup_timeout_s=1.0,
         cooldown_s=0.0,
         host="127.0.0.1",
@@ -3560,16 +3856,20 @@ def test_managed_lifecycle_launches_once_for_group_with_multiple_workloads(tmp_p
 
     assert adapter.launch_count == 1
     assert summary.cold_launch_count == 1
-    assert summary.workload_measurement_count == 2
+    assert summary.workload_measurement_count == 4
     assert summary.completed_candidate_count == 2
     assert summary.completed_candidate_count <= summary.candidate_count
     assert summary.launch_groups_count == 1
-    assert summary.average_workloads_per_launch == 2.0
+    assert summary.average_workloads_per_launch == 4.0
     assert managed_run["cold_launch_count"] == summary.cold_launch_count
     assert managed_run["workload_measurement_count"] == summary.workload_measurement_count
     assert managed_run["evidence_hit_candidate_count"] == summary.evidence_hit_candidate_count
     assert managed_run["cold_launches"] == summary.cold_launch_count
     assert managed_run["workload_measurements"] == summary.workload_measurement_count
+    assert (
+        managed_run["optimizer_quality"]["recommendation_quality_metrics"]["trials_required_to_reach_recommendation"]
+        == summary.workload_measurement_count
+    )
     assert managed_run["evidence_hits"] == summary.evidence_hit_candidate_count
     assert len(launch_groups) == 1
     assert len(workloads) == 2
@@ -4415,7 +4715,7 @@ def _jsonl_rows(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _managed_hardware(name: str = "Generic CUDA GPU") -> HardwareSnapshot:
+def _managed_hardware(name: str = "Generic CUDA GPU", free_memory_mb: int | None = None) -> HardwareSnapshot:
     return HardwareSnapshot(
         hostname="host",
         platform="linux",
@@ -4427,6 +4727,7 @@ def _managed_hardware(name: str = "Generic CUDA GPU") -> HardwareSnapshot:
                 name=name,
                 uuid="GPU-1",
                 total_memory_mb=80_000,
+                free_memory_mb=free_memory_mb,
                 compute_capability="9.0",
                 driver_version="1",
                 cuda_version="12",

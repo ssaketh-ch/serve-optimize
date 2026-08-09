@@ -21,7 +21,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from serve_optimize.backends.base import LaunchPlan, environment_with_command_dir
+from serve_optimize.backends.base import LaunchPlan, environment_with_command_dir, process_exit_details
 from serve_optimize.endpoint_benchmark import RequestFn, send_chat_completion_request
 from serve_optimize.schemas import (
     EndpointBenchmarkConfig,
@@ -61,6 +61,7 @@ RELEVANT_VLLM_FLAGS = (
 class VLLMArgumentCapabilities:
     executable: str
     version: str | None
+    launch_command: tuple[str, ...] = field(default_factory=tuple)
     supported_flags: frozenset[str] = field(default_factory=frozenset)
     option_choices: dict[str, frozenset[str]] = field(default_factory=dict)
     help_hash: str | None = None
@@ -84,6 +85,7 @@ class VLLMArgumentCapabilities:
         return {
             "schema_version": "vllm-argument-capabilities/v1",
             "executable": self.executable,
+            "launch_command": list(self.launch_command),
             "version": self.version,
             "detection_status": self.detection_status,
             "detection_error": self.detection_error,
@@ -163,7 +165,7 @@ class VllmAdapter:
         self._launched_pgids: set[int] = set()
 
     def is_available(self) -> bool:
-        return _vllm_sibling_executable() is not None or shutil.which("vllm") is not None
+        return self.argument_capabilities().detection_status == "success"
 
     def build_launch_plan(self, config: ServingConfig) -> LaunchPlan:
         command = render_vllm_launch(config, capabilities=self.argument_capabilities()).command
@@ -257,7 +259,7 @@ class VllmAdapter:
                     started_at=started_at.isoformat(),
                     ended_at=ended_at.isoformat(),
                     error=last_error,
-                    details={"process_returncode": process.returncode},
+                    details=process_exit_details(handle, process.returncode),
                 )
             request_start = time.perf_counter()
             record = _health_request(handle, model, request_fn)
@@ -332,7 +334,7 @@ class VllmAdapter:
         capabilities = self.argument_capabilities()
         return {
             "adapter": self.name,
-            "executable": _vllm_sibling_executable() or shutil.which("vllm"),
+            "executable": capabilities.executable,
             "version": _installed_version("vllm"),
             "argument_detection_status": capabilities.detection_status,
             "argument_capabilities_help_hash": capabilities.help_hash,
@@ -369,19 +371,20 @@ def detect_vllm_argument_capabilities(*, executable: str | None = None, timeout_
 @lru_cache(maxsize=8)
 def _detect_vllm_argument_capabilities_cached(executable: str, timeout_s: float) -> VLLMArgumentCapabilities:
     version = _installed_version("vllm")
-    commands: list[list[str]] = []
+    commands: list[tuple[list[str], tuple[str, ...]]] = []
     if executable and shutil.which(executable):
-        commands.append([executable, "serve", "--help"])
+        commands.append(([executable, "serve", "--help=all"], (executable, "serve")))
     elif executable and Path(executable).exists():
-        commands.append([executable, "serve", "--help"])
+        commands.append(([executable, "serve", "--help=all"], (executable, "serve")))
     else:
         resolved = shutil.which("vllm")
         if resolved:
-            commands.append([resolved, "serve", "--help"])
-    commands.append([sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--help"])
+            commands.append(([resolved, "serve", "--help=all"], (resolved, "serve")))
+    module_prefix = (sys.executable, "-m", "vllm.entrypoints.cli.main", "serve")
+    commands.append(([*module_prefix, "--help=all"], module_prefix))
 
     errors: list[str] = []
-    for command in commands:
+    for command, launch_command in commands:
         try:
             completed = subprocess.run(
                 command,
@@ -401,6 +404,7 @@ def _detect_vllm_argument_capabilities_cached(executable: str, timeout_s: float)
             help_text,
             executable=command[0],
             version=version,
+            launch_command=launch_command,
         )
 
     return VLLMArgumentCapabilities(
@@ -416,6 +420,7 @@ def parse_vllm_argument_capabilities(
     *,
     executable: str = "vllm",
     version: str | None = None,
+    launch_command: tuple[str, ...] = (),
 ) -> VLLMArgumentCapabilities:
     flags = frozenset(re.findall(r"--[A-Za-z0-9][A-Za-z0-9_-]*", help_text))
     option_choices: dict[str, frozenset[str]] = {}
@@ -427,6 +432,7 @@ def parse_vllm_argument_capabilities(
     return VLLMArgumentCapabilities(
         executable=executable,
         version=version,
+        launch_command=launch_command,
         supported_flags=flags,
         option_choices=option_choices,
         help_hash=help_hash,
@@ -471,8 +477,9 @@ def render_vllm_launch(
     port: int | None = None,
     capabilities: VLLMArgumentCapabilities | None = None,
 ) -> VLLMRenderedLaunch:
+    launch_command = _vllm_launch_command(capabilities)
     if (config.extra or {}).get("backend_defaults") is True:
-        command = [_vllm_sibling_executable() or "vllm", "serve", config.model_id]
+        command = [*launch_command, config.model_id]
         if host is not None:
             command.extend(["--host", host])
         if port is not None:
@@ -525,8 +532,7 @@ def render_vllm_launch(
         "enable_prefix_caching": None,
     }
     command = [
-        _vllm_sibling_executable() or "vllm",
-        "serve",
+        *launch_command,
         config.model_id,
         "--dtype",
         _vllm_dtype(config.dtype),
@@ -661,6 +667,13 @@ def vllm_command(
 def _vllm_sibling_executable() -> str | None:
     path = Path(sys.executable).with_name("vllm")
     return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+
+
+def _vllm_launch_command(capabilities: VLLMArgumentCapabilities | None) -> list[str]:
+    if capabilities is not None and capabilities.detection_status == "success" and capabilities.launch_command:
+        return list(capabilities.launch_command)
+    sibling = _vllm_sibling_executable()
+    return [sibling or "vllm", "serve"]
 
 
 def _supports_flag(capabilities: VLLMArgumentCapabilities | None, flag: str) -> bool:

@@ -199,42 +199,68 @@ def _run_requests(config: EndpointBenchmarkConfig, request_fn: RequestFn) -> lis
     records: list[RequestRecord] = []
     next_request_id = 0
     soak_started = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        while True:
-            request_count = config.num_requests if next_request_id == 0 else workers
-            futures = {}
-            for request_id in range(next_request_id, next_request_id + request_count):
-                submit_time = time.time()
-                futures[executor.submit(_timed_request, config, request_fn, request_id, submit_time)] = (
-                    request_id,
-                    submit_time,
-                )
-            next_request_id += request_count
-            for future in as_completed(futures):
-                request_id, submit_time = futures[future]
-                try:
-                    records.append(future.result())
-                except Exception as exc:
-                    now = time.time()
-                    status = _request_exception_status(exc)
-                    records.append(
-                        RequestRecord(
-                            request_id=request_id,
-                            start_time=now,
-                            end_time=now,
-                            latency_s=0.0,
-                            status=status,
-                            error=f"{exc.__class__.__name__}: {exc}",
-                            error_reason=status,
-                            client_status=status,
-                            client_submit_time=submit_time,
-                            client_queue_s=max(0.0, now - submit_time),
-                        )
+
+    def run_batch(executor: ThreadPoolExecutor, request_count: int) -> None:
+        nonlocal next_request_id
+        futures = {}
+        for request_id in range(next_request_id, next_request_id + request_count):
+            submit_time = time.time()
+            futures[executor.submit(_timed_request, config, request_fn, request_id, submit_time)] = (
+                request_id,
+                submit_time,
+            )
+        next_request_id += request_count
+        for future in as_completed(futures):
+            request_id, submit_time = futures[future]
+            try:
+                records.append(future.result())
+            except Exception as exc:
+                now = time.time()
+                status = _request_exception_status(exc)
+                records.append(
+                    RequestRecord(
+                        request_id=request_id,
+                        start_time=now,
+                        end_time=now,
+                        latency_s=0.0,
+                        status=status,
+                        error=f"{exc.__class__.__name__}: {exc}",
+                        error_reason=status,
+                        client_status=status,
+                        client_submit_time=submit_time,
+                        client_queue_s=max(0.0, now - submit_time),
                     )
-            if config.soak_duration_s is None or config.soak_duration_s <= 0:
+                )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        warmup_count = min(max(0, config.warmup_requests), config.num_requests)
+        run_batch(executor, warmup_count)
+        run_batch(executor, max(0, config.num_requests - warmup_count))
+        while True:
+            soak_complete = (
+                config.soak_duration_s is None
+                or config.soak_duration_s <= 0
+                or time.perf_counter() - soak_started >= config.soak_duration_s
+            )
+            measured_records = _measurement_window_records(
+                records,
+                warmup_requests=config.warmup_requests,
+                steady_state_duration_s=None,
+            )
+            measurement_window = _record_time_window(measured_records)
+            measured_duration_s = (
+                measurement_window[1] - measurement_window[0]
+                if measurement_window is not None
+                else 0.0
+            )
+            steady_state_complete = (
+                config.steady_state_duration_s is None
+                or config.steady_state_duration_s <= 0
+                or measured_duration_s >= config.steady_state_duration_s
+            )
+            if soak_complete and steady_state_complete:
                 break
-            if time.perf_counter() - soak_started >= config.soak_duration_s:
-                break
+            run_batch(executor, workers)
     return records
 
 
@@ -273,11 +299,17 @@ def _timed_request(
     )
 
 
+def _prompt_for_request(config: EndpointBenchmarkConfig, request_id: int) -> str:
+    if config.prompts:
+        return config.prompts[request_id % len(config.prompts)]
+    return config.prompt
+
+
 def send_chat_completion_request(config: EndpointBenchmarkConfig, request_id: int) -> RequestRecord:
     start = time.time()
     payload = {
         "model": config.model,
-        "messages": [{"role": "user", "content": config.prompt}],
+        "messages": [{"role": "user", "content": _prompt_for_request(config, request_id)}],
         "max_tokens": config.max_tokens,
         "temperature": 0,
     }
@@ -555,6 +587,11 @@ def summarize_requests(
     )
     average_memory_bandwidth_util_percent = telemetry_summary.average_memory_util_percent
     workload_description = _workload_description_with_actual_outputs(config, measured_successful)
+    warmup_window = _record_time_window(_warmup_window_records(records, warmup_requests=warmup_requests))
+    workload_description["actual_warmup_duration_s"] = _round_or_none(
+        warmup_window[1] - warmup_window[0] if warmup_window is not None else None
+    )
+    workload_description["actual_measurement_duration_s"] = _round_or_none(measurement_duration)
     outcome = _trial_outcome(measured_records)
     load_sufficiency = {
         "schema_version": "load-sufficiency-trial/v1",
@@ -647,7 +684,13 @@ def summarize_requests(
         "active_joules_per_generated_token": _round_or_none(active_joules_per_generated_token),
         "peak_gpu_memory_mb": telemetry_summary.max_memory_used_mb,
         "average_memory_bandwidth_util_percent": average_memory_bandwidth_util_percent,
-        "phase_energy_attribution": "unavailable_without_phase_markers",
+        "phase_energy_attribution": (
+            "request_time_windows"
+            if phase_power_samples and measurement_window_applied
+            else "whole_run_measurement"
+            if phase_power_samples
+            else "unavailable_without_phase_markers"
+        ),
         "outcome": outcome,
         "stability_classification": "single_trial",
     }
@@ -1406,9 +1449,12 @@ def _workload_description_with_actual_outputs(
     measured_successful: list[RequestRecord],
 ) -> dict[str, object]:
     description = dict(config.workload_description) if config is not None else {}
-    actual_distribution = _token_distribution([record.completion_tokens for record in measured_successful])
-    if not description.get("actual_output_length_distribution"):
-        description["actual_output_length_distribution"] = actual_distribution
+    description["actual_prompt_length_distribution"] = _token_distribution(
+        [record.prompt_tokens for record in measured_successful]
+    )
+    description["actual_output_length_distribution"] = _token_distribution(
+        [record.completion_tokens for record in measured_successful]
+    )
     return description
 
 

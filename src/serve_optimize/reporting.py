@@ -866,6 +866,10 @@ def _capability_payload(value: object) -> dict[str, object]:
 def _ms_from_seconds(value: object) -> float | None:
     if value is None:
         return None
+    try:
+        return float(value) * 1000.0
+    except (TypeError, ValueError):
+        return None
 
 
 def _output_throughput(row: Mapping[str, object]) -> object:
@@ -881,10 +885,6 @@ def _generated_token_energy(row: Mapping[str, object]) -> object:
 def _tokens_per_joule(row: Mapping[str, object]) -> object:
     value = row.get("tokens_per_joule")
     return value if value is not None else row.get("tokens_per_second_per_watt")
-    try:
-        return float(value) * 1000.0
-    except (TypeError, ValueError):
-        return None
 
 
 def _source_label(source: str | None) -> str:

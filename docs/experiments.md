@@ -1,96 +1,106 @@
-# Planned Experimental Methodology
+# Experimental Methodology
 
-This document describes future evaluation work. It is not a statement that every metric, workload, or control is already implemented.
+This document separates the implemented measurement protocol from the evidence still required for a paper. Product support is defined in [Compatibility](compatibility.md).
 
-## Current Measured Baseline
+## Implemented Measurement Protocol
 
-Serve Optimize currently measures:
+Managed trials record:
 
-* end to end throughput
-* request rate
+* raw request records, including success or failure and token counts
+* output token throughput, total token throughput, and request rate
 * p50, p95, and p99 request latency
-* request failures
-* average and peak power when telemetry is available
-* gross joules per token
-* idle subtracted active energy when an idle baseline is available
-* tokens per watt
-* confidence intervals and stability classification across managed trials
-* bounded evaluated candidate regret
+* streaming TTFT and TPOT when response chunks expose those boundaries
+* client CPU utilization, issue rate, and queueing indicators when available
+* GPU utilization, memory use, request backlog, and token backlog when available
+* idle, warmup, and measurement power samples as separate records
+* measurement window energy, joules per generated token, and tokens per joule
+* raw or idle subtracted energy accounting
+* backend version, exact launch command, applied configuration, and runtime fingerprint
+* candidate failures using the documented failure taxonomy
+* confidence intervals, stability classification, recommendation rank, Pareto status, and bounded regret when enough candidates are measured
 
-Current recommendations are best among evaluated candidates.
+Recommendations remain scoped to the evaluated candidate set.
 
-## Planned Baselines
+## Measurement Acceptance Rules
 
-* backend default configuration
-* highest throughput evaluated configuration
-* best efficiency evaluated configuration
-* Serve Optimize balanced recommendation
-* bounded exhaustive baseline for optimizer regret studies
+A run is publishable only when its raw artifacts establish all applicable checks:
 
-## Planned Workloads
+1. Client request records and summary counts agree.
+2. Input, output, and total token counts are nonzero.
+3. Failed requests are excluded from successful throughput.
+4. Latency, TTFT, and TPOT percentiles are derived from request records.
+5. Warmup requests and warmup power samples are excluded from measurement summaries.
+6. Backend version, launch command, applied configuration, model identity, and runtime fingerprint are present.
+7. Throughput conclusions include load sufficiency and client saturation evidence.
+8. Energy conclusions use the measurement window and disclose telemetry quality and accounting mode.
+9. Failed candidates retain a precise failure reason.
+10. No competing GPU workload is present during a controlled comparison.
+
+## Hardware Evidence Strata
+
+Serve Optimize has measured both RTX PRO 6000 and H200 systems. They are separate evidence strata, not a single pooled platform result.
+
+The completed RTX PRO 6000 evidence includes tiny model managed runs for vLLM and SGLang and a vLLM power gate. The H200 campaign expands model, workload, objective, and backend coverage.
+
+Results across the two platforms may be compared directly only when model revision, backend version, workload, candidate policy, repetition policy, and measurement controls match. Otherwise, report each platform independently as evidence that the workflow operates across distinct hardware classes. MIG power remains board scoped unless the telemetry provider establishes instance attribution.
+
+## Workloads
+
+Implemented workload profiles include:
 
 * short chat
 * medium assistant
 * long context
+* long prefill
 * decode heavy
+* code generation
 * repeated prefix
-* mixed production trace
+* mixed lengths
+* JSON prompt manifests, including permitted real prompt datasets
 
-Workload manifests and token distributions must participate in evidence fingerprints before these are release supported.
+JSON manifests preserve prompt content and workload settings. They do not replay original production arrival timestamps.
 
-## Planned Metrics
+## Publication Baselines
 
-* prefill and decode energy
-* larger cross hardware regret studies
+Every reported matrix cell should include a backend default control and a conservative reliability candidate. The paper also requires:
 
-These metrics must not appear as implemented until measurement boundaries and tests exist.
+* a human reasonable preset
+* the oracle best measured candidate for each objective
+* random search with the same trial budget
+* grid search with the same trial budget
+* a generic Bayesian tuner with the same trial budget
+* native vLLM or SGLang benchmark results on a representative subset
 
-TTFT, stream chunk TPOT, and thermal trend reporting are implemented for endpoint benchmarks when the required measurement boundaries exist. Non streaming endpoint responses do not expose TTFT or TPOT. Short thermal windows are reported as limited evidence rather than stable soak results.
+The current artifacts do not yet establish superiority over all of these baselines. That claim remains pending.
 
-## Planned Controls
+## Recommendation Ablations
 
-* fixed backend and model revisions
-* fixed driver and CUDA environment per comparison
-* explicit warmup policy
-* steady state measurement window
-* multiple trials
-* idle power sampling
-* no competing GPU workloads
-* identical prompt sets across candidates
+Run the following ablations on a bounded subset with a known measured oracle:
 
-## Planned Comparisons
+* no evidence reuse
+* no hardware awareness
+* no backend capability registry
+* no failure memory
+* random candidate order
+* energy term removed
+* latency guardrail removed
+* backend defaults only
 
-* vLLM versus SGLang
-* model families and sizes
-* BF16, FP16, AWQ, and GPTQ where valid
-* concurrency and context length
-* full GPU versus MIG where telemetry scope is defensible
-* bounded exhaustive versus guided search
+Report regret, selected rank, Pareto membership, trials to recommendation, failed trials avoided, and recommendation changes after new evidence.
 
-## Campaign Planning
+## Matrix Planning
 
-Use `serve-optimize campaign-plan` to generate an explicit matrix of managed run commands before collecting evidence.
+Use `serve-optimize benchmark-matrix-plan` for the staged paper matrix and `serve-optimize campaign-plan` for a smaller custom campaign.
 
-The planner records:
-
-* models
-* managed backends
-* recommendation goals
-* workload profiles
-* repeat count
-* candidate limits
-* measurement quality controls
-* validation and research package follow up commands
-
-The planner does not run benchmarks, launch servers, or write measured evidence. Claims remain scoped to managed run artifacts that are later collected and validated.
-
-Campaign artifacts include executable per backend runners because the validated vLLM and SGLang environments are mutually exclusive. The dispatcher selects one backend runner at a time. After all runners complete, `campaign_postprocess.sh` discovers the nested timestamped managed run directories for validation and research packaging.
+Both planners write commands and provenance without launching a backend or creating measured evidence. Backend specific runners keep the validated vLLM and SGLang environments isolated. Postprocessing discovers completed managed runs, validates them, and builds analysis tables.
 
 ## Reporting Rules
 
-* Publish raw artifacts and environment metadata.
+* Publish raw request, telemetry, lifecycle, capability, launch, and summary artifacts.
+* Archive raw run directories with checksums. A research package alone is an index, not a raw artifact archive.
+* Distinguish RTX PRO 6000 and H200 evidence unless the comparison is matched.
 * Distinguish board level and instance level power.
-* Report unsupported and failed candidates.
-* Report confidence and telemetry limitations.
-* Use best among evaluated candidates wording.
-* Do not claim prefill or decode energy before implementation.
+* Report unsupported, failed, incomplete, and provisional candidates.
+* Report confidence intervals, trial counts, and telemetry limitations.
+* Use `best among evaluated candidates` wording.
+* Do not claim prefill or decode energy, power cap optimization, exhaustive coverage, or search superiority before the required evidence exists.

@@ -109,6 +109,7 @@ def test_selected_summary_uses_measured_benchmark_concurrency() -> None:
             expected_input_tokens=None,
             expected_output_tokens=128,
         ),
+        measured_metrics={"output_tokens_s": 120.0, "total_tokens_s": 150.0},
         candidate_table=[_row("selected", source="generated", throughput=120.0, concurrency=8)],
     )
 
@@ -121,6 +122,8 @@ def test_selected_summary_uses_measured_benchmark_concurrency() -> None:
     )
 
     assert payload["selected"]["benchmark_concurrency"] == 8
+    assert payload["metrics"]["output_tokens_per_sec"] == 120.0
+    assert payload["metrics"]["total_tokens_per_sec"] == 150.0
 
 
 def _recommendation(rows: list[dict[str, object]]) -> RecommendationResult:

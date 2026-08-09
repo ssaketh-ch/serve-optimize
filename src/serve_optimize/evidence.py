@@ -1112,11 +1112,6 @@ def _runtime_compatibility_rejection(
             EvidenceCompatibilityClassification.MISSING_RUNTIME_FINGERPRINT,
             "Stored evidence has no structured runtime fingerprint payload.",
         )
-    compatibility_fields = (
-        "rendered_launch_command_hash",
-        "backend_capability_help_hash",
-        "canonical_launch_config_identity",
-    )
     source_environment = source_runtime.get("runtime_environment")
     current_environment = current_runtime.get("runtime_environment")
     source_environment_fingerprint = (
@@ -1129,11 +1124,16 @@ def _runtime_compatibility_rejection(
         if isinstance(current_environment, dict)
         else None
     )
+    same_launch_config = measurement.get("launch_config_hash") == context.launch_config_hash
     runtime_changed = (
         source_environment_fingerprint != current_environment_fingerprint
-        or any(
-            source_runtime.get(field) != current_runtime.get(field)
-            for field in compatibility_fields
+        or source_runtime.get("backend_capability_help_hash") != current_runtime.get("backend_capability_help_hash")
+        or (
+            same_launch_config
+            and any(
+                source_runtime.get(field) != current_runtime.get(field)
+                for field in ("rendered_launch_command_hash", "canonical_launch_config_identity")
+            )
         )
     )
     if runtime_changed:

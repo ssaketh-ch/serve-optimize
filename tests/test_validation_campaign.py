@@ -42,6 +42,27 @@ def test_validation_campaign_writes_json_text_and_csv(tmp_path) -> None:
     assert saved["artifacts"] == payload["artifacts"]
     rows = list(csv.DictReader((tmp_path / "campaign" / "validation_campaign_runs.csv").open(encoding="utf-8")))
     assert rows[0]["selected_candidate_id"] == "cfg-a"
+    assert rows[0]["backend_version"] == "0.24.0"
+    assert rows[0]["output_tokens_per_sec"] == "80.0"
+    assert rows[0]["joules_per_generated_token"] == "0.125"
+    assert rows[0]["load_sufficiency_classification"] == "not_evaluated_non_throughput_goal"
+
+
+def test_validation_campaign_does_not_alias_legacy_total_throughput_to_output(tmp_path) -> None:
+    run = _write_run(tmp_path / "run1", selected_candidate_id="cfg-a")
+    summary_path = run / "recommendation_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["metrics"].pop("output_tokens_per_sec")
+    _write_json(summary_path, summary)
+    recommendation_path = run / "managed_recommendation.json"
+    recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))
+    recommendation["recommendation"]["candidate_table"][0].pop("output_tokens_s")
+    _write_json(recommendation_path, recommendation)
+
+    payload = analyze_validation_campaign([run])
+
+    assert payload["runs"][0]["output_tokens_per_sec"] is None
+    assert payload["runs"][0]["total_tokens_per_sec"] == 100.0
 
 
 def test_validation_campaign_cli_help_and_command(tmp_path, capsys) -> None:
@@ -225,10 +246,18 @@ def _write_run(
             "selected": selected,
             "metrics": {
                 "throughput_tokens_per_sec": candidate["total_tokens_s"],
+                "output_tokens_per_sec": candidate["output_tokens_s"],
+                "total_tokens_per_sec": candidate["total_tokens_s"],
+                "request_rate_req_s": candidate["request_rate_req_s"],
                 "p95_latency_ms": candidate["p95_latency_s"] * 1000.0,
+                "p95_ttft_ms": candidate["p95_ttft_ms"],
+                "p95_tpot_ms": candidate["p95_tpot_ms"],
                 "average_power_w": average_power_w,
                 "joules_per_token": candidate["joules_per_token"],
+                "joules_per_generated_token": candidate["joules_per_generated_token"],
+                "tokens_per_joule": candidate["tokens_per_joule"],
                 "tokens_per_watt": candidate["tokens_per_second_per_watt"],
+                "energy_accounting": "idle_subtracted",
                 "failed_requests": 0,
             },
             "evaluated_set_fidelity": {
@@ -282,6 +311,16 @@ def _write_run(
             "completed_candidate_count": len(candidate_table),
             "candidate_source_counts": candidate_source_counts or {"safe_baseline": 1, "capability_aware": 1},
             "workload_profile": profile,
+            "runtime_environment": {
+                "backend_version": "0.24.0" if backend == "vllm" else "0.5.13.post1",
+                "python_version": "3.10.12",
+                "torch_version": "2.11.0+cu130",
+                "cuda_runtime_version": "13.0",
+                "gpu_driver_version": "580.65.06",
+                "environment_fingerprint": f"runtime-{backend}",
+            },
+            "client_saturation": {"classification": "not_client_limited"},
+            "load_sufficiency": {"classification": "not_evaluated_non_throughput_goal"},
         },
     )
     _write_json(run_dir / "managed_pareto_frontier.json", [candidate])
@@ -358,10 +397,17 @@ def _candidate(
         "score": score,
         "pareto_optimal": pareto,
         "total_tokens_s": 100.0,
+        "output_tokens_s": 80.0,
+        "request_rate_req_s": 2.0,
         "p95_latency_s": 0.01,
+        "p95_ttft_ms": 4.0,
+        "p95_tpot_ms": 1.5,
         "average_power_watts": average_power_w,
         "joules_per_token": 0.1,
+        "joules_per_generated_token": 0.125,
+        "tokens_per_joule": 8.0,
         "tokens_per_second_per_watt": 5.0,
+        "energy_accounting": "idle_subtracted",
         "failed_requests": 0,
         "telemetry_quality": telemetry_quality,
     }

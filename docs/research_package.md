@@ -2,9 +2,9 @@
 
 ## Phase Nine Status
 
-Phase Nine packages existing managed run artifacts into reproducible research outputs.
+Phase Nine indexes existing managed run artifacts into analysis ready research outputs.
 
-It does not run a benchmark campaign. It does not broaden evidence by inference.
+It does not run a benchmark campaign, copy raw run directories, or broaden evidence by inference. A package is not a self contained reproducibility archive.
 
 ## Command
 
@@ -36,8 +36,21 @@ The package records:
 * quantization coverage
 * telemetry quality coverage
 * validation campaign summary
+* backend and runtime versions
+* runtime fingerprints
+* output and total token throughput
+* request rate and streaming latency fields
+* joules per generated token and tokens per joule
+* energy accounting mode
+* client and load saturation status
 
 Recommendation claims remain scoped to best among evaluated candidates.
+
+## Raw Artifact Archive
+
+For a paper release, archive every referenced managed run directory separately. Preserve request records, power samples, lifecycle events, backend logs, launch specifications, capability reports, failure records, summaries, and runtime metadata. Generate checksums for the archive and verify them before publication.
+
+`research_package.json` records that raw artifacts are not embedded. Its run paths are references to the source directories used during packaging.
 
 ## Extending Coverage
 
@@ -52,4 +65,4 @@ To broaden the research package, collect fresh runtime fingerprinted evidence fo
 
 Then rerun `serve-optimize research-package` over the expanded run set.
 
-Use `serve-optimize campaign-plan` to create a reproducible command matrix before collecting those runs.
+Use `serve-optimize benchmark-matrix-plan` for the staged paper matrix or `serve-optimize campaign-plan` for a smaller custom matrix before collecting those runs.

@@ -37,7 +37,7 @@ PROFILE_DISTRIBUTIONS = {
     ),
     "vllm": (
         ("serve-optimize", "0.1.0"),
-        ("vllm", "0.23.0"),
+        ("vllm", "0.24.0"),
         ("torch", "2.11.0"),
         ("transformers", "5.9.0"),
         ("huggingface-hub", "1.17.0"),

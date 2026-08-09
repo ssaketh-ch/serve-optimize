@@ -10,6 +10,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -156,13 +157,21 @@ def _process_runtime_metadata(repo_root: str) -> dict[str, Any]:
         "python_version": platform.python_version(),
         "hostname": socket.gethostname(),
         "operating_system": platform.platform(),
-        "virtual_environment": os.environ.get("VIRTUAL_ENV") or UNAVAILABLE,
+        "virtual_environment": _virtual_environment(),
         "gpu_driver_version": _gpu_driver_version(),
         "compiler_toolchain": compiler_toolchain,
         "compiler_toolchain_fingerprint": stable_payload_hash(compiler_toolchain),
         "serve_optimize_git_commit": _git_commit(Path(repo_root)),
         "dirty_tree": _git_dirty(Path(repo_root)),
-    }
+}
+
+
+def _virtual_environment() -> str:
+    if value := os.environ.get("VIRTUAL_ENV"):
+        return value
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return sys.prefix
+    return os.environ.get("CONDA_PREFIX") or UNAVAILABLE
 
 
 def _package_version(package: str) -> str:

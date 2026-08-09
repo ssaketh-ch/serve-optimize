@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import platform
 import re
 import socket
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +23,7 @@ def detect_hardware() -> HardwareSnapshot:
     gpus = _detect_with_nvml(notes)
     if not gpus:
         gpus = _detect_with_nvidia_smi(notes)
+    gpus = _apply_visible_mig_memory(gpus, notes)
     if not gpus:
         notes.append("No NVIDIA GPU telemetry detected. Using CPU/no-GPU smoke-test profile.")
 
@@ -101,6 +104,56 @@ def _detect_with_nvml(notes: list[str]) -> list[GpuDevice]:
     if gpus:
         notes.append("Detected NVIDIA GPU telemetry through pynvml.")
     return gpus
+
+
+def _apply_visible_mig_memory(gpus: list[GpuDevice], notes: list[str]) -> list[GpuDevice]:
+    if not gpus:
+        return gpus
+    mig_modes = _query_mig_modes()
+    gpus = [replace(gpu, mig_mode=mig_modes.get(gpu.index) or gpu.mig_mode) for gpu in gpus]
+    if not any(str(gpu.mig_mode).lower() == "enabled" for gpu in gpus):
+        return gpus
+    script = (
+        "import json, torch; "
+        "print(json.dumps([{'name': torch.cuda.get_device_name(i), "
+        "'total_memory_mb': torch.cuda.get_device_properties(i).total_memory // 1024 // 1024, "
+        "'free_memory_mb': torch.cuda.mem_get_info(i)[0] // 1024 // 1024} "
+        "for i in range(torch.cuda.device_count())]))"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        visible = json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        notes.append("Visible MIG memory probe unavailable; parent GPU memory is reported.")
+        return gpus
+    if not isinstance(visible, list) or len(visible) != len(gpus):
+        notes.append("Visible MIG device count did not match NVML device count; parent GPU memory is reported.")
+        return gpus
+    adjusted = []
+    for gpu, device in zip(gpus, visible, strict=True):
+        if not isinstance(device, dict):
+            return gpus
+        raw = dict(gpu.raw)
+        raw["parent_total_memory_mb"] = gpu.total_memory_mb
+        raw["parent_free_memory_mb"] = gpu.free_memory_mb
+        adjusted.append(
+            replace(
+                gpu,
+                name=str(device.get("name") or gpu.name),
+                total_memory_mb=_to_int(str(device.get("total_memory_mb") or ""), gpu.total_memory_mb),
+                free_memory_mb=_to_int(str(device.get("free_memory_mb") or ""), gpu.free_memory_mb),
+                source=f"{gpu.source}+cuda-visible",
+                raw=raw,
+            )
+        )
+    notes.append("Adjusted MIG memory limits to the CUDA-visible device allocation.")
+    return adjusted
 
 
 def _detect_with_nvidia_smi(notes: list[str]) -> list[GpuDevice]:
@@ -218,16 +271,23 @@ def _decode(value: Any) -> str:
 
 def _detect_cpu_model() -> str | None:
     cpuinfo = "/proc/cpuinfo"
+    processor_fallback = None
     try:
         with open(cpuinfo, encoding="utf-8") as handle:
             for line in handle:
-                if line.lower().startswith(("model name", "hardware", "processor")):
-                    _, _, value = line.partition(":")
-                    value = value.strip()
-                    if value:
-                        return value
+                key, separator, value = line.partition(":")
+                if not separator:
+                    continue
+                key = key.strip().lower()
+                value = value.strip()
+                if key in {"model name", "hardware"} and value:
+                    return value
+                if key == "processor" and value and not value.isdigit():
+                    processor_fallback = value
     except OSError:
         pass
+    if processor_fallback:
+        return processor_fallback
     processor = platform.processor()
     return processor or None
 

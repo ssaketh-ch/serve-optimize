@@ -16,12 +16,13 @@ This matrix reflects the supported product surface.
 
 | Backend | Status | Validated Runtime | Managed Mode |
 |---|---|---|---|
-| vLLM | First class | `0.23.0` | Runtime validated with the pinned vLLM profile. |
+| vLLM | First class | `0.24.0` | Runtime validated with the pinned vLLM profile. |
 | SGLang | First class for detected surface | `0.5.13.post1` | Clean profile resolution is verified; managed runtime support is capability detected and must pass local doctor checks. |
 | TensorRT LLM | Planned only | none | Managed Mode is not in current scope; Attach Mode may measure an external compatible endpoint. |
-| TGI | Attach only | none | Not supported. |
-| LMDeploy | Attach only | none | Not supported. |
-| llama.cpp | Attach only | none | Not supported. |
+| TGI | Attach only | none | May be measured through an external OpenAI compatible endpoint. |
+| LMDeploy | Attach only | none | May be measured through an external OpenAI compatible endpoint. |
+| llama.cpp | Attach only | none | May be measured through an external OpenAI compatible endpoint. |
+| NIM | Attach only | none | May be measured through an external OpenAI compatible endpoint. |
 
 ## Installation Profiles
 
@@ -51,3 +52,5 @@ Research packages report only the coverage present in supplied managed run artif
 * telemetry quality
 
 Broader claims require additional fresh runtime fingerprinted evidence.
+
+Measured hardware coverage currently includes RTX PRO 6000 and H200 environments. Report them as separate platform strata unless a comparison uses matched backend, model, workload, and measurement policy.

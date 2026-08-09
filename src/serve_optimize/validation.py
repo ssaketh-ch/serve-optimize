@@ -82,6 +82,14 @@ def validate_managed_candidate(
             valid=False,
             reason=f"Candidate backend '{config.backend}' is not supported by managed backend '{backend}'.",
         )
+    if (config.extra or {}).get("context_requirement_status") == "unsupported_model_context":
+        required = (config.extra or {}).get("required_context_tokens")
+        available = (config.extra or {}).get("model_context_cap_tokens")
+        return CandidateValidationResult(
+            config_id=config.id,
+            valid=False,
+            reason=f"workload requires {required} context tokens but the model supports {available}",
+        )
     quantization = validate_quantization_compatibility(config, model_metadata, managed_mode=True)
     if not quantization.valid:
         return quantization

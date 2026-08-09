@@ -14,7 +14,7 @@ def test_installation_profiles_are_explicit() -> None:
 def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.23.0",
+        "vllm": "0.24.0",
         "torch": "2.11.0",
         "transformers": "5.12.1",
         "huggingface-hub": "1.17.0",
@@ -34,7 +34,7 @@ def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
 def test_vllm_profile_accepts_torch_cuda_local_version(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.23.0",
+        "vllm": "0.24.0",
         "torch": "2.11.0+cu129",
         "transformers": "5.9.0",
         "huggingface-hub": "1.17.0",
@@ -52,7 +52,7 @@ def test_vllm_profile_accepts_torch_cuda_local_version(monkeypatch) -> None:
 def test_vllm_profile_accepts_command_from_active_path(monkeypatch, tmp_path) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.23.0",
+        "vllm": "0.24.0",
         "torch": "2.11.0",
         "transformers": "5.9.0",
         "huggingface-hub": "1.17.0",

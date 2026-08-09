@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -8,6 +9,7 @@ from serve_optimize.recommendation import (
     ATTACH_MODE_LIMITATION,
     GROSS_ENERGY_LIMITATION,
     RecommendationRun,
+    _attach_limitations,
     audit_recommendation_quality,
     build_attach_preflight,
     compute_evaluated_set_fidelity,
@@ -28,12 +30,27 @@ from serve_optimize.schemas import (
     RequestRecord,
     ServeCandidate,
     VllmServePlan,
+    WorkloadProfile,
 )
 
 
 def test_attach_energy_limitation_matches_current_measurement_boundary() -> None:
-    assert "does not collect an idle baseline" in GROSS_ENERGY_LIMITATION
+    assert "this run did not provide an idle power baseline" in GROSS_ENERGY_LIMITATION
+    assert "does not collect an idle baseline" not in GROSS_ENERGY_LIMITATION
     assert "not implemented" not in GROSS_ENERGY_LIMITATION
+
+
+def test_attach_energy_limitation_only_applies_to_raw_energy() -> None:
+    item = _input("candidate", total_tokens_s=100.0, p95_latency_s=1.0)
+    raw = replace(item, telemetry_metrics={"energy_joules": 10.0, "energy_accounting": "raw"})
+    idle_subtracted = replace(
+        item,
+        telemetry_metrics={"energy_joules": 10.0, "energy_accounting": "idle_subtracted"},
+    )
+
+    assert GROSS_ENERGY_LIMITATION in _attach_limitations([raw], raw.candidate_id)
+    assert GROSS_ENERGY_LIMITATION not in _attach_limitations([idle_subtracted], idle_subtracted.candidate_id)
+    assert GROSS_ENERGY_LIMITATION not in _attach_limitations([item], item.candidate_id)
 
 
 def test_throughput_goal_prefers_highest_measured_tokens() -> None:
@@ -873,6 +890,8 @@ def test_recommend_attach_mode_writes_artifacts_with_heuristic_candidates(tmp_pa
         out_dir=tmp_path / "recommendations",
         candidate_source="heuristic",
         top_k=2,
+        override_concurrency=3,
+        override_num_requests=5,
         request_fn=_ok_request,
     )
 
@@ -885,6 +904,8 @@ def test_recommend_attach_mode_writes_artifacts_with_heuristic_candidates(tmp_pa
     assert "candidate_table" in payload
     assert payload["candidate_count"] == 2
     assert payload["valid_candidate_count"] == 2
+    assert payload["selected_benchmark_plan"]["concurrency"] == 3
+    assert payload["selected_benchmark_plan"]["num_requests"] == 5
     assert "pareto_frontier" in payload
     assert (run.run_dir / "pareto_frontier.json").exists()
     assert (run.run_dir / "pareto_frontier.csv").exists()
@@ -906,6 +927,13 @@ def test_attach_preflight_writes_plan_without_endpoint_request(tmp_path) -> None
         out_dir=tmp_path / "recommendations",
         candidate_source="heuristic",
         top_k=2,
+        workload_profile=WorkloadProfile(
+            profile_name="short",
+            input_tokens=128,
+            output_tokens=64,
+            max_new_tokens=64,
+            num_requests=40,
+        ),
     )
 
     payload = json.loads((run.run_dir / "preflight.json").read_text(encoding="utf-8"))
@@ -916,6 +944,9 @@ def test_attach_preflight_writes_plan_without_endpoint_request(tmp_path) -> None
     assert payload["safety"]["will_launch_servers"] is False
     assert payload["candidates"]["valid_count"] == 2
     assert payload["budget"]["planned_workload_measurements"] == 2
+    assert payload["budget"]["planned_requests"] == 104
+    assert payload["workload_profile"]["input_tokens"] == 32
+    assert payload["workload_profile"]["output_tokens"] == 8
     assert (run.run_dir / "plan" / "evaluation_plans.jsonl").exists()
     assert not (run.run_dir / "evaluation").exists()
     assert "will call endpoint: no" in text

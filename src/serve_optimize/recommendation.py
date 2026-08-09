@@ -89,8 +89,7 @@ ATTACH_MODE_LIMITATION = (
     "generated serve command for a candidate."
 )
 GROSS_ENERGY_LIMITATION = (
-    "Attach Mode recommendations use gross active energy because this workflow does not collect an idle baseline. "
-    "Use endpoint-bench or Managed Mode with an idle baseline for idle-subtracted energy."
+    "Energy metrics use gross active energy because this run did not provide an idle power baseline."
 )
 
 
@@ -140,9 +139,16 @@ def build_attach_preflight(
     aiconfigurator_runner: AIConfiguratorRunner = run_aiconfigurator,
     workload_profile: WorkloadProfile | None = None,
     api_key_env: str | None = None,
+    warmup_requests: int = 0,
+    steady_state_duration_s: float | None = None,
+    idle_baseline_duration_s: float = 0.0,
+    idle_power_watts: float | None = None,
+    soak_duration_s: float | None = None,
+    stream: bool = False,
 ) -> PreflightRun:
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
+    workload_profile = _effective_attach_workload_profile(workload_profile, isl=isl, osl=osl)
     run_id = make_run_id(prefix="recommend-preflight")
     run_dir = out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -170,6 +176,13 @@ def build_attach_preflight(
         candidates=candidates,
         base_url=base_url,
         backend=backend,
+        warmup_requests=warmup_requests,
+        steady_state_duration_s=steady_state_duration_s,
+        idle_baseline_duration_s=idle_baseline_duration_s,
+        idle_power_watts=idle_power_watts,
+        soak_duration_s=soak_duration_s,
+        stream=stream,
+        num_requests=workload_profile.num_requests if workload_profile is not None else None,
     )
     benchmark_plans = [plan.benchmark_plan for plan in evaluation_plans if plan.benchmark_plan is not None]
     total_requests = sum(
@@ -212,6 +225,12 @@ def build_attach_preflight(
             "max_concurrency": max_concurrency,
             "timeout_s": timeout_s,
             "allow_efficiency_fallback": allow_efficiency_fallback,
+            "warmup_requests": warmup_requests,
+            "steady_state_duration_s": steady_state_duration_s,
+            "idle_baseline_duration_s": idle_baseline_duration_s,
+            "idle_power_watts": idle_power_watts,
+            "soak_duration_s": soak_duration_s,
+            "stream": stream,
         },
         "evidence": {
             "db_path": None,
@@ -265,10 +284,17 @@ def recommend_attach_mode(
     aiconfigurator_runner: AIConfiguratorRunner = run_aiconfigurator,
     workload_profile: WorkloadProfile | None = None,
     api_key_env: str | None = None,
+    warmup_requests: int = 0,
+    steady_state_duration_s: float | None = None,
+    idle_baseline_duration_s: float = 0.0,
+    idle_power_watts: float | None = None,
+    soak_duration_s: float | None = None,
+    stream: bool = False,
 ) -> RecommendationRun:
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
 
+    workload_profile = _effective_attach_workload_profile(workload_profile, isl=isl, osl=osl)
     hardware = detect_hardware()
     request_fn = request_fn or send_chat_completion_request
     checks: list[CheckRecord] = []
@@ -320,6 +346,13 @@ def recommend_attach_mode(
         candidates=candidates,
         base_url=base_url,
         backend=backend,
+        warmup_requests=warmup_requests,
+        steady_state_duration_s=steady_state_duration_s,
+        idle_baseline_duration_s=idle_baseline_duration_s,
+        idle_power_watts=idle_power_watts,
+        soak_duration_s=soak_duration_s,
+        stream=stream,
+        num_requests=workload_profile.num_requests if workload_profile is not None else None,
     )
     evaluation = run_evaluation_plan_dir(
         plan_dir=plan_dir,
@@ -403,7 +436,7 @@ def recommend_attach_mode(
         metadata_notes=recommendation.metadata_notes,
         warnings=recommendation.warnings,
         checks=checks,
-        limitations=[ATTACH_MODE_LIMITATION, GROSS_ENERGY_LIMITATION],
+        limitations=_attach_limitations(inputs, recommendation.recommended_candidate_id),
         artifacts={},
         candidate_table=recommendation.candidate_table,
         alternatives=recommendation.alternatives,
@@ -678,6 +711,17 @@ def _with_workload_profile(candidates: list[ServeCandidate], profile: WorkloadPr
     return updated
 
 
+def _effective_attach_workload_profile(
+    profile: WorkloadProfile | None,
+    *,
+    isl: int,
+    osl: int,
+) -> WorkloadProfile | None:
+    if profile is None:
+        return None
+    return replace(profile, input_tokens=isl, output_tokens=osl, max_new_tokens=osl)
+
+
 def generate_heuristic_candidates(
     *,
     model: str,
@@ -759,7 +803,8 @@ def build_recommendation_inputs(
         comparison_path = row.get("comparison_path")
         if not isinstance(summary_path, str):
             continue
-        benchmark_summary = EndpointBenchmarkSummary(**json.loads(Path(summary_path).read_text(encoding="utf-8")))
+        summary_file = Path(summary_path)
+        benchmark_summary = EndpointBenchmarkSummary(**json.loads(summary_file.read_text(encoding="utf-8")))
         comparison_metrics = {}
         if isinstance(comparison_path, str) and Path(comparison_path).exists():
             comparison_metrics = json.loads(Path(comparison_path).read_text(encoding="utf-8"))
@@ -779,7 +824,7 @@ def build_recommendation_inputs(
                 backend=plan.candidate.backend,
                 candidate=plan.candidate,
                 serve_plan=plan.serve_plan,
-                benchmark_plan=plan.benchmark_plan,
+                benchmark_plan=_executed_benchmark_plan(plan.benchmark_plan, summary_file),
                 predicted_metrics=_predicted_metrics(plan.candidate),
                 measured_metrics=_measured_metrics(benchmark_summary),
                 telemetry_metrics=telemetry_metrics,
@@ -788,6 +833,47 @@ def build_recommendation_inputs(
             )
         )
     return inputs
+
+
+def _executed_benchmark_plan(
+    plan: EndpointBenchmarkPlan | None,
+    summary_path: Path,
+) -> EndpointBenchmarkPlan | None:
+    if plan is None:
+        return None
+    config_path = summary_path.with_name("config.json")
+    if not config_path.exists():
+        return plan
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return replace(
+        plan,
+        base_url=str(config.get("base_url") or plan.base_url),
+        model=str(config.get("model") or plan.model),
+        concurrency=int(config.get("concurrency") or plan.concurrency),
+        num_requests=int(config.get("num_requests") or plan.num_requests),
+        max_tokens=int(config.get("max_tokens") or plan.max_tokens),
+        warmup_requests=int(config.get("warmup_requests") or 0),
+        steady_state_duration_s=_optional_float(config.get("steady_state_duration_s")),
+        idle_baseline_duration_s=float(config.get("idle_baseline_duration_s") or 0.0),
+        idle_power_watts=_optional_float(config.get("idle_power_watts")),
+        soak_duration_s=_optional_float(config.get("soak_duration_s")),
+        stream=bool(config.get("stream", False)),
+    )
+
+
+def _attach_limitations(
+    inputs: list[RecommendationInput],
+    selected_candidate_id: str | None,
+) -> list[str]:
+    limitations = [ATTACH_MODE_LIMITATION]
+    selected = next((item for item in inputs if item.candidate_id == selected_candidate_id), None)
+    if (
+        selected is not None
+        and selected.telemetry_metrics.get("energy_joules") is not None
+        and selected.telemetry_metrics.get("energy_accounting") != "idle_subtracted"
+    ):
+        limitations.append(GROSS_ENERGY_LIMITATION)
+    return limitations
 
 
 def score_recommendation_inputs(
@@ -1471,6 +1557,13 @@ def _write_attach_mode_plan_bundle(
     candidates: list[ServeCandidate],
     base_url: str,
     backend: str,
+    warmup_requests: int = 0,
+    steady_state_duration_s: float | None = None,
+    idle_baseline_duration_s: float = 0.0,
+    idle_power_watts: float | None = None,
+    soak_duration_s: float | None = None,
+    stream: bool = False,
+    num_requests: int | None = None,
 ) -> tuple[Path, list[CandidateEvaluationPlan]]:
     plan_dir = run_dir / "plan"
     plans: list[CandidateEvaluationPlan] = []
@@ -1484,7 +1577,17 @@ def _write_attach_mode_plan_bundle(
             serve_plans.append(serve_plan)
         else:
             notes.append("No backend-specific serve plan adapter is implemented for this candidate backend.")
-        benchmark_plan = candidate_to_endpoint_benchmark_plan(candidate, base_url=base_url)
+        benchmark_plan = candidate_to_endpoint_benchmark_plan(
+            candidate,
+            base_url=base_url,
+            num_requests=max(num_requests, 2 * (candidate.concurrency or 1)) if num_requests is not None else None,
+            warmup_requests=warmup_requests,
+            steady_state_duration_s=steady_state_duration_s,
+            idle_baseline_duration_s=idle_baseline_duration_s,
+            idle_power_watts=idle_power_watts,
+            soak_duration_s=soak_duration_s,
+            stream=stream,
+        )
         benchmark_plans.append(benchmark_plan)
         plans.append(
             CandidateEvaluationPlan(

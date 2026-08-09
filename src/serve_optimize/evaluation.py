@@ -82,6 +82,12 @@ def run_evaluation_plan_dir(
             prompt=make_synthetic_prompt(benchmark_plan.expected_input_tokens),
             timeout_s=timeout_s,
             telemetry=telemetry,
+            warmup_requests=benchmark_plan.warmup_requests,
+            steady_state_duration_s=benchmark_plan.steady_state_duration_s,
+            idle_baseline_duration_s=benchmark_plan.idle_baseline_duration_s,
+            idle_power_watts=benchmark_plan.idle_power_watts,
+            soak_duration_s=benchmark_plan.soak_duration_s,
+            stream=benchmark_plan.stream,
             api_key_env=api_key_env,
         )
         run = run_endpoint_benchmark(
@@ -193,6 +199,12 @@ def _apply_overrides(
         max_tokens=plan.max_tokens,
         expected_input_tokens=plan.expected_input_tokens,
         expected_output_tokens=plan.expected_output_tokens,
+        warmup_requests=plan.warmup_requests,
+        steady_state_duration_s=plan.steady_state_duration_s,
+        idle_baseline_duration_s=plan.idle_baseline_duration_s,
+        idle_power_watts=plan.idle_power_watts,
+        soak_duration_s=plan.soak_duration_s,
+        stream=plan.stream,
     )
 
 
@@ -232,6 +244,12 @@ def _benchmark_plan_from_dict(row: dict[str, object]) -> EndpointBenchmarkPlan:
         max_tokens=int(row["max_tokens"]),
         expected_input_tokens=_optional_int(row.get("expected_input_tokens")),
         expected_output_tokens=_optional_int(row.get("expected_output_tokens")),
+        warmup_requests=int(row.get("warmup_requests") or 0),
+        steady_state_duration_s=_optional_float(row.get("steady_state_duration_s")),
+        idle_baseline_duration_s=float(row.get("idle_baseline_duration_s") or 0.0),
+        idle_power_watts=_optional_float(row.get("idle_power_watts")),
+        soak_duration_s=_optional_float(row.get("soak_duration_s")),
+        stream=bool(row.get("stream", False)),
     )
 
 
@@ -253,6 +271,10 @@ def _serve_plan_from_dict(row: dict[str, object]) -> VllmServePlan:
 
 def _optional_int(value: object) -> int | None:
     return int(value) if value is not None else None
+
+
+def _optional_float(value: object) -> float | None:
+    return float(value) if value is not None else None
 
 
 def _ratio(measured: float | None, predicted: float | None) -> float | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
 
@@ -12,6 +13,8 @@ from .candidates import estimate_vram_mb, generate_candidates
 from .modeling import infer_model_spec
 from .schemas import Goal, HardwareSnapshot, ModelCapabilityMetadata, ModelSpec, ServingConfig, WorkloadProfile, to_dict
 from .validation import normalize_quantization
+
+_CONTEXT_HEADROOM_TOKENS = 128
 
 
 @dataclass(frozen=True)
@@ -62,7 +65,7 @@ def generate_managed_candidates_from_capabilities(
         model_spec=model_spec,
         dtype=dtype,
         quantization=allowed_quantizations[0],
-        max_context_tokens=_bounded_context(model_spec, 2048),
+        max_context_tokens=_profile_context(model_spec, 2048, workload_profile),
         max_batch_size=1,
         gpu_memory_utilization=0.9,
         workload_concurrency=_profile_concurrency(workload_profile),
@@ -71,6 +74,16 @@ def generate_managed_candidates_from_capabilities(
         engine_options={"backend_defaults": True},
     )
     candidates.append(baseline)
+    available_memory_candidate = _available_memory_candidate(
+        context=context,
+        model_spec=model_spec,
+        dtype=dtype,
+        quantization=allowed_quantizations[0],
+        max_context_tokens=_profile_context(model_spec, 2048, workload_profile),
+        memory_fraction=_available_memory_fraction(context.hardware),
+    )
+    if available_memory_candidate is not None:
+        candidates.append(available_memory_candidate)
     if context.goal == Goal.PERFORMANCE:
         for throughput_concurrency in _throughput_concurrency_values(workload_profile):
             candidates.append(
@@ -79,7 +92,7 @@ def generate_managed_candidates_from_capabilities(
                     model_spec=model_spec,
                     dtype=dtype,
                     quantization=allowed_quantizations[0],
-                    max_context_tokens=_bounded_context(model_spec, 2048),
+                    max_context_tokens=_profile_context(model_spec, 2048, workload_profile),
                     max_batch_size=1,
                     gpu_memory_utilization=0.9,
                     workload_concurrency=throughput_concurrency,
@@ -94,7 +107,7 @@ def generate_managed_candidates_from_capabilities(
                     model_spec=model_spec,
                     dtype=dtype,
                     quantization=allowed_quantizations[0],
-                    max_context_tokens=_bounded_context(model_spec, 2048),
+                    max_context_tokens=_profile_context(model_spec, 2048, workload_profile),
                     max_batch_size=throughput_concurrency,
                     gpu_memory_utilization=0.9,
                     workload_concurrency=throughput_concurrency,
@@ -144,7 +157,14 @@ def generate_managed_candidates_from_capabilities(
             capability_filtered_count += 1
             invalid_quantization_filtered_count += 1
             continue
-        candidates.append(_from_legacy(config, source="legacy_filtered"))
+        candidates.append(
+            _from_legacy(
+                config,
+                source="legacy_filtered",
+                model_spec=model_spec,
+                workload_profile=workload_profile,
+            )
+        )
 
     candidates, memory_filtered_candidates = _filter_by_memory_estimate(candidates, context.hardware)
     candidates = _dedupe_candidates(candidates)
@@ -187,7 +207,7 @@ def _generate_sglang_candidates(
         and capabilities.detection_status == "success"
         and capabilities.supports("--chunked-prefill-size")
     )
-    contexts = _unique_positive([_bounded_context(model_spec, item) for item in (2048, 4096)])
+    contexts = _unique_positive([_profile_context(model_spec, item, workload_profile) for item in (2048, 4096)])
     primary_context = contexts[0]
     secondary_context = contexts[1] if len(contexts) > 1 else primary_context
     candidates = [
@@ -205,6 +225,16 @@ def _generate_sglang_candidates(
             engine_options={"backend_defaults": True},
         )
     ]
+    available_memory_candidate = _available_memory_candidate(
+        context=context,
+        model_spec=model_spec,
+        dtype=dtype,
+        quantization=quantization,
+        max_context_tokens=primary_context,
+        memory_fraction=_available_memory_fraction(context.hardware) if memory_fraction_supported else None,
+    )
+    if available_memory_candidate is not None:
+        candidates.append(available_memory_candidate)
     profile_concurrency = _profile_concurrency(workload_profile)
     if context.goal == Goal.PERFORMANCE:
         for throughput_concurrency in _throughput_concurrency_values(workload_profile):
@@ -321,7 +351,7 @@ def _candidate_shapes(
     capabilities: VLLMArgumentCapabilities | None,
     workload_profile: WorkloadProfile,
 ) -> list[tuple[int, int, float, int, dict[str, object]]]:
-    contexts = [_bounded_context(model_spec, item) for item in (2048, 4096, 8192)]
+    contexts = [_profile_context(model_spec, item, workload_profile) for item in (2048, 4096, 8192)]
     contexts = _unique_positive(contexts)
     primary_context = contexts[0]
     secondary_context = contexts[1] if len(contexts) > 1 else contexts[0]
@@ -465,6 +495,47 @@ def _profile_concurrency(profile: WorkloadProfile) -> int:
     return 1
 
 
+def _profile_context_requirement(profile: WorkloadProfile) -> int | None:
+    input_tokens = profile.input_tokens if isinstance(profile.input_tokens, int) and not isinstance(profile.input_tokens, bool) and profile.input_tokens > 0 else 0
+    output_tokens = max(
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else 0
+        for value in (profile.max_new_tokens, profile.output_tokens)
+    )
+    if input_tokens == 0 and output_tokens == 0:
+        return None
+    return input_tokens + output_tokens + _CONTEXT_HEADROOM_TOKENS
+
+
+def _profile_context(model_spec: ModelSpec, requested: int, profile: WorkloadProfile) -> int:
+    requirement = _profile_context_requirement(profile) or 0
+    return _bounded_context(model_spec, max(requested, requirement))
+
+
+def _context_requirement_metadata(model_spec: ModelSpec, profile: WorkloadProfile) -> dict[str, object]:
+    requirement = _profile_context_requirement(profile)
+    if requirement is None:
+        return {}
+    return {
+        "required_context_tokens": requirement,
+        "model_context_cap_tokens": model_spec.max_context_tokens,
+        "context_requirement_status": (
+            "supported" if requirement <= model_spec.max_context_tokens else "unsupported_model_context"
+        ),
+    }
+
+
+def _context_requirement_note(model_spec: ModelSpec, profile: WorkloadProfile) -> str | None:
+    requirement = _profile_context_requirement(profile)
+    if requirement is None or requirement <= model_spec.max_context_tokens:
+        return None
+    return (
+        f"Workload profile requires {requirement} context tokens, above the model context cap "
+        f"of {model_spec.max_context_tokens}; candidate is marked unsupported_model_context."
+    )
+
+
 def _throughput_concurrency_values(profile: WorkloadProfile) -> list[int]:
     base = _profile_concurrency(profile)
     values = [max(base * 2, 16), max(base * 4, 32), max(base * 8, 64)]
@@ -557,12 +628,15 @@ def _candidate(
     engine_options: dict[str, object] | None = None,
 ) -> ServingConfig:
     engine_options = dict(engine_options or {})
+    workload_profile = context.workload_profile or WorkloadProfile()
+    max_context_tokens = _profile_context(model_spec, max_context_tokens, workload_profile)
     extra = {
         "candidate_source": source,
         "model_native": normalize_quantization(quantization) == "none",
         "workload_concurrency": workload_concurrency,
         "max_new_tokens": 128,
     }
+    extra.update(_context_requirement_metadata(model_spec, workload_profile))
     profile_payload = _profile_payload(context)
     if profile_payload:
         extra["workload_profile"] = profile_payload
@@ -581,6 +655,8 @@ def _candidate(
     if baseline:
         extra["baseline"] = True
         notes = ["Backend default baseline inserted before managed validation."]
+    if note := _context_requirement_note(model_spec, workload_profile):
+        notes.append(note)
     config_id = _config_id(
         context.backend,
         context.model,
@@ -618,14 +694,69 @@ def _candidate(
     )
 
 
-def _from_legacy(config: ServingConfig, *, source: str) -> ServingConfig:
+def _available_memory_candidate(
+    *,
+    context: CapabilityContext,
+    model_spec: ModelSpec,
+    dtype: str,
+    quantization: str,
+    max_context_tokens: int,
+    memory_fraction: float | None,
+) -> ServingConfig | None:
+    if memory_fraction is None:
+        return None
+    candidate = _candidate(
+        context=context,
+        model_spec=model_spec,
+        dtype=dtype,
+        quantization=quantization,
+        max_context_tokens=max_context_tokens,
+        max_batch_size=1,
+        gpu_memory_utilization=memory_fraction,
+        workload_concurrency=_profile_concurrency(context.workload_profile or WorkloadProfile()),
+        source="available_memory_conservative",
+        baseline=False,
+        engine_options={},
+    )
+    gpu = context.hardware.best_gpu
+    if gpu is None or gpu.total_memory_mb is None or candidate.estimated_vram_mb is None:
+        return candidate
+    if candidate.estimated_vram_mb > gpu.total_memory_mb * memory_fraction * 0.9:
+        return None
+    return candidate
+
+
+def _available_memory_fraction(hardware: HardwareSnapshot) -> float | None:
+    gpu = hardware.best_gpu
+    if gpu is None or gpu.total_memory_mb is None or gpu.free_memory_mb is None or gpu.total_memory_mb <= 0:
+        return None
+    free_fraction = gpu.free_memory_mb / gpu.total_memory_mb
+    if free_fraction >= 0.9:
+        return None
+    conservative_fraction = free_fraction - 0.05
+    if conservative_fraction < 0.1:
+        return None
+    return math.floor(conservative_fraction * 100.0) / 100.0
+
+
+def _from_legacy(
+    config: ServingConfig,
+    *,
+    source: str,
+    model_spec: ModelSpec,
+    workload_profile: WorkloadProfile,
+) -> ServingConfig:
+    max_context_tokens = _profile_context(model_spec, config.max_context_tokens, workload_profile)
     extra = dict(config.extra or {})
     extra.setdefault("candidate_source", source)
     extra.setdefault("model_native", normalize_quantization(config.quantization) == "none")
     extra.setdefault("workload_concurrency", max(1, config.max_batch_size))
     extra.setdefault("max_new_tokens", 128)
+    extra.update(_context_requirement_metadata(model_spec, workload_profile))
     notes = list(config.notes)
     notes.append("Legacy generated candidate retained after capability filtering.")
+    if note := _context_requirement_note(model_spec, workload_profile):
+        notes.append(note)
     return ServingConfig(
         id=f"{config.id}-managed",
         backend=config.backend,
@@ -633,7 +764,7 @@ def _from_legacy(config: ServingConfig, *, source: str) -> ServingConfig:
         dtype=config.dtype,
         quantization=config.quantization,
         max_batch_size=config.max_batch_size,
-        max_context_tokens=config.max_context_tokens,
+        max_context_tokens=max_context_tokens,
         kv_cache_policy=config.kv_cache_policy,
         scheduler=config.scheduler,
         tensor_parallelism=config.tensor_parallelism,
@@ -646,7 +777,13 @@ def _from_legacy(config: ServingConfig, *, source: str) -> ServingConfig:
         max_cudagraph_capture_size=config.max_cudagraph_capture_size,
         enable_prefix_caching=config.enable_prefix_caching,
         power_limit_watts=config.power_limit_watts,
-        estimated_vram_mb=config.estimated_vram_mb,
+        estimated_vram_mb=estimate_vram_mb(
+            model_spec,
+            config.dtype,
+            config.quantization,
+            config.max_batch_size,
+            max_context_tokens,
+        ),
         notes=notes,
         extra=extra,
     )

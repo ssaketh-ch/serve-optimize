@@ -18,6 +18,7 @@ KNOWN_MODELS: dict[str, tuple[float, int, str]] = {
     "mixtral-8x7b": (46.7, 32768, "mixtral"),
     "qwen2.5-7b": (7.6, 32768, "qwen"),
     "qwen2.5-14b": (14.7, 32768, "qwen"),
+    "qwen3-0.6b": (0.6, 40960, "qwen"),
     "qwen3-32b": (32.0, 32768, "qwen"),
     "falcon-7b": (7.0, 2048, "falcon"),
 }
@@ -135,11 +136,32 @@ def _metadata_from_config(
         model_access_status=access_status or "public",
         tokenizer_id=model_id,
         tokenizer_revision=revision,
+        max_context_tokens=_max_context_tokens(payload),
         torch_dtype=str(torch_dtype) if torch_dtype is not None else None,
         quantization_method=str(quant_method).lower() if quant_method is not None else None,
         quantization_config=quantization_config,
         notes=notes or [],
     )
+
+
+def _max_context_tokens(payload: dict[str, object]) -> int | None:
+    candidates = [payload]
+    text_config = payload.get("text_config")
+    if isinstance(text_config, dict):
+        candidates.append(text_config)
+    for config in candidates:
+        for key in (
+            "max_position_embeddings",
+            "max_sequence_length",
+            "max_seq_len",
+            "model_max_length",
+            "n_positions",
+            "seq_length",
+        ):
+            value = config.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return None
 
 
 def _resolve_remote_config_path(

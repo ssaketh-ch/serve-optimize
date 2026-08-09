@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 
@@ -6,6 +7,7 @@ import serve_optimize.endpoint_benchmark as endpoint_benchmark
 from serve_optimize.aiconfig_parser import parse_aiconfig_prediction_csv
 from serve_optimize.endpoint_benchmark import (
     _endpoint_url,
+    _prompt_for_request,
     _run_requests,
     aggregate_benchmark_summaries,
     benchmark_failure_reason,
@@ -244,7 +246,9 @@ def test_summary_includes_trial_identity_and_workload_description() -> None:
     assert summary.model_access_status == "public"
     assert summary.tokenizer_id == "example-tokenizer"
     assert summary.tokenizer_revision == "tok123"
+    assert summary.workload_description["actual_prompt_length_distribution"]["p50"] == pytest.approx(4.5)
     assert summary.workload_description["actual_output_length_distribution"]["p50"] == pytest.approx(12.0)
+    assert summary.workload_description["actual_measurement_duration_s"] == pytest.approx(2.0)
     assert summary.outcome == "completed"
     assert summary.trial_wall_clock_time_s == pytest.approx(2.0)
 
@@ -395,6 +399,9 @@ def test_measurement_window_filters_failures_and_power_with_the_same_boundaries(
     assert summary.tokens_per_joule == pytest.approx(30.0 / 100.0)
     assert summary.energy_accounting == "raw"
     assert summary.measurement_quality["energy_window"] == "measurement"
+    assert summary.measurement_quality["phase_energy_attribution"] == "request_time_windows"
+    assert summary.workload_description["actual_warmup_duration_s"] == pytest.approx(1.0)
+    assert summary.workload_description["actual_measurement_duration_s"] == pytest.approx(1.0)
 
 
 def test_all_warmup_requests_leave_the_measurement_window_empty() -> None:
@@ -744,6 +751,45 @@ def test_streaming_request_records_ttft_and_tpot(monkeypatch: pytest.MonkeyPatch
     assert record.token_count_source == "response_usage"
 
 
+def test_endpoint_request_selects_prompt_by_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}'
+
+    def fake_urlopen(http_request, timeout):
+        del timeout
+        captured.append(json.loads(http_request.data)["messages"][0]["content"])
+        return FakeResponse()
+
+    monkeypatch.setattr(endpoint_benchmark.request, "urlopen", fake_urlopen)
+    config = EndpointBenchmarkConfig(
+        run_id="run-prompt-selection",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=3,
+        max_tokens=8,
+        prompt="legacy prompt",
+        prompts=["warmup prompt", "measurement prompt"],
+        timeout_s=10.0,
+    )
+
+    for request_id in range(3):
+        assert send_chat_completion_request(config, request_id).status == "ok"
+
+    assert captured == ["warmup prompt", "measurement prompt", "warmup prompt"]
+
+
 def test_streaming_request_asks_for_usage_without_using_chunks_as_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 
@@ -1042,6 +1088,84 @@ def test_soak_duration_runs_additional_request_batches(monkeypatch: pytest.Monke
     records = _run_requests(config, fake_request)
 
     assert [record.request_id for record in sorted(records, key=lambda item: item.request_id)] == [0, 1]
+
+
+def test_prompt_selection_is_stable_across_warmup_and_measurement(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="run-prompt-phases",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="legacy prompt",
+        prompts=["warmup prompt", "measurement prompt"],
+        timeout_s=10.0,
+        warmup_requests=1,
+        soak_duration_s=2.0,
+    )
+    perf_times = iter([0.0, 1.0, 2.5])
+    seen = []
+    monkeypatch.setattr(endpoint_benchmark.time, "perf_counter", lambda: next(perf_times))
+
+    def fake_request(request_config: EndpointBenchmarkConfig, request_id: int) -> RequestRecord:
+        seen.append((request_id, _prompt_for_request(request_config, request_id)))
+        return RequestRecord(request_id, 0.0, 0.1, 0.1, "ok")
+
+    records = _run_requests(config, fake_request)
+
+    assert len(records) == 2
+    assert sorted(seen) == [(0, "warmup prompt"), (1, "measurement prompt")]
+
+
+def test_steady_state_duration_runs_additional_request_batches() -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="run-steady-state",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=1,
+        num_requests=1,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        warmup_requests=1,
+        steady_state_duration_s=2.0,
+    )
+
+    def fake_request(_config: EndpointBenchmarkConfig, request_id: int) -> RequestRecord:
+        start = float(request_id)
+        return RequestRecord(request_id, start, start + 0.5, 0.5, "ok")
+
+    records = _run_requests(config, fake_request)
+
+    assert [record.request_id for record in sorted(records, key=lambda item: item.request_id)] == [0, 1, 2, 3]
+
+
+def test_warmup_batch_finishes_before_measurement_requests_start() -> None:
+    config = EndpointBenchmarkConfig(
+        run_id="run-separated-warmup",
+        base_url="http://127.0.0.1:8080/v1",
+        model="example",
+        concurrency=4,
+        num_requests=8,
+        max_tokens=8,
+        prompt="hello",
+        timeout_s=10.0,
+        warmup_requests=2,
+    )
+
+    def fake_request(_config: EndpointBenchmarkConfig, request_id: int) -> RequestRecord:
+        start = time.time()
+        if request_id < config.warmup_requests:
+            time.sleep(0.02)
+        end = time.time()
+        return RequestRecord(request_id, start, end, end - start, "ok")
+
+    records = _run_requests(config, fake_request)
+    warmup = [record for record in records if record.request_id < config.warmup_requests]
+    measured = [record for record in records if record.request_id >= config.warmup_requests]
+
+    assert min(record.start_time for record in measured) >= max(record.end_time for record in warmup)
 
 
 def test_mocked_endpoint_benchmark_writes_artifacts_and_request_jsonl(tmp_path) -> None:

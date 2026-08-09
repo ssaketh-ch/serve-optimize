@@ -84,7 +84,7 @@ Run a small managed dry run:
 
 Pinned and validated stack:
 
-* vLLM `0.23.0`
+* vLLM `0.24.0`
 * Torch `2.11.0`, with the CUDA wheel selected by `uv`
 * Transformers `5.9.0`
 * Hugging Face Hub `1.17.0`

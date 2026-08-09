@@ -21,7 +21,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from serve_optimize.backends.base import LaunchPlan, environment_with_command_dir
+from serve_optimize.backends.base import LaunchPlan, environment_with_command_dir, process_exit_details
 from serve_optimize.endpoint_benchmark import RequestFn, send_chat_completion_request
 from serve_optimize.schemas import (
     EndpointBenchmarkConfig,
@@ -307,7 +307,7 @@ class SglangAdapter:
                     started_at=started_at.isoformat(),
                     ended_at=ended_at.isoformat(),
                     error=last_error,
-                    details={"process_returncode": process.returncode},
+                    details=process_exit_details(handle, process.returncode),
                 )
             request_start = time.perf_counter()
             record = _health_request(handle, model, request_fn)

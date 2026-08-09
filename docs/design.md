@@ -91,7 +91,8 @@ Hardware discovery records NVIDIA GPU and MIG metadata when available. Model dis
 
 Candidate sources include:
 
-* safe model native baselines
+* a backend default control
+* a conservative memory aware candidate when hardware evidence is available
 * heuristic candidates
 * attach mode concurrency sweeps
 * installed backend capability aware candidates
@@ -191,11 +192,11 @@ Recommendation artifacts expose:
 * selected command
 * evidence and runtime identity
 
-The recommendation scope is always the best among evaluated candidates.
+The recommendation scope is always the best among evaluated candidates. Throughput recommendations are provisional when load sufficiency does not establish GPU saturation or a throughput plateau under increasing pressure.
 
 ## Workloads And SLOs
 
-Attach Mode and Managed Mode support workload profile presets and JSON workload manifests. Built in profiles cover short, medium, long, decode heavy, repeated prefix, and mixed synthetic workloads.
+Attach Mode and Managed Mode support workload profile presets and JSON workload manifests. Built in profiles cover short, medium, long, long prefill, decode heavy, code generation, repeated prefix, and mixed synthetic workloads.
 
 Workload identity includes profile name, dataset, token distribution, and SLO constraints. This identity participates in evidence fingerprints, so changing token distribution or constraints blocks exact evidence reuse.
 
@@ -268,7 +269,7 @@ These artifacts explain planned backend, workload, budget, evidence, output, rep
 
 * vLLM and SGLang require separate installation profiles because their validated runtime stacks conflict.
 * Candidate generation is bounded rather than exhaustive.
-* Workload profiles are not yet complete production trace manifests.
+* JSON prompt manifests do not replay timestamped production arrivals or preserve an external scheduler trace.
 * Prefill and decode energy attribution is not implemented.
 * TensorRT LLM is planned only and is not in the current Managed Mode scope.
 * TGI, LMDeploy, llama.cpp, and NIM remain external Attach Mode targets unless lifecycle ownership is separately scoped.

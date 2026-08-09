@@ -198,6 +198,7 @@ def metrics_summary(recommendation: RecommendationResult) -> dict[str, Any]:
         output_throughput = _optional_float(measured.get("total_tokens_s"))
     return {
         "throughput_tokens_per_sec": output_throughput,
+        "output_tokens_per_sec": output_throughput,
         "total_tokens_per_sec": _optional_float(measured.get("total_tokens_s")),
         "p95_latency_ms": _seconds_to_ms(measured.get("p95_latency_s")),
         "average_power_w": _optional_float(telemetry.get("average_power_watts")),
@@ -343,7 +344,7 @@ def format_recommendation_summary_text(payload: dict[str, Any]) -> str:
             [
                 "",
                 "Measured performance:",
-                f"  throughput: {_metric(metrics.get('throughput_tokens_per_sec'), ' tokens/sec')}",
+                f"  output_throughput: {_metric(metrics.get('output_tokens_per_sec', metrics.get('throughput_tokens_per_sec')), ' tokens/sec')}",
                 f"  p95_latency: {_metric(metrics.get('p95_latency_ms'), ' ms')}",
                 f"  average_power: {_metric(metrics.get('average_power_w'), ' W')}",
                 f"  joules_per_token: {_metric(metrics.get('joules_per_token'), '')}",

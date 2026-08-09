@@ -57,7 +57,7 @@ Package metadata lives in `pyproject.toml`. Backend runtime installs stay split 
 * vLLM
 * SGLang
 
-The vLLM and SGLang runtime profiles remain separate because their Torch and Transformers stacks are incompatible.
+The vLLM and SGLang runtime profiles remain separate because their complete dependency pins differ, even when individual Torch versions coincide.
 
 ## Schema And Migration Policy
 

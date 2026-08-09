@@ -147,7 +147,7 @@ This keeps backend command details out of the generic optimizer. Unsupported fla
 
 ## Candidate Generation
 
-Candidate generation starts conservative. Every managed candidate set begins with a safe backend default baseline. Other candidates are added from backend capabilities, workload profile hints, prior evidence, and optional AIConfigurator outputs.
+Candidate generation starts with a backend default control and keeps a separate conservative candidate when hardware memory evidence allows one. Other candidates are added from backend capabilities, workload profile hints, prior evidence, and optional AIConfigurator outputs. The backend default is a control, not a promise that it will fit.
 
 ```mermaid
 flowchart TD
@@ -248,9 +248,11 @@ Built in profiles include:
 2. `short`
 3. `medium`
 4. `long`
-5. `decode-heavy`
-6. `repeated-prefix`
-7. `mixed`
+5. `long-prefill`
+6. `decode-heavy`
+7. `code-generation`
+8. `repeated-prefix`
+9. `mixed`
 
 SLO constraints are eligibility rules. If a candidate violates a configured SLO, it is not recommendable for that run. SLOs can cover TTFT, TPOT, p95 latency, minimum throughput, and failed request rate.
 
@@ -301,6 +303,8 @@ For telemetry, it records what the provider exposes:
 8. Provider warnings and missing fields.
 
 Missing telemetry fields are recorded as unavailable, not as zero.
+
+On MIG systems, device visibility and power attribution are separate capabilities. A run may identify the allocated MIG slice while NVML power remains physical board scoped. Such energy is labeled as board scoped and cannot support per slice energy claims.
 
 When telemetry is enabled, idle baseline samples are collected before the active run when requested. Active power samples are phase tagged into warmup and measurement windows when those windows are configured, and the benchmark writes separate idle, warmup, and measurement sample artifacts when those samples exist.
 
@@ -480,6 +484,8 @@ The scoring goals are:
 
 Candidates can be disqualified before scoring if they have no successful requests, missing required metrics, missing power telemetry for efficiency, or SLO violations.
 
+Throughput recommendations also carry the run level load sufficiency result. When neither GPU saturation nor a throughput plateau under increasing pressure is established, the selected candidate remains inspectable but the recommendation and managed run are marked warning and described as provisional.
+
 The recommendation output includes:
 
 1. Selected candidate id.
@@ -518,7 +524,7 @@ Human readers should start with `recommendation_summary.txt`. Automation should 
 
 ## Campaigns
 
-Campaign tools scale the same managed flow across models, backends, goals, workload profiles, and repeats.
+Campaign tools scale the same managed flow across models, backends, goals, workload profiles, and repeats. `campaign-plan` builds user selected campaigns. `benchmark-matrix-plan` builds the staged research matrix and keeps planned, runnable, blocked, and completed work distinct.
 
 ```mermaid
 flowchart TD
@@ -571,5 +577,5 @@ Explicit limits:
 3. vLLM and SGLang use separate environments.
 4. TensorRT LLM is not a managed backend.
 5. External TGI, LMDeploy, llama.cpp, and NIM are Attach Mode only unless lifecycle ownership is added later.
-6. Production trace manifests are not yet first class workload inputs.
+6. JSON prompt manifests are supported, including pinned permitted chat prompts. Timestamped production trace replay with original arrival timing is not implemented.
 7. Prefill and decode energy attribution is unavailable until defensible phase markers exist.

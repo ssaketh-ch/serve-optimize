@@ -29,8 +29,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=64,
         dataset="synthetic-short",
         token_distribution={
-            "input_tokens": {"p50": 128, "p95": 256},
-            "output_tokens": {"p50": 64, "p95": 128},
+            "input_tokens": {"p50": 128, "p95": 128},
+            "output_tokens": {"p50": 64, "p95": 64},
         },
         notes=["Short synthetic prompts for quick managed evaluation."],
     ),
@@ -43,8 +43,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=96,
         dataset="synthetic-medium",
         token_distribution={
-            "input_tokens": {"p50": 1024, "p95": 2048},
-            "output_tokens": {"p50": 256, "p95": 512},
+            "input_tokens": {"p50": 1024, "p95": 1024},
+            "output_tokens": {"p50": 256, "p95": 256},
         },
         notes=["Medium synthetic prompt and decode mix."],
     ),
@@ -57,8 +57,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=48,
         dataset="synthetic-long",
         token_distribution={
-            "input_tokens": {"p50": 4096, "p95": 8192},
-            "output_tokens": {"p50": 512, "p95": 1024},
+            "input_tokens": {"p50": 4096, "p95": 4096},
+            "output_tokens": {"p50": 512, "p95": 512},
         },
         notes=["Long context synthetic workload."],
     ),
@@ -71,8 +71,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=48,
         dataset="synthetic-long-prefill",
         token_distribution={
-            "input_tokens": {"p50": 4096, "p95": 8192},
-            "output_tokens": {"p50": 128, "p95": 256},
+            "input_tokens": {"p50": 4096, "p95": 4096},
+            "output_tokens": {"p50": 128, "p95": 128},
         },
         notes=["Long prompt and short output synthetic workload."],
     ),
@@ -85,8 +85,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=64,
         dataset="synthetic-decode-heavy",
         token_distribution={
-            "input_tokens": {"p50": 512, "p95": 1024},
-            "output_tokens": {"p50": 1024, "p95": 1536},
+            "input_tokens": {"p50": 512, "p95": 512},
+            "output_tokens": {"p50": 1024, "p95": 1024},
         },
         notes=["Decode heavy synthetic workload."],
     ),
@@ -99,8 +99,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=96,
         dataset="synthetic-repeated-prefix",
         token_distribution={
-            "input_tokens": {"p50": 1024, "p95": 2048},
-            "output_tokens": {"p50": 128, "p95": 256},
+            "input_tokens": {"p50": 1024, "p95": 1024},
+            "output_tokens": {"p50": 128, "p95": 128},
             "repeated_prefix_ratio": 0.75,
         },
         prefix_reuse_expected=True,
@@ -116,8 +116,8 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         num_requests=96,
         dataset="synthetic-code-generation",
         token_distribution={
-            "input_tokens": {"p50": 1024, "p95": 2048},
-            "output_tokens": {"p50": 512, "p95": 1024},
+            "input_tokens": {"p50": 1024, "p95": 1024},
+            "output_tokens": {"p50": 512, "p95": 512},
         },
         notes=["Code generation style synthetic prompts."],
     ),
@@ -131,7 +131,7 @@ WORKLOAD_PROFILE_PRESETS: dict[str, WorkloadProfile] = {
         dataset="synthetic-mixed",
         token_distribution={
             "input_tokens": {"p50": 768, "p95": 4096},
-            "output_tokens": {"p50": 256, "p95": 1024},
+            "output_tokens": {"p50": 256, "p95": 256},
             "mix": {"short": 0.35, "medium": 0.45, "long": 0.20},
         },
         notes=["Mixed synthetic short, medium, and long workload."],
@@ -177,6 +177,44 @@ def workload_profile_summary(profile: WorkloadProfile | dict[str, Any] | None) -
         "token_distribution": payload.get("token_distribution", {}),
         "slo_constraints": payload.get("slo_constraints", {}),
     }
+
+
+def workload_prompts(
+    profile: WorkloadProfile | dict[str, Any] | None,
+    *,
+    count: int,
+    fallback_prompt: str = "",
+) -> list[str]:
+    """Return a deterministic prompt for each request in a workload."""
+
+    if count <= 0:
+        return []
+    payload = workload_profile_to_payload(profile)
+    raw_prompts = payload.get("prompts")
+    if isinstance(profile, dict) and "prompts" in profile and raw_prompts == []:
+        raise ValueError("Workload manifest prompts must be a nonempty list of strings.")
+    if raw_prompts not in (None, []):
+        prompts = _validated_prompts(raw_prompts, field_name="prompts")
+        return [prompts[index % len(prompts)] for index in range(count)]
+
+    profile_name = str(payload.get("profile_name") or "default").replace("_", "-").lower()
+    if profile_name == "default":
+        return [fallback_prompt] * count
+    input_tokens = _profile_input_tokens(payload)
+    if profile_name == "mixed":
+        return [
+            _synthetic_prompt(length, label="mixed", request_index=index)
+            for index, length in enumerate(_mixed_input_lengths(payload, count))
+        ]
+    if profile_name == "code-generation":
+        return [_code_prompt(input_tokens, index) for index in range(count)]
+    if profile_name == "repeated-prefix":
+        ratio = payload.get("repeated_prefix_ratio")
+        ratio_value = 0.75 if ratio is None else float(ratio)
+        if not 0.0 <= ratio_value <= 1.0:
+            raise ValueError("repeated_prefix_ratio must be between 0 and 1.")
+        return [_repeated_prefix_prompt(input_tokens, ratio_value, index) for index in range(count)]
+    return [_synthetic_prompt(input_tokens, label=profile_name, request_index=index) for index in range(count)]
 
 
 def slo_disqualifiers(item: RecommendationInput) -> list[str]:
@@ -234,15 +272,107 @@ def slo_note(profile: WorkloadProfile | dict[str, Any] | None) -> str | None:
 
 
 def _profile_from_manifest(path: Path) -> WorkloadProfile:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("Workload manifest must contain valid JSON.") from exc
     if not isinstance(payload, dict):
         raise ValueError("Workload manifest must contain a JSON object.")
+    payload = dict(payload)
+    if "dataset_license" not in payload:
+        for alias in ("dataset_license_status", "license_status"):
+            if alias in payload:
+                payload["dataset_license"] = payload[alias]
+                break
+    if "prompts" in payload:
+        _validated_prompts(payload["prompts"], field_name="prompts")
+    for field_name in ("dataset_source", "dataset_license", "synthetic_or_real"):
+        value = payload.get(field_name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"Workload manifest {field_name} must be a nonempty string.")
     base_name = str(payload.get("profile_name") or "default")
     base = WORKLOAD_PROFILE_PRESETS.get(base_name, WorkloadProfile(profile_name=base_name))
     values = to_dict(base)
     values.update(payload)
     values["slo_constraints"] = _clean_slo_constraints(values.get("slo_constraints", {}))
+    if "prompts" in payload:
+        values["prompts"] = _validated_prompts(payload["prompts"], field_name="prompts")
     return WorkloadProfile(**{key: value for key, value in values.items() if key in WorkloadProfile.__dataclass_fields__})
+
+
+def _validated_prompts(value: object, *, field_name: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"Workload manifest {field_name} must be a nonempty list of strings.")
+    prompts = []
+    for index, prompt in enumerate(value):
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(f"Workload manifest {field_name}[{index}] must be a nonempty string.")
+        prompts.append(prompt)
+    return prompts
+
+
+def _profile_input_tokens(payload: dict[str, Any]) -> int:
+    value = payload.get("input_tokens")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    distribution = payload.get("token_distribution")
+    if isinstance(distribution, dict):
+        input_distribution = distribution.get("input_tokens")
+        if isinstance(input_distribution, dict):
+            p50 = input_distribution.get("p50")
+            if isinstance(p50, int) and not isinstance(p50, bool) and p50 > 0:
+                return p50
+    return 128
+
+
+def _synthetic_prompt(length: int, *, label: str, request_index: int) -> str:
+    marker = [label, "request", str(request_index)]
+    tokens = marker + ["context"] * max(1, length - len(marker))
+    return " ".join(tokens)
+
+
+def _code_prompt(length: int, request_index: int) -> str:
+    prefix = ["#", "Complete", "the", "Python", "function", "below", "with", "code", str(request_index)]
+    tokens = prefix + ["code"] * max(1, length - len(prefix))
+    return " ".join(tokens)
+
+
+def _repeated_prefix_prompt(length: int, ratio: float, request_index: int) -> str:
+    prefix_length = round(length * ratio)
+    suffix_length = max(0, length - prefix_length)
+    prefix = ["shared"] * prefix_length
+    suffix = ([f"request_{request_index}"] if suffix_length else []) + ["suffix"] * max(0, suffix_length - 1)
+    return " ".join(prefix + suffix)
+
+
+def _mixed_input_lengths(payload: dict[str, Any], count: int) -> list[int]:
+    base = _profile_input_tokens(payload)
+    distribution = payload.get("token_distribution")
+    mix = distribution.get("mix") if isinstance(distribution, dict) else None
+    weights = mix if isinstance(mix, dict) else {"short": 0.35, "medium": 0.45, "long": 0.20}
+    names = ("short", "medium", "long")
+    values = [max(0.0, float(weights.get(name, 0.0))) for name in names]
+    total = sum(values)
+    if total <= 0:
+        values = [0.35, 0.45, 0.20]
+        total = 1.0
+    lengths = {
+        "short": max(1, min(base, 128)),
+        "medium": base,
+        "long": max(base * 4, 4096),
+    }
+    result = []
+    for index in range(count):
+        position = (index + 0.5) / count
+        cumulative = 0.0
+        selected = "long"
+        for name, weight in zip(names, values, strict=True):
+            cumulative += weight / total
+            if position <= cumulative:
+                selected = name
+                break
+        result.append(lengths[selected])
+    return result
 
 
 def _clean_slo_constraints(payload: dict[str, Any]) -> dict[str, Any]:

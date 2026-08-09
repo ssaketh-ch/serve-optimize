@@ -200,6 +200,39 @@ def test_evaluation_overrides(tmp_path) -> None:
     assert config["num_requests"] == 2
 
 
+def test_evaluation_preserves_measurement_controls(tmp_path) -> None:
+    plan_dir = _write_plan_dir(tmp_path)
+    path = plan_dir / "evaluation_plans.jsonl"
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row["benchmark_plan"].update(
+        {
+            "warmup_requests": 1,
+            "steady_state_duration_s": 2.5,
+            "idle_baseline_duration_s": 0.0,
+            "idle_power_watts": 50.0,
+            "soak_duration_s": 3.0,
+            "stream": True,
+        }
+    )
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    result = run_evaluation_plan_dir(
+        plan_dir=plan_dir,
+        out_dir=tmp_path / "evaluations",
+        request_fn=_ok_request,
+    )
+
+    config = json.loads(
+        (result.run_dir / "per_candidate" / "aic-rank-0001" / "config.json").read_text(encoding="utf-8")
+    )
+    assert config["warmup_requests"] == 1
+    assert config["steady_state_duration_s"] == pytest.approx(2.5)
+    assert config["idle_baseline_duration_s"] == pytest.approx(0.0)
+    assert config["idle_power_watts"] == pytest.approx(50.0)
+    assert config["soak_duration_s"] == pytest.approx(3.0)
+    assert config["stream"] is True
+
+
 def test_run_evaluation_plan_cli_smoke() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["run-evaluation-plan", "--help"])

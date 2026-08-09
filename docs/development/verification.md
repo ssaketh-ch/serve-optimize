@@ -12,6 +12,7 @@ serve-optimize --help
 serve-optimize optimize --help
 serve-optimize validate-campaign --help
 serve-optimize campaign-plan --help
+serve-optimize benchmark-matrix-plan --help
 serve-optimize release-check --help
 serve-optimize research-package --help
 ```
@@ -36,6 +37,25 @@ bash scripts/verify_full.sh
 * Do not mark hardware, backend, telemetry, or evidence behavior verified without real commands and inspected artifacts.
 * Keep failed and unavailable run artifacts.
 * Record release verification in `docs/development/verification.md` or a release note.
+
+## Publication Hardening
+
+Recorded on 2026-08-09:
+
+* confirmed completed RTX PRO 6000 evidence for vLLM and SGLang and retained it as a distinct hardware stratum
+* kept the broader H200 campaign separate pending campaign completion and raw artifact audit
+* aligned validation and research CSV exports with output throughput, streaming latency, energy, load sufficiency, backend version, and runtime provenance fields
+* documented that research packages index source runs but do not embed the raw artifact archive
+* narrowed the paper outline to claims that can be supported by audited evidence
+* restored the historical RTX PRO 6000 vLLM validation record to its actual vLLM 0.23.0 version
+* focused publication and recommendation tests passed with 86 tests
+* full verification passed with 475 tests and 1 skipped test
+* Ruff passed
+* source distribution and wheel builds passed
+* packaged CLI smoke passed
+* release check passed with 73 checks
+* the core dependency audit reported no known vulnerabilities
+* the vLLM and SGLang profile audits each reported `PYSEC-2025-194` for torch 2.11.0
 
 ## Product Readiness Hardening
 

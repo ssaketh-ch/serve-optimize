@@ -130,6 +130,24 @@ def test_invalid_block_size_is_rejected() -> None:
     assert "block_size must be greater than 0" in str(result.reason)
 
 
+def test_workload_beyond_model_context_is_rejected_before_launch() -> None:
+    result = validate_managed_candidate(
+        _config(
+            "none",
+            extra={
+                "context_requirement_status": "unsupported_model_context",
+                "required_context_tokens": 4736,
+                "model_context_cap_tokens": 4096,
+            },
+        ),
+        backend="vllm",
+        model_metadata=infer_model_capability_metadata("org/model-id"),
+    )
+
+    assert result.valid is False
+    assert result.reason == "workload requires 4736 context tokens but the model supports 4096"
+
+
 def test_invalid_kv_cache_dtype_is_rejected() -> None:
     result = validate_managed_candidate(
         _config("none", kv_cache_dtype="fp8_e4m3"),

@@ -123,6 +123,7 @@ class ModelCapabilityMetadata:
     model_access_status: str | None = None
     tokenizer_id: str | None = None
     tokenizer_revision: str | None = None
+    max_context_tokens: int | None = None
     torch_dtype: str | None = None
     quantization_method: str | None = None
     quantization_config: dict[str, Any] = field(default_factory=dict)
@@ -228,6 +229,10 @@ class WorkloadProfile:
     prefix_reuse_expected: bool = False
     repeated_prefix_ratio: float | None = None
     notes: list[str] = field(default_factory=list)
+    prompts: list[str] = field(default_factory=list)
+    dataset_source: str | None = None
+    dataset_license: str | None = None
+    synthetic_or_real: str | None = None
 
 
 @dataclass(frozen=True)
@@ -564,6 +569,7 @@ class EndpointBenchmarkConfig:
     backend_ready_at: str | None = None
     backend_startup_time_s: float | None = None
     model_load_time_s: float | None = None
+    prompts: list[str] = field(default_factory=list)
     schema_version: str = "endpoint-benchmark/v1"
 
 
@@ -913,6 +919,12 @@ class EndpointBenchmarkPlan:
     max_tokens: int
     expected_input_tokens: int | None
     expected_output_tokens: int | None
+    warmup_requests: int = 0
+    steady_state_duration_s: float | None = None
+    idle_baseline_duration_s: float = 0.0
+    idle_power_watts: float | None = None
+    soak_duration_s: float | None = None
+    stream: bool = False
 
 
 @dataclass(frozen=True)

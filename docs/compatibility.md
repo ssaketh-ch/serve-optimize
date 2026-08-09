@@ -24,8 +24,8 @@ Support claims describe the product contract, not a hypothetical roadmap. Histor
 
 | Backend | Support | Validated runtime | Notes |
 |---|---|---|---|
-| vLLM | First class | vLLM `0.23.0`, Torch `2.11.0+cu130`, Python `3.12.3` | Installed capability detection, canonical rendering, lifecycle, evidence, and recommendation paths are validated with the pinned profile. |
-| SGLang | First class for the detected supported surface | SGLang `0.5.13.post1`, Torch `2.11.0`, Transformers `5.8.1` | The clean install profile resolves on Python 3.12. Runtime support is bounded by installed capability detection and is validated by a local profile doctor and Qwen smoke run. |
+| vLLM | First class | vLLM `0.24.0`, Torch `2.11.0+cu130`, Transformers `5.9.0`, Python `3.10.12` | Profile doctor, full installed capability detection, canonical rendering, lifecycle, evidence, recommendation, and live Qwen acceptance paths are validated with the pinned profile. |
+| SGLang | First class for the detected supported surface | SGLang `0.5.13.post1`, Torch `2.11.0`, Transformers `5.8.1`, Python `3.10.12` | Runtime support is bounded by installed capability detection and is validated by profile doctor and live Qwen runs. |
 | TensorRT LLM | Planned only | none | Not in current Managed Mode scope. No adapter, engine build lifecycle, evidence, or recommendation support exists. |
 | TGI, LMDeploy, llama.cpp, NIM | Attach only | none | They may be measured through Attach Mode when they expose a compatible endpoint. Serve Optimize does not own their Managed Mode lifecycle. |
 
@@ -176,6 +176,8 @@ Predictions, stale evidence, and near compatible evidence may influence pruning 
 
 Recommendation wording is limited to the evaluated set. Use `best among evaluated candidates`. Do not claim all possible configuration coverage.
 
+For throughput goals, load sufficiency is part of the recommendation contract. A selected candidate is warning level and provisional when the run did not establish GPU saturation or a throughput plateau under increasing pressure.
+
 ## Release And Research Contract
 
 `serve-optimize release-check` writes release readiness artifacts and checks required files, package metadata, verification scripts, schema markers, and support documents.
@@ -192,6 +194,8 @@ Telemetry failure does not fail a benchmark by default. It lowers confidence, pr
 
 Energy metrics include measurement window estimates. When an idle baseline is supplied or sampled before the run, summaries also include idle subtracted active energy and efficiency. Warmup and measurement power samples are stored separately when available. Summaries report the energy accounting mode, tokens per joule, and joules per generated token. Recommendation scoring prefers idle subtracted metrics when they are available. Prefill and decode attribution remains unavailable because the endpoint path has no defensible phase boundary markers.
 
+MIG visibility does not imply MIG power attribution. If NVML exposes only physical board power, artifacts and publications must label energy as board scoped and must not present it as per instance energy.
+
 ## Installation Contract
 
 Current core development install:
@@ -205,7 +209,7 @@ Validated backend measurements use isolated environments installed from:
 * `requirements/profiles/vllm.txt`
 * `requirements/profiles/sglang.txt`
 
-Backend extras and requirement profiles are pinned to the validated vLLM and SGLang stacks. The backend profiles are mutually exclusive because their Torch and Transformers requirements conflict.
+Backend extras and requirement profiles are pinned to the validated vLLM and SGLang stacks. The backend profiles remain separate because their complete dependency pins conflict even when individual Torch versions coincide.
 
 See [INSTALL.md](../INSTALL.md) for clean uv installation and profile verification commands.
 
@@ -222,7 +226,7 @@ The current product does not provide:
 * parallel managed candidate launches
 * power limit or clock control
 * prefill and decode energy attribution
-* production workload trace manifests
+* timestamped production trace replay with original arrival scheduling
 * all possible configuration coverage guarantees
 
 ## Preflight And Dry Run
@@ -235,7 +239,7 @@ Dry run artifacts are planning artifacts. They are not measured evidence and can
 
 ## Workload Profiles And SLOs
 
-Supported built in workload profiles are `default`, `short`, `medium`, `long`, `decode-heavy`, `repeated-prefix`, and `mixed`.
+Supported built in workload profiles are `default`, `short`, `medium`, `long`, `long-prefill`, `decode-heavy`, `code-generation`, `repeated-prefix`, and `mixed`.
 
 Attach Mode and Managed Mode accept JSON workload manifests. Workload fingerprints include profile name, token distribution, and SLO constraints.
 
