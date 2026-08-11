@@ -126,6 +126,35 @@ def test_selected_summary_uses_measured_benchmark_concurrency() -> None:
     assert payload["metrics"]["total_tokens_per_sec"] == 150.0
 
 
+def test_summary_does_not_alias_total_throughput_to_output_throughput() -> None:
+    recommendation = RecommendationResult(
+        recommended_candidate_id="selected",
+        goal="balanced",
+        selected_score=None,
+        selected_config=None,
+        selected_serve_command=None,
+        selected_benchmark_plan=None,
+        measured_metrics={"total_tokens_s": 150.0},
+        candidate_table=[
+            {"candidate_id": "baseline", "candidate_source": "safe_baseline", "total_tokens_s": 100.0},
+            {"candidate_id": "selected", "candidate_source": "generated", "total_tokens_s": 150.0},
+        ],
+    )
+
+    payload = build_recommendation_summary(
+        recommendation=recommendation,
+        selected_config=None,
+        selected_source="managed_measured",
+        reason=None,
+        artifacts={},
+    )
+
+    assert payload["metrics"]["throughput_tokens_per_sec"] is None
+    assert payload["metrics"]["output_tokens_per_sec"] is None
+    assert payload["metrics"]["total_tokens_per_sec"] == 150.0
+    assert payload["baseline_comparison"]["metrics"]["throughput_tokens_per_sec"]["selected"] is None
+
+
 def _recommendation(rows: list[dict[str, object]]) -> RecommendationResult:
     return RecommendationResult(
         recommended_candidate_id="selected",
@@ -153,6 +182,7 @@ def _row(
         "candidate_id": candidate_id,
         "candidate_source": source,
         "benchmark_concurrency": concurrency,
+        "output_tokens_s": throughput,
         "total_tokens_s": throughput,
         "p95_latency_s": latency,
         "average_power_watts": power,

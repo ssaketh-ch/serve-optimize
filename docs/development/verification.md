@@ -38,6 +38,27 @@ bash scripts/verify_full.sh
 * Keep failed and unavailable run artifacts.
 * Record release verification in `docs/development/verification.md` or a release note.
 
+## Publication Completion Audit
+
+Recorded on 2026-08-11:
+
+* reconciled all 46 managed run directories from H200 closure job 319 and audited 397 trial summaries plus 139352 request records with zero failed checks
+* postprocessed the parent directories of the 46 recursively discovered `managed_run.json` files, yielding 46 usable runs split evenly between vLLM and SGLang
+* generated research and validation CSV tables plus verified raw and package checksum manifests without tracking the raw result archive
+* retained RTX PRO 6000 as a separate operational evidence stratum because its 42 historical trial summaries predate six current acceptance fields
+* corrected recommendation failure eligibility, minimum useful efficiency throughput, output throughput provenance, conservative candidate reporting, repeatability comparability, compact Pareto fingerprints, saturation review, and repeated prefix accounting
+* focused verification passed with 98 tests
+* full verification passed with 484 tests and 1 skipped test
+* Ruff passed
+* the wheel built and the packaged CLI smoke test passed
+* release check passed with 73 checks, zero failures, and zero warnings
+* the project dependency audit reported no known vulnerabilities
+* the Bandit high severity scan with medium or higher confidence passed; two existing reviewed `B104` suppressions produced notices but no failed finding
+* `pip check` reported no broken requirements
+* tracked files contained no credential signature or prohibited identity reference found by the final scans
+* no GPU run or broad benchmark matrix was launched during this audit
+* twelve unsaturated performance cells, unmatched repetitions, unrun ablations, absent equal budget search baselines, limited power attribution, and unobserved pruning benefit remain explicit scientific limitations
+
 ## Publication Hardening
 
 Recorded on 2026-08-09:

@@ -44,6 +44,7 @@ from serve_optimize.managed import (
     _failure_reason_for_health,
     _generate_managed_candidate_generation,
     _generate_managed_candidates,
+    _is_conservative_candidate,
     _load_sufficiency_summary,
     _managed_measured_metrics,
     _managed_telemetry_metrics,
@@ -103,6 +104,10 @@ def test_vllm_managed_launch_spec_builds_command_and_logs(tmp_path) -> None:
     assert spec.command[spec.command.index("--quantization") + 1] == "awq"
     assert spec.stdout_log_path == str(tmp_path / "logs" / config.id / "stdout.log")
     assert spec.stderr_log_path == str(tmp_path / "logs" / config.id / "stderr.log")
+
+
+def test_memory_estimate_alone_does_not_mark_candidate_conservative() -> None:
+    assert _is_conservative_candidate(_config(max_batch_size=8, estimated_vram_mb=1024)) is False
 
 
 def test_vllm_launch_prefers_executable_beside_active_python(tmp_path, monkeypatch) -> None:

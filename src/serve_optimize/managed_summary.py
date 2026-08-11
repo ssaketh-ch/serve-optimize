@@ -194,8 +194,6 @@ def metrics_summary(recommendation: RecommendationResult) -> dict[str, Any]:
     measured = recommendation.measured_metrics or {}
     telemetry = recommendation.telemetry_metrics or {}
     output_throughput = _optional_float(measured.get("output_tokens_s"))
-    if output_throughput is None:
-        output_throughput = _optional_float(measured.get("total_tokens_s"))
     return {
         "throughput_tokens_per_sec": output_throughput,
         "output_tokens_per_sec": output_throughput,
@@ -511,7 +509,6 @@ def _baseline_metric(row: dict[str, Any], field: str) -> float | None:
     if value is not None:
         return value
     fallback_fields = {
-        "output_tokens_s": "total_tokens_s",
         "joules_per_generated_token": "joules_per_token",
         "tokens_per_joule": "tokens_per_second_per_watt",
     }

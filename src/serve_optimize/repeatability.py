@@ -43,22 +43,43 @@ def analyze_repeatability(run_dirs: list[Path]) -> dict[str, Any]:
     runs = [_load_run(Path(run_dir)) for run_dir in run_dirs]
     usable = [run for run in runs if run.get("usable")]
     warnings = [warning for run in runs for warning in run.get("warnings", [])]
+    comparison_identity_rows = [_dict(run.get("comparison_identity")) for run in usable]
+    comparison_identities = {stable_hash(identity) for identity in comparison_identity_rows}
+    missing_comparison_identity_count = sum(
+        not _complete_comparison_identity(identity)
+        for identity in comparison_identity_rows
+    )
+    comparable = len(usable) < 2 or (
+        missing_comparison_identity_count == 0
+        and len(comparison_identities) == 1
+    )
+    if len(usable) >= 2 and not comparable:
+        warnings.append(
+            "Repeatability was not calculated because the runs lack complete comparison identity metadata or do not share the same backend version, model, goal, and workload profile."
+        )
     selected_config_fingerprints = [run["selected_config_fingerprint"] for run in usable if run.get("selected_config_fingerprint")]
     selected_candidate_ids = [run["selected_candidate_id"] for run in usable if run.get("selected_candidate_id")]
     selected_commands = [run["selected_command"] for run in usable if run.get("selected_command")]
-    top3_overlaps = _pairwise_overlaps([set(run.get("top3_fingerprints", [])) for run in usable])
-    pareto_overlaps = _pairwise_overlaps([set(run.get("pareto_fingerprints", [])) for run in usable])
+    top3_overlaps = _pairwise_overlaps([set(run.get("top3_fingerprints", [])) for run in usable]) if comparable else []
+    pareto_overlaps = _pairwise_overlaps([set(run.get("pareto_fingerprints", [])) for run in usable]) if comparable else []
     evidence_reuse = _evidence_reuse_summary(usable)
     return {
         "schema_version": REPEATABILITY_SCHEMA_VERSION,
         "run_count": len(runs),
         "usable_run_count": len(usable),
         "skipped_run_count": len(runs) - len(usable),
-        "stability_classification": _stability_classification(usable, top3_overlaps, pareto_overlaps),
+        "stability_classification": (
+            _stability_classification(usable, top3_overlaps, pareto_overlaps)
+            if comparable
+            else "incomparable_runs"
+        ),
+        "comparison_identity_count": len(comparison_identities),
+        "missing_comparison_identity_count": missing_comparison_identity_count,
+        "runs_are_comparable": comparable,
         "selected_command_stability": _value_stability(selected_commands),
         "selected_canonical_config_stability": _value_stability(selected_config_fingerprints),
         "selected_candidate_id_stability": _value_stability(selected_candidate_ids),
-        "selected_metric_variation": _metric_variation(usable),
+        "selected_metric_variation": _metric_variation(usable if comparable else []),
         "top3_overlap": _overlap_summary(top3_overlaps),
         "pareto_frontier_overlap": _overlap_summary(pareto_overlaps),
         "evidence_reuse": evidence_reuse,
@@ -66,6 +87,7 @@ def analyze_repeatability(run_dirs: list[Path]) -> dict[str, Any]:
         "warnings": warnings,
         "notes": [
             "Repeatability compares managed run artifacts and selected canonical configs.",
+            "Comparable runs must share backend version, model, goal, and workload profile.",
             "It does not prove exhaustive search coverage.",
         ],
     }
@@ -130,6 +152,11 @@ def _load_run(run_dir: Path) -> dict[str, Any]:
     selected = _dict(summary.get("selected"))
     selected_config = _selected_config_payload(selected)
     candidate_table = _list(recommendation.get("candidate_table"))
+    candidates_by_id = {
+        str(row.get("candidate_id")): row
+        for row in candidate_table
+        if isinstance(row, dict) and row.get("candidate_id") is not None
+    }
     run = {
         "run_dir": str(run_dir),
         "usable": bool(summary and recommendation and selected_config),
@@ -140,7 +167,11 @@ def _load_run(run_dir: Path) -> dict[str, Any]:
         "selected_config_fingerprint": stable_hash({"selected_config": selected_config}) if selected_config else None,
         "metrics": _dict(summary.get("metrics")),
         "top3_fingerprints": [_candidate_fingerprint(row) for row in candidate_table[:3]],
-        "pareto_fingerprints": [_candidate_fingerprint(row) for row in _list(pareto)],
+        "pareto_fingerprints": [
+            _candidate_fingerprint(candidates_by_id.get(str(_dict(row).get("candidate_id")), row))
+            for row in _list(pareto)
+        ],
+        "comparison_identity": _comparison_identity(managed_run, selected),
         "managed_run": {
             "cold_launch_count": _first_int(managed_run, "cold_launch_count", "cold_launches"),
             "workload_measurement_count": _first_int(managed_run, "workload_measurement_count", "workload_measurements"),
@@ -160,6 +191,27 @@ def _candidate_fingerprint(row: object) -> str:
     row = _dict(row)
     payload = {field: row.get(field) for field in CONFIG_FIELDS if row.get(field) is not None}
     return stable_hash({"candidate": payload})
+
+
+def _comparison_identity(managed_run: dict[str, Any], selected: dict[str, Any]) -> dict[str, Any]:
+    runtime = _dict(managed_run.get("runtime_environment"))
+    return {
+        "backend": managed_run.get("backend") or selected.get("backend"),
+        "backend_version": runtime.get("backend_version"),
+        "model": managed_run.get("model") or selected.get("model"),
+        "goal": managed_run.get("goal"),
+        "workload_profile": _dict(managed_run.get("workload_profile")),
+    }
+
+
+def _complete_comparison_identity(identity: dict[str, Any]) -> bool:
+    return bool(
+        identity.get("backend")
+        and identity.get("backend_version")
+        and identity.get("model")
+        and identity.get("goal")
+        and identity.get("workload_profile")
+    )
 
 
 def _read_json(path: Path, warnings: list[str]) -> Any:

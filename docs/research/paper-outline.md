@@ -9,9 +9,11 @@ Working title:
 ## Evidence State
 
 * RTX PRO 6000: completed tiny model managed evidence for vLLM and SGLang, plus a vLLM power gate.
-* H200: broader staged collection across backends, models, workloads, and objectives. Results remain pending until the campaign and post run audit complete.
+* H200: closure job 319 completed 46 managed runs across vLLM and SGLang. The raw audit passed 397 trial summaries and 139352 request records with zero failed checks. Twelve performance cells did not establish server saturation and are excluded from throughput claims.
 * Cross platform claim: two hardware classes are tested. Direct performance or energy deltas require matched software and workload cells.
 * Search quality claim: pending equal budget baselines and ablations.
+* Repeatability claim: pending matched repeated cells. The 46 H200 cells are heterogeneous and cannot be treated as replications.
+* RTX PRO 6000 publication claim: historical recommendation artifacts remain operational evidence, but the trial records predate six current acceptance fields and are excluded from current inferential tables.
 
 ## Abstract
 

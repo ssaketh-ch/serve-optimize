@@ -58,6 +58,10 @@ CSV_COLUMNS = (
     "warning_count",
 )
 MEASURED_SOURCES = {"managed_measured", "managed_evidence_hit"}
+SATURATED_LOAD_CLASSIFICATIONS = {
+    "load_sufficient_gpu_saturated",
+    "load_sufficient_throughput_plateau",
+}
 
 
 def analyze_validation_campaign(run_dirs: list[Path]) -> dict[str, Any]:
@@ -280,6 +284,14 @@ def _recommendation_quality(runs: list[dict[str, Any]]) -> dict[str, Any]:
             reviews.append(f"{label}: selected candidate is not marked best among evaluated candidates.")
         if run.get("selected_is_pareto_optimal") is False:
             reviews.append(f"{label}: selected candidate is not marked Pareto optimal.")
+        if (
+            run.get("goal") in {"performance", "throughput"}
+            and run.get("load_sufficiency_classification") not in SATURATED_LOAD_CLASSIFICATIONS
+        ):
+            reviews.append(
+                f"{label}: throughput recommendation lacks server saturation evidence "
+                f"({run.get('load_sufficiency_classification') or 'missing'})."
+            )
         ratio = _optional_float(run.get("selected_score_ratio_to_best"))
         if ratio is not None:
             ratios.append(ratio)
@@ -424,7 +436,7 @@ def _workload_coverage(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "profile_names": sorted(counts),
         "profile_counts": counts,
         "default_profile_count": counts.get("default", 0),
-        "repeated_prefix_profile_count": counts.get("repeated_prefix", 0),
+        "repeated_prefix_profile_count": counts.get("repeated-prefix", 0) + counts.get("repeated_prefix", 0),
         "prefix_caching_without_reuse_runs": prefix_default,
         "classification": "needs_review" if prefix_default or counts.get("missing") else "pass",
     }

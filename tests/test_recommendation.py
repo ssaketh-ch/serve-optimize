@@ -490,6 +490,63 @@ def test_throughput_goal_treats_partial_request_failures_as_hard_penalty() -> No
     assert "nonzero_failed_request_rate" in flaky.disqualifiers
 
 
+def test_efficiency_goal_treats_partial_request_failures_as_hard_penalty() -> None:
+    inputs = [
+        _input(
+            "flaky-efficient",
+            total_tokens_s=100.0,
+            p95_latency_s=0.5,
+            successful_requests=9,
+            failed_requests=1,
+            total_requests=10,
+            tokens_per_joule=100.0,
+            joules_per_generated_token=0.01,
+            telemetry_quality="good",
+        ),
+        _input(
+            "reliable",
+            total_tokens_s=100.0,
+            p95_latency_s=0.6,
+            tokens_per_joule=10.0,
+            joules_per_generated_token=0.1,
+            telemetry_quality="good",
+        ),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.EFFICIENCY)
+
+    flaky = next(score for score in scores if score.candidate_id == "flaky-efficient")
+    assert result.recommended_candidate_id == "reliable"
+    assert "nonzero_failed_request_rate" in flaky.disqualifiers
+
+
+def test_efficiency_goal_requires_positive_measured_throughput() -> None:
+    inputs = [
+        _input(
+            "zero-throughput",
+            total_tokens_s=0.0,
+            p95_latency_s=0.5,
+            tokens_per_joule=100.0,
+            joules_per_generated_token=0.01,
+            telemetry_quality="good",
+        ),
+        _input(
+            "useful-throughput",
+            total_tokens_s=10.0,
+            p95_latency_s=0.6,
+            tokens_per_joule=10.0,
+            joules_per_generated_token=0.1,
+            telemetry_quality="good",
+        ),
+    ]
+
+    scores, result = score_recommendation_inputs(inputs, goal=RecommendationGoal.EFFICIENCY)
+
+    zero_throughput = next(score for score in scores if score.candidate_id == "zero-throughput")
+    assert result.recommended_candidate_id == "useful-throughput"
+    assert "missing_throughput_metric" in zero_throughput.disqualifiers
+
+
 def test_power_from_ineligible_candidate_does_not_change_balanced_weights() -> None:
     inputs = [
         _input("valid", total_tokens_s=100.0, p95_latency_s=1.0),

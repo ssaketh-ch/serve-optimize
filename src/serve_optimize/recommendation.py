@@ -1854,10 +1854,14 @@ def _disqualifiers(item: RecommendationInput, goal: RecommendationGoal, has_any_
         disqualifiers.append("no_successful_requests")
     if _invalid_token_counts(item):
         disqualifiers.append("invalid_token_counts")
-    if goal == RecommendationGoal.THROUGHPUT and _failed_request_count(item) > 0:
+    if goal in {RecommendationGoal.THROUGHPUT, RecommendationGoal.EFFICIENCY} and _failed_request_count(item) > 0:
         disqualifiers.append("nonzero_failed_request_rate")
     throughput = _throughput_value(item)
-    if goal in {RecommendationGoal.THROUGHPUT, RecommendationGoal.BALANCED} and (throughput is None or throughput <= 0):
+    if goal in {
+        RecommendationGoal.THROUGHPUT,
+        RecommendationGoal.BALANCED,
+        RecommendationGoal.EFFICIENCY,
+    } and (throughput is None or throughput <= 0):
         disqualifiers.append("missing_throughput_metric")
     if goal == RecommendationGoal.LATENCY and _latency_value(item) is None:
         disqualifiers.append("missing_latency_metric")

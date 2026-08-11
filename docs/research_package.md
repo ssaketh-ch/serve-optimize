@@ -46,6 +46,8 @@ The package records:
 
 Recommendation claims remain scoped to best among evaluated candidates.
 
+Campaign repeatability is reported only when supplied runs share backend version, model, goal, and workload profile. A heterogeneous matrix is coverage evidence, not repeatability evidence.
+
 ## Raw Artifact Archive
 
 For a paper release, archive every referenced managed run directory separately. Preserve request records, power samples, lifecycle events, backend logs, launch specifications, capability reports, failure records, summaries, and runtime metadata. Generate checksums for the archive and verify them before publication.

@@ -151,6 +151,32 @@ def test_validation_campaign_repeatability_unstable(tmp_path) -> None:
     assert payload["repeatability"]["stability_classification"] == "unstable"
 
 
+def test_validation_campaign_throughput_requires_saturation_evidence(tmp_path) -> None:
+    run = _write_run(tmp_path / "run1", selected_candidate_id="cfg-a")
+    managed_run_path = run / "managed_run.json"
+    managed_run = json.loads(managed_run_path.read_text(encoding="utf-8"))
+    managed_run["goal"] = "performance"
+    managed_run["load_sufficiency"] = {"classification": "not_saturated"}
+    _write_json(managed_run_path, managed_run)
+
+    payload = analyze_validation_campaign([run])
+
+    assert payload["recommendation_quality"]["classification"] == "needs_review"
+    assert any("lacks server saturation evidence" in warning for warning in payload["warnings"])
+
+
+def test_validation_campaign_counts_repeated_prefix_profile(tmp_path) -> None:
+    run = _write_run(
+        tmp_path / "run1",
+        selected_candidate_id="cfg-a",
+        workload_profile={"profile_name": "repeated-prefix", "prefix_reuse_expected": True},
+    )
+
+    payload = analyze_validation_campaign([run])
+
+    assert payload["workload_coverage"]["repeated_prefix_profile_count"] == 1
+
+
 def test_validation_campaign_score_ratio_uses_best_candidate(tmp_path) -> None:
     run = _write_run(tmp_path / "run1", selected_candidate_id="cfg-a", selected_best=False)
 

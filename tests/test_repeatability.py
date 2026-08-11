@@ -76,6 +76,48 @@ def test_repeatability_low_overlap_is_unstable(tmp_path) -> None:
     assert payload["stability_classification"] == "unstable"
 
 
+def test_repeatability_rejects_incomparable_runs(tmp_path) -> None:
+    run1 = _write_run(tmp_path / "run1", selected_candidate_id="a")
+    run2 = _write_run(tmp_path / "run2", selected_candidate_id="b")
+    for run, model in ((run1, "model-a"), (run2, "model-b")):
+        managed_run_path = run / "managed_run.json"
+        managed_run = json.loads(managed_run_path.read_text(encoding="utf-8"))
+        managed_run.update({"backend": "vllm", "model": model, "goal": "balanced"})
+        _write_json(managed_run_path, managed_run)
+
+    payload = analyze_repeatability([run1, run2])
+
+    assert payload["stability_classification"] == "incomparable_runs"
+    assert payload["runs_are_comparable"] is False
+    assert payload["top3_overlap"]["pair_count"] == 0
+
+
+def test_repeatability_rejects_missing_comparison_identity(tmp_path) -> None:
+    run1 = _write_run(tmp_path / "run1", selected_candidate_id="a")
+    run2 = _write_run(tmp_path / "run2", selected_candidate_id="b")
+    managed_run_path = run2 / "managed_run.json"
+    managed_run = json.loads(managed_run_path.read_text(encoding="utf-8"))
+    managed_run["runtime_environment"].pop("backend_version")
+    _write_json(managed_run_path, managed_run)
+
+    payload = analyze_repeatability([run1, run2])
+
+    assert payload["stability_classification"] == "incomparable_runs"
+    assert payload["missing_comparison_identity_count"] == 1
+    assert payload["runs_are_comparable"] is False
+
+
+def test_repeatability_uses_candidate_table_for_compact_pareto_rows(tmp_path) -> None:
+    run1 = _write_run(tmp_path / "run1", selected_candidate_id="a")
+    run2 = _write_run(tmp_path / "run2", selected_candidate_id="b")
+    _write_json(run1 / "managed_pareto_frontier.json", [{"candidate_id": "a", "score": 1.0}])
+    _write_json(run2 / "managed_pareto_frontier.json", [{"candidate_id": "b", "score": 1.0}])
+
+    payload = analyze_repeatability([run1, run2])
+
+    assert payload["pareto_frontier_overlap"]["mean"] == 1.0
+
+
 def test_repeatability_metric_variation_math(tmp_path) -> None:
     run1 = _write_run(tmp_path / "run1", selected_candidate_id="a", metrics={"throughput_tokens_per_sec": 100.0})
     run2 = _write_run(tmp_path / "run2", selected_candidate_id="a", metrics={"throughput_tokens_per_sec": 110.0})
@@ -203,6 +245,15 @@ def _write_run(
             "cold_launch_count": cold,
             "workload_measurement_count": measurements,
             "evidence_hit_candidate_count": hits,
+        }
+    )
+    managed_run.update(
+        {
+            "backend": "vllm",
+            "model": "model-path",
+            "goal": "balanced",
+            "runtime_environment": {"backend_version": "test-version"},
+            "workload_profile": {"profile_name": "short"},
         }
     )
     _write_json(run_dir / "managed_run.json", managed_run)

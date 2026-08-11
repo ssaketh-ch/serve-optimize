@@ -40,7 +40,9 @@ A run is publishable only when its raw artifacts establish all applicable checks
 
 Serve Optimize has measured both RTX PRO 6000 and H200 systems. They are separate evidence strata, not a single pooled platform result.
 
-The completed RTX PRO 6000 evidence includes tiny model managed runs for vLLM and SGLang and a vLLM power gate. The H200 campaign expands model, workload, objective, and backend coverage.
+The completed RTX PRO 6000 evidence includes tiny model managed runs for vLLM and SGLang and a vLLM power gate. These historical records predate the current prompt distribution, output distribution, measurement duration, warmup ordering, p99 TTFT, and p99 TPOT acceptance fields, so they demonstrate the workflow but are not part of current inferential tables.
+
+H200 closure job 319 completed 46 managed runs across vLLM and SGLang. Its raw audit covers 397 trial summaries and 139352 request records with zero failed checks. Twelve performance cells are usable artifacts but are excluded from throughput conclusions because their load sufficiency classification is `not_saturated`.
 
 Results across the two platforms may be compared directly only when model revision, backend version, workload, candidate policy, repetition policy, and measurement controls match. Otherwise, report each platform independently as evidence that the workflow operates across distinct hardware classes. MIG power remains board scoped unless the telemetry provider establishes instance attribution.
 
@@ -103,4 +105,5 @@ Both planners write commands and provenance without launching a backend or creat
 * Report unsupported, failed, incomplete, and provisional candidates.
 * Report confidence intervals, trial counts, and telemetry limitations.
 * Use `best among evaluated candidates` wording.
+* Compute repeatability only across runs with matching backend version, model, goal, and workload profile.
 * Do not claim prefill or decode energy, power cap optimization, exhaustive coverage, or search superiority before the required evidence exists.

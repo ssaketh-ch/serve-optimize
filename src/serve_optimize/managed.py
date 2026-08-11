@@ -4194,7 +4194,11 @@ def _is_backend_default_control(config: ServingConfig) -> bool:
 
 def _is_conservative_candidate(config: ServingConfig) -> bool:
     extra = config.extra or {}
-    return bool(extra.get("baseline") is True or config.max_batch_size <= 1 or (config.estimated_vram_mb or 0) > 0)
+    return bool(
+        extra.get("baseline") is True
+        or extra.get("candidate_source") == "available_memory_conservative"
+        or config.max_batch_size <= 1
+    )
 
 
 def _profile_has_request_shape(profile: WorkloadProfile) -> bool:
