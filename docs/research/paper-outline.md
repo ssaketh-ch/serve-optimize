@@ -84,6 +84,7 @@ Report RTX PRO 6000 and H200 as distinct platform strata. Include exact GPU iden
 * grid search with equal trial budget
 * generic Bayesian tuning with equal trial budget
 * native backend benchmark cross check on a representative subset
+* GuideLLM OpenAI HTTP cross check on a representative subset
 
 ### Ablations
 

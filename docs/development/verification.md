@@ -40,6 +40,21 @@ bash scripts/verify_full.sh
 
 ## Publication Completion Audit
 
+Recorded on 2026-08-14:
+
+* aligned the final campaign on vLLM 0.24.0 and GuideLLM 0.7.3
+* restricted resumed campaign postprocessing to explicitly recorded successful managed runs
+* validated GuideLLM raw request accounting, complete concurrency coverage, and p50, p95, and p99 latency, TTFT, and TPOT metrics
+* ran GuideLLM 0.7.3 against its live mock endpoint at all five campaign concurrency levels and passed the artifact audit
+* made equal budget random, grid, Bayesian, and candidate order replay use the common probe rung rather than unequal staged measurements
+* kept unsupported counterfactual ablations explicit instead of fabricating unmeasured candidates
+* checked all 44 Markdown files with zero missing local links
+* focused research checks passed with 12 tests
+* full verification passed with 496 tests and 1 skipped test
+* Ruff, wheel build, packaged command smoke, and all 73 release checks passed
+* the core dependency audit found no known vulnerabilities
+* the high severity static security scan passed
+
 Recorded on 2026-08-11:
 
 * reconciled all 46 managed run directories from H200 closure job 319 and audited 397 trial summaries plus 139352 request records with zero failed checks

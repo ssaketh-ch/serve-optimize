@@ -87,7 +87,7 @@ serve-optimize optimize /path/to/model \
   --dry-run
 ```
 
-Built in workload profiles are `default`, `short`, `medium`, `long`, `decode-heavy`, `repeated-prefix`, and `mixed`. JSON manifests can be passed with `--workload-manifest`.
+Built in workload profiles are `default`, `short`, `medium`, `long`, `long-prefill`, `decode-heavy`, `code-generation`, `repeated-prefix`, and `mixed`. JSON manifests can be passed with `--workload-manifest`.
 
 For measurement quality, add warmup, steady state, and idle baseline controls:
 

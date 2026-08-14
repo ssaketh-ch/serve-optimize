@@ -14,6 +14,8 @@ serve-optimize research-package --help
 
 Treat files in this directory as templates. Copy and adapt them outside the repository when running host specific experiments.
 
-The H200 Slurm templates live under `scripts/slurm`. Adjust the partition and GPU resource directives for the target cluster. Set `SERVE_OPTIMIZE_ROOT` when the submission directory is not the repository root. The Stage 1 runner also requires `SERVE_OPTIMIZE_PLAN_ROOT` and `SERVE_OPTIMIZE_RUN_ROOT`; the closure runner requires `SERVE_OPTIMIZE_CLOSURE_ROOT`. Backend environment paths may be overridden with `SERVE_OPTIMIZE_VLLM_ENV` and `SERVE_OPTIMIZE_SGLANG_ENV`.
+The H200 Slurm templates live under `scripts/slurm`. Adjust the partition and GPU resource directives for the target cluster. Set `SERVE_OPTIMIZE_ROOT` when the submission directory is not the repository root. The Stage 1 runner also requires `SERVE_OPTIMIZE_PLAN_ROOT` and `SERVE_OPTIMIZE_RUN_ROOT`; the closure runner requires `SERVE_OPTIMIZE_CLOSURE_ROOT`.
+
+The research closure runner additionally requires `SERVE_OPTIMIZE_SOURCE_TARBALL` and `SERVE_OPTIMIZE_SOURCE_SHA256`. Backend and benchmark environment paths may be overridden with `SERVE_OPTIMIZE_VLLM_ENV`, `SERVE_OPTIMIZE_SGLANG_ENV`, and `SERVE_OPTIMIZE_GUIDELLM_ENV`. Use `SERVE_OPTIMIZE_MODEL_SCOPE` and `SERVE_OPTIMIZE_BACKEND_SCOPE` to split a campaign without changing its measurement protocol.
 
 Generated plans and raw results are external experiment artifacts. Preserve them with the source revision, environment capture, and checksums used for the run.

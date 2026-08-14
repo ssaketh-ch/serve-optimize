@@ -46,6 +46,10 @@ H200 closure job 319 completed 46 managed runs across vLLM and SGLang. Its raw a
 
 Results across the two platforms may be compared directly only when model revision, backend version, workload, candidate policy, repetition policy, and measurement controls match. Otherwise, report each platform independently as evidence that the workflow operates across distinct hardware classes. MIG power remains board scoped unless the telemetry provider establishes instance attribution.
 
+GuideLLM 0.7.3 is the independent OpenAI HTTP benchmark client for the final cross checks. Use the same model revision, synthetic token shape, static seed, concurrency sweep, and measurement duration as the Serve Optimize client. Preserve its raw request records and complete p50, p95, and p99 latency, TTFT, and TPOT metrics. GuideLLM validates the measurement client; it is not a configuration search baseline.
+
+GuideLLM duration bounded runs cancel the final in flight wave at the measurement boundary. Treat at most one terminal incomplete request per configured stream as boundary accounting, report it separately, and continue to reject any errored request or larger incomplete count.
+
 ## Workloads
 
 Implemented workload profiles include:
@@ -74,6 +78,8 @@ Every reported matrix cell should include a backend default control and a conser
 * native vLLM or SGLang benchmark results on a representative subset
 
 The current artifacts do not yet establish superiority over all of these baselines. That claim remains pending.
+
+Equal budget replay must use the common probe rung measured for every candidate. Do not mix probe, measure, and validation rung scores. Label the Serve Optimize series as a candidate order replay, keep the oracle post hoc, and retain the fixed measured pool limitation in every output.
 
 ## Recommendation Ablations
 

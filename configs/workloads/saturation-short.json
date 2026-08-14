@@ -1,0 +1,25 @@
+{
+  "concurrency": 32,
+  "dataset": "synthetic-short-saturation",
+  "dataset_license": "generated synthetic data",
+  "dataset_source": "Serve Optimize deterministic synthetic generator",
+  "input_tokens": 128,
+  "max_new_tokens": 64,
+  "notes": [
+    "Pressure sweep uses concurrency 64, 128, and 256."
+  ],
+  "num_requests": 512,
+  "output_tokens": 64,
+  "profile_name": "short",
+  "synthetic_or_real": "synthetic",
+  "token_distribution": {
+    "input_tokens": {
+      "p50": 128,
+      "p95": 128
+    },
+    "output_tokens": {
+      "p50": 64,
+      "p95": 64
+    }
+  }
+}

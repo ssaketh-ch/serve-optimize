@@ -112,6 +112,12 @@ Sources:
 
 ## Benchmark Clients
 
+### GuideLLM
+
+GuideLLM is an independent OpenAI compatible inference benchmark client. The final campaign pins version 0.7.3 and uses its concurrent profile to cross check request throughput, output token throughput, request latency, TTFT, and TPOT across the same fixed concurrency sweep used by Serve Optimize.
+
+Source: https://github.com/vllm-project/guidellm
+
 ### NVIDIA GenAI-Perf
 
 Production-grade client-side benchmark tool for LLM endpoints. It measures TTFT, inter-token latency, output token throughput, and request throughput, and supports OpenAI-compatible APIs.

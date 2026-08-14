@@ -7,6 +7,9 @@ Repository helper scripts.
 * `verify_install_profile.sh`: creates and validates a fresh install profile.
 * `env_base_runtime.sh`: optional CUDA and compiler setup for source builds.
 * `plot_pareto.py`: optional plotting helper for generated Pareto artifacts.
+* `audit_guidellm_results.py`: validates GuideLLM 0.7.3 request, metric, percentile, and concurrency coverage artifacts.
+* `analyze_recommendation_search.py`: replays equal budget searches and supported recommendation ablations.
+* `slurm/run_research_closure_h200.sbatch`: resumable bounded research closure campaign with model and backend scopes.
 
 Run scripts from the repository root.
 

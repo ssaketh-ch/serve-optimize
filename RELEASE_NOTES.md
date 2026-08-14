@@ -21,13 +21,13 @@ Highlights:
 
 Validated backend stacks:
 
-* vLLM `0.10.0`
-* SGLang `0.5.10.post1`
+* vLLM `0.24.0`
+* SGLang `0.5.13.post1`
 
 Known limits:
 
 * TensorRT LLM Managed Mode is not implemented.
-* Latest vLLM is not validated.
+* Backend versions newer than the validated profiles require fresh compatibility checks.
 * vLLM and SGLang require separate environments.
 * New hardware requires fresh runtime fingerprinted evidence before exact reuse.
 * Prefill and decode energy attribution is not implemented.
