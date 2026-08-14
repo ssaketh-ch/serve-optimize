@@ -17,10 +17,12 @@ SOURCE_TARBALL="${SERVE_OPTIMIZE_SOURCE_TARBALL:?SERVE_OPTIMIZE_SOURCE_TARBALL i
 SOURCE_SHA256="${SERVE_OPTIMIZE_SOURCE_SHA256:?SERVE_OPTIMIZE_SOURCE_SHA256 is required}"
 VLLM_VERSION="0.27.1"
 SGLANG_VERSION="0.5.17"
-VLLM_ENV="${SERVE_OPTIMIZE_VLLM_ENV:-/home/saketh-msc/serve-optimize-envs/vllm-${VLLM_VERSION}}"
-SGLANG_ENV="${SERVE_OPTIMIZE_SGLANG_ENV:-/home/saketh-msc/serve-optimize-envs/sglang-${SGLANG_VERSION}}"
+BACKEND_PYTHON_VERSION="3.12.13"
+VLLM_ENV="${SERVE_OPTIMIZE_VLLM_ENV:-/home/saketh-msc/serve-optimize-envs/vllm-${VLLM_VERSION}-py312}"
+SGLANG_ENV="${SERVE_OPTIMIZE_SGLANG_ENV:-/home/saketh-msc/serve-optimize-envs/sglang-${SGLANG_VERSION}-py312}"
 GUIDELLM_VERSION="0.7.3"
-GUIDELLM_ENV="${SERVE_OPTIMIZE_GUIDELLM_ENV:-/home/saketh-msc/serve-optimize-envs/guidellm-${GUIDELLM_VERSION}}"
+GUIDELLM_PYTHON_VERSION="3.10.12"
+GUIDELLM_ENV="${SERVE_OPTIMIZE_GUIDELLM_ENV:-/home/saketh-msc/serve-optimize-envs/guidellm-${GUIDELLM_VERSION}-paper}"
 HISTORICAL_ROOT="${SERVE_OPTIMIZE_HISTORICAL_ROOT:-/home/saketh-msc/serve-optimize/results/benchmark-matrix/closure-20260809T041109}"
 MODEL_SCOPE="${SERVE_OPTIMIZE_MODEL_SCOPE:-all}"
 BACKEND_SCOPE="${SERVE_OPTIMIZE_BACKEND_SCOPE:-all}"
@@ -223,8 +225,11 @@ mark telemetry_scope "${TELEMETRY_SCOPE}"
     echo "energy_limit=${ENERGY_LIMIT}"
     nvidia-smi
     [[ -n "${SLURM_JOB_ID:-}" ]] && scontrol show job "${JOB_ID}"
+    "${VLLM_ENV}/bin/python" --version
     "${VLLM_ENV}/bin/python" -c 'import torch, vllm; print(f"vllm={vllm.__version__} torch={torch.__version__} cuda={torch.version.cuda}")'
+    backend_enabled sglang && "${SGLANG_ENV}/bin/python" --version
     backend_enabled sglang && "${SGLANG_ENV}/bin/python" -c 'import sglang, torch; print(f"sglang={sglang.__version__} torch={torch.__version__} cuda={torch.version.cuda}")'
+    "${GUIDELLM_ENV}/bin/python" --version
     "${GUIDELLM_ENV}/bin/guidellm" --version
 } >"${CLOSURE_ROOT}/environment/platform.txt" 2>&1
 "${UV_BIN}" pip freeze --python "${VLLM_ENV}/bin/python" >"${CLOSURE_ROOT}/environment/vllm-freeze.txt"
@@ -255,10 +260,15 @@ for expected in "${expected_models[@]}"; do
 done
 nvidia-smi >/dev/null || preflight_status=1
 [[ -x "${CUDA_HOME}/bin/nvcc" ]] || preflight_status=1
+[[ "$("${VLLM_ENV}/bin/python" -c 'import platform; print(platform.python_version())')" == "${BACKEND_PYTHON_VERSION}" ]] || preflight_status=1
+[[ "$("${GUIDELLM_ENV}/bin/python" -c 'import platform; print(platform.python_version())')" == "${GUIDELLM_PYTHON_VERSION}" ]] || preflight_status=1
 [[ "$("${GUIDELLM_ENV}/bin/guidellm" --version 2>/dev/null | tail -1)" == "guidellm version: ${GUIDELLM_VERSION}" ]] || preflight_status=1
 [[ "$("${VLLM_ENV}/bin/python" -c 'import vllm; print(vllm.__version__)')" == "${VLLM_VERSION}" ]] || preflight_status=1
+"${VLLM_ENV}/bin/serve-optimize" doctor --profile vllm >"${CLOSURE_ROOT}/environment/vllm-doctor.txt" || preflight_status=1
 if backend_enabled sglang; then
+    [[ "$("${SGLANG_ENV}/bin/python" -c 'import platform; print(platform.python_version())')" == "${BACKEND_PYTHON_VERSION}" ]] || preflight_status=1
     [[ "$("${SGLANG_ENV}/bin/python" -c 'import sglang; print(sglang.__version__)' 2>/dev/null | tail -1)" == "${SGLANG_VERSION}" ]] || preflight_status=1
+    "${SGLANG_ENV}/bin/serve-optimize" doctor --profile sglang >"${CLOSURE_ROOT}/environment/sglang-doctor.txt" || preflight_status=1
 fi
 "${UV_BIN}" pip check --python "${VLLM_ENV}/bin/python" >/dev/null || preflight_status=1
 if backend_enabled sglang; then

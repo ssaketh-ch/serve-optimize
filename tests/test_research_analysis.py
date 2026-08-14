@@ -191,3 +191,8 @@ def test_research_runner_postprocesses_only_recorded_successful_runs() -> None:
     assert '--goal throughput' in runner
     assert 'sha256sum "${CUDA_HOME}/bin/nvcc"' in runner
     assert '[[ -x "${CUDA_HOME}/bin/nvcc" ]] || preflight_status=1' in runner
+    assert 'BACKEND_PYTHON_VERSION="3.12.13"' in runner
+    assert 'GUIDELLM_PYTHON_VERSION="3.10.12"' in runner
+    assert 'platform.python_version()' in runner
+    assert 'doctor --profile vllm' in runner
+    assert 'doctor --profile sglang' in runner

@@ -25,6 +25,7 @@ BACKEND_MODULES = {
 }
 
 INSTALLATION_PROFILES = ("core", "telemetry", "vllm", "sglang")
+BACKEND_PROFILE_PYTHON = (3, 12, 13)
 
 PROFILE_DISTRIBUTIONS = {
     "core": (
@@ -42,6 +43,7 @@ PROFILE_DISTRIBUTIONS = {
         ("transformers", "5.15.0"),
         ("huggingface-hub", "1.27.0"),
         ("nvidia-ml-py", "13.610.43"),
+        ("setuptools", "80.10.2"),
     ),
     "sglang": (
         ("serve-optimize", "0.1.0"),
@@ -53,6 +55,7 @@ PROFILE_DISTRIBUTIONS = {
         ("transformers", "5.12.1"),
         ("huggingface-hub", "1.27.0"),
         ("nvidia-ml-py", "13.610.43"),
+        ("setuptools", "81.0.0"),
     ),
 }
 
@@ -77,13 +80,24 @@ def check_installation_profile(profile: str) -> list[BackendStatus]:
     if profile not in INSTALLATION_PROFILES:
         raise ValueError(f"Unknown installation profile '{profile}'.")
 
+    backend_profile = profile in {"vllm", "sglang"}
+    python_available = (
+        sys.version_info[:3] == BACKEND_PROFILE_PYTHON
+        if backend_profile
+        else sys.version_info >= (3, 10)
+    )
+    python_requirement = (
+        "Python 3.12.13 is required for validated backend profiles."
+        if backend_profile
+        else "Python 3.10 or newer is required."
+    )
     statuses = [
         BackendStatus(
             name="python",
-            available=sys.version_info >= (3, 10),
+            available=python_available,
             version=".".join(str(item) for item in sys.version_info[:3]),
             command=sys.executable,
-            reason=None if sys.version_info >= (3, 10) else "Python 3.10 or newer is required.",
+            reason=None if python_available else python_requirement,
         )
     ]
     statuses.extend(

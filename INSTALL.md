@@ -13,7 +13,7 @@ The practical rule is simple:
 ## Prerequisites
 
 * Linux with an NVIDIA driver compatible with the selected CUDA wheels
-* Python 3.10 or newer
+* Python 3.10 or newer for core tools; Python 3.12.13 for validated backend profiles
 * [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 * An NVIDIA GPU supported by the selected backend
 * A C compiler and Python development headers for runtime kernel launchers
@@ -46,7 +46,7 @@ Next create the backend environments.
 Create a fresh vLLM environment:
 
 ```bash
-uv venv --python python3 .venv-vllm
+uv venv --python 3.12.13 .venv-vllm
 uv pip install \
   --python .venv-vllm/bin/python \
   --torch-backend=auto \
@@ -84,18 +84,20 @@ Run a small managed dry run:
 
 Pinned and validated stack:
 
+* Python `3.12.13`
 * vLLM `0.27.1`
 * Torch `2.13.0`, with the CUDA wheel selected by `uv`
 * Transformers `5.15.0`
 * Hugging Face Hub `1.27.0`
 * NVML Python bindings `13.610.43`
+* Setuptools `80.10.2`, the newest release permitted by vLLM on Python 3.12
 
 ## SGLang Environment
 
 Create a fresh SGLang environment:
 
 ```bash
-uv venv --python python3 .venv-sglang
+uv venv --python 3.12.13 .venv-sglang
 uv pip install \
   --python .venv-sglang/bin/python \
   -r requirements/profiles/sglang.txt
@@ -131,14 +133,16 @@ Run a small managed dry run:
 
 Pinned profile:
 
+* Python `3.12.13`
 * SGLang `0.5.17`
 * FlashAttention 4 `4.0.0b19`, the newest prerelease compatible with the pinned Torch stack
 * SGLang Kernel `0.4.5`
-* CUDA Tile `1.5.0`, pinned because its newer prerelease has no CPython 3.10 x86_64 wheel
+* CUDA Tile `1.5.0`, pinned to the stable release rather than a release candidate
 * Torch `2.11.0`
 * Transformers `5.12.1`
 * Hugging Face Hub `1.27.0`
 * NVML Python bindings `13.610.43`
+* Setuptools `81.0.0`, the newest release permitted by Torch 2.11.0
 
 The SGLang wheel stack targets CUDA 13. It no longer requires the old validation host's GCC Toolset 12 path. `scripts/env_base_runtime.sh` is only an optional helper for source builds that need an explicit local CUDA toolkit.
 
@@ -155,8 +159,8 @@ Create and verify a fresh environment from the repository root:
 ```bash
 scripts/verify_install_profile.sh core /tmp/serve-optimize-core
 scripts/verify_install_profile.sh telemetry /tmp/serve-optimize-telemetry
-scripts/verify_install_profile.sh vllm /tmp/serve-optimize-vllm
-scripts/verify_install_profile.sh sglang /tmp/serve-optimize-sglang
+PYTHON="$(uv python find 3.12.13)" scripts/verify_install_profile.sh vllm /tmp/serve-optimize-vllm
+PYTHON="$(uv python find 3.12.13)" scripts/verify_install_profile.sh sglang /tmp/serve-optimize-sglang
 ```
 
 The target directory must not already exist. Each command creates an isolated environment, installs the selected profile, runs dependency checks, and runs `serve-optimize doctor --profile PROFILE`.

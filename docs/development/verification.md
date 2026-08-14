@@ -62,15 +62,18 @@ Recorded on 2026-08-14:
 Recorded on 2026-08-14:
 
 * selected the latest stable upstream releases, vLLM 0.27.1 and SGLang 0.5.17, and retained GuideLLM 0.7.3
-* created fresh Python 3.10.12 backend environments on both the RTX PRO 6000 host and the H200 host
-* matched all 200 vLLM packages exactly with freeze SHA256 `c3a3dd783dd77b0bfbbd46dc66577361b10d77d10a6590d009d4786bd8ad9e10`
-* matched all 212 SGLang packages exactly with freeze SHA256 `102774fea8be0df0c70b1b5c8b36a1d515d715bb83f1bdcf2d19a650479653c2`
+* rejected the initial Python 3.10.12 environments after the first live H200 vLLM launch failed in FlashInfer on `array.array[int]`; no measurements from that campaign were accepted
+* created fresh Python 3.12.13 backend environments from the same managed Python binary on both hosts; the binary SHA256 is `202c17d1671602a4ef1d43e9b2fdbef0769443f37bf5e51f6b603e0b2c27d9d8`
+* matched all 197 installed vLLM profile packages exactly with freeze SHA256 `bfebf4250c82dd1bb03aad74bb82f62ed296bdef0d5adc35c04f1e0a75dd6ac4`
+* matched all 207 installed SGLang profile packages exactly with freeze SHA256 `5b2045f8593ef699cfddfd5e596c750f7845f74a7a70dbca8fbdc02f37ba4394`
 * matched all 123 GuideLLM packages exactly with freeze SHA256 `37f9b273218c94118f8cf3c6b6310c8436299edbbd9650c4e1ead5e3ebd1a020`
 * matched the NVIDIA 595.71.05 driver libraries byte for byte and synchronized the complete CUDA 13.2.78 toolkit with a checksum clean rsync audit
-* passed clean dependency checks, profile doctor checks, and four candidate Managed Mode dry runs for both backends on both hosts
+* passed the previously failing FlashInfer import, clean dependency checks, profile doctor checks, and four candidate Managed Mode dry runs for both backends on both hosts
+* recorded the uncontrollable host boundary: the RTX PRO 6000 host uses Ubuntu 24.04 with Linux 6.8 and glibc 2.39, while the H200 host uses Rocky Linux 9.8 with Linux 5.14 and glibc 2.34
+* kept host platforms and GPU allocations as separate result strata instead of attributing every difference to the GPU alone
 * kept the H200 3g.71gb MIG allocation as a separate hardware allocation stratum rather than presenting it as a full H200
-* the vLLM profile audit found no known vulnerabilities; the SGLang profile advisories and incompatible or unavailable fixes are recorded in the security policy
-* full verification passed with 496 tests and 1 skipped test
+* complete resolved environment audits found one vLLM and three SGLang upstream dependency advisory boundaries; incompatible or unavailable fixes are recorded in the security policy
+* full verification passed with 497 tests and 1 skipped test
 * Ruff, shell syntax, wheel build, packaged command smoke, and all 73 release checks passed
 
 Recorded on 2026-08-11:

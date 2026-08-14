@@ -19,6 +19,7 @@ def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
         "transformers": "5.14.1",
         "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
+        "setuptools": "80.10.2",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
     monkeypatch.setattr("serve_optimize.backend_status.shutil.which", lambda command: f"/env/bin/{command}")
@@ -39,8 +40,10 @@ def test_vllm_profile_accepts_torch_cuda_local_version(monkeypatch) -> None:
         "transformers": "5.15.0",
         "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
+        "setuptools": "80.10.2",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
+    monkeypatch.setattr("serve_optimize.backend_status.sys.version_info", (3, 12, 13))
     monkeypatch.setattr("serve_optimize.backend_status.shutil.which", lambda command: f"/env/bin/{command}")
     monkeypatch.setattr("serve_optimize.backend_status._python_headers_status", lambda: _ok_status("python-headers"))
 
@@ -57,6 +60,7 @@ def test_vllm_profile_accepts_command_from_active_path(monkeypatch, tmp_path) ->
         "transformers": "5.15.0",
         "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
+        "setuptools": "80.10.2",
     }
     python = tmp_path / "profile" / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -86,8 +90,10 @@ def test_sglang_profile_checks_current_runtime_without_host_specific_toolchain(m
         "transformers": "5.12.1",
         "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
+        "setuptools": "81.0.0",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
+    monkeypatch.setattr("serve_optimize.backend_status.sys.version_info", (3, 12, 13))
     monkeypatch.setattr("serve_optimize.backend_status._sglang_runtime_status", lambda: _ok_status("sglang-runtime"))
     monkeypatch.setattr("serve_optimize.backend_status._python_headers_status", lambda: _ok_status("python-headers"))
     monkeypatch.setattr("serve_optimize.backend_status.shutil.which", lambda command: f"/usr/bin/{command}")
@@ -96,6 +102,15 @@ def test_sglang_profile_checks_current_runtime_without_host_specific_toolchain(m
     assert all(status.available for status in statuses)
     assert next(status for status in statuses if status.name == "compiler:gcc").available is True
     assert not any(status.name == "cuda-toolkit" for status in statuses)
+
+
+def test_backend_profile_rejects_unvalidated_python(monkeypatch) -> None:
+    monkeypatch.setattr("serve_optimize.backend_status.sys.version_info", (3, 10, 12))
+
+    python = check_installation_profile("vllm")[0]
+
+    assert python.available is False
+    assert python.reason == "Python 3.12.13 is required for validated backend profiles."
 
 
 def test_backend_profile_reports_missing_python_headers(monkeypatch) -> None:

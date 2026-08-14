@@ -24,8 +24,8 @@ Support claims describe the product contract, not a hypothetical roadmap. Histor
 
 | Backend | Support | Validated runtime | Notes |
 |---|---|---|---|
-| vLLM | First class | vLLM `0.27.1`, Torch `2.13.0`, Transformers `5.15.0`, Python `3.10.12` | Profile doctor, full installed capability detection, canonical rendering, lifecycle, evidence, recommendation, and live Qwen acceptance paths are validated with the pinned profile. |
-| SGLang | First class for the detected supported surface | SGLang `0.5.17`, Torch `2.11.0`, Transformers `5.12.1`, Python `3.10.12` | Runtime support is bounded by installed capability detection and is validated by profile doctor and live Qwen runs. |
+| vLLM | First class | vLLM `0.27.1`, Torch `2.13.0`, Transformers `5.15.0`, Python `3.12.13` | Profile doctor, full installed capability detection, canonical rendering, lifecycle, evidence, recommendation, and live Qwen acceptance paths are validated with the pinned profile. |
+| SGLang | First class for the detected supported surface | SGLang `0.5.17`, Torch `2.11.0`, Transformers `5.12.1`, Python `3.12.13` | Runtime support is bounded by installed capability detection and is validated by profile doctor and live Qwen runs. |
 | TensorRT LLM | Planned only | none | Not in current Managed Mode scope. No adapter, engine build lifecycle, evidence, or recommendation support exists. |
 | TGI, LMDeploy, llama.cpp, NIM | Attach only | none | They may be measured through Attach Mode when they expose a compatible endpoint. Serve Optimize does not own their Managed Mode lifecycle. |
 
