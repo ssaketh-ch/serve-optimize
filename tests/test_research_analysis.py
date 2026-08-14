@@ -188,3 +188,4 @@ def test_research_runner_postprocesses_only_recorded_successful_runs() -> None:
     assert 'find "${MARKERS}" -name \'*.managed-run\'' in runner
     assert 'find "${CLOSURE_ROOT}/managed" -name managed_run.json' not in runner
     assert 'rm -f "${MARKERS}/${step}.ok"' in runner
+    assert '--goal throughput' in runner

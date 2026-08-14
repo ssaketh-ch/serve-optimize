@@ -46,6 +46,8 @@ Recorded on 2026-08-14:
 * restricted resumed campaign postprocessing to explicitly recorded successful managed runs
 * validated GuideLLM raw request accounting, complete concurrency coverage, and p50, p95, and p99 latency, TTFT, and TPOT metrics
 * ran GuideLLM 0.7.3 against its live mock endpoint at all five campaign concurrency levels and passed the artifact audit
+* corrected the closure runner after a live H200 health check rejected a Managed Mode goal name in the Attach Mode command
+* the corrected exact Attach Mode campaign command passed dry run parsing with five valid candidates
 * made equal budget random, grid, Bayesian, and candidate order replay use the common probe rung rather than unequal staged measurements
 * kept unsupported counterfactual ablations explicit instead of fabricating unmeasured candidates
 * checked all 44 Markdown files with zero missing local links

@@ -468,7 +468,7 @@ run_crosscheck() {
         --candidate-source sweep
         --concurrency-sweep 16,32,64,128,256
         --top-k 5
-        --goal performance
+        --goal throughput
         --telemetry auto
         --workload-profile "${profile}"
         --override-num-requests 272
