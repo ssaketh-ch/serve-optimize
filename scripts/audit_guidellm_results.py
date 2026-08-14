@@ -8,6 +8,16 @@ from pathlib import Path
 
 GUIDELLM_VERSION = "0.7.3"
 EXPECTED_STREAMS = {16, 32, 64, 128, 256}
+OVERLOAD_LIMITATIONS = {
+    "successful_requests",
+    "nonzero_tokens",
+    "token_accounting",
+    "request_rate",
+    "output_token_rate",
+    "request_latency",
+    "ttft",
+    "tpot",
+}
 
 
 def _successful(metric: object) -> dict[str, object]:
@@ -31,6 +41,10 @@ def _metric(metrics: dict[str, object], name: str, field: str = "mean") -> float
 def _percentile(metrics: dict[str, object], name: str, percentile: str) -> float | None:
     values = _successful(metrics.get(name)).get("percentiles")
     return _number(values.get(percentile)) if isinstance(values, dict) else None
+
+
+def _milliseconds(value: float | None) -> float | None:
+    return value * 1000.0 if value is not None else None
 
 
 def audit_report(path: Path) -> list[dict[str, object]]:
@@ -142,9 +156,9 @@ def audit_report(path: Path) -> list[dict[str, object]]:
                 "total_tokens": total_tokens,
                 "requests_per_second": _metric(metrics, "requests_per_second"),
                 "output_tokens_per_second": _metric(metrics, "output_tokens_per_second"),
-                "p50_latency_ms": (_percentile(metrics, "request_latency", "p50") or 0.0) * 1000.0,
-                "p95_latency_ms": (_percentile(metrics, "request_latency", "p95") or 0.0) * 1000.0,
-                "p99_latency_ms": (_percentile(metrics, "request_latency", "p99") or 0.0) * 1000.0,
+                "p50_latency_ms": _milliseconds(_percentile(metrics, "request_latency", "p50")),
+                "p95_latency_ms": _milliseconds(_percentile(metrics, "request_latency", "p95")),
+                "p99_latency_ms": _milliseconds(_percentile(metrics, "request_latency", "p99")),
                 "p50_ttft_ms": _percentile(metrics, "time_to_first_token_ms", "p50"),
                 "p95_ttft_ms": _percentile(metrics, "time_to_first_token_ms", "p95"),
                 "p99_ttft_ms": _percentile(metrics, "time_to_first_token_ms", "p99"),
@@ -165,6 +179,30 @@ def audit_report(path: Path) -> list[dict[str, object]]:
         row["checks"]["stream_coverage"] = stream_coverage
         if not stream_coverage:
             row["errors"].append("stream_coverage")
+    successful_streams = [
+        int(row["streams"])
+        for row in rows
+        if isinstance(row.get("streams"), int) and int(row["measured_successful_requests"]) > 0
+    ]
+    max_successful_stream = max(successful_streams, default=None)
+    saturation_enabled = "kind=over_saturation" in str(metadata.get("guidellm_command") or "")
+    for row in rows:
+        streams = row.get("streams")
+        overload = (
+            saturation_enabled
+            and isinstance(streams, int)
+            and max_successful_stream is not None
+            and streams > max_successful_stream
+            and int(row["measured_successful_requests"]) == 0
+            and int(row["measured_errored_requests"]) == 0
+            and 0 < int(row["measured_incomplete_requests"]) <= streams
+            and bool(row["errors"])
+            and set(row["errors"]).issubset(OVERLOAD_LIMITATIONS)
+        )
+        row["classification"] = "overload" if overload else "invalid" if row["errors"] else "usable"
+        row["limitations"] = list(row["errors"]) if overload else []
+        if overload:
+            row["errors"] = []
     return rows
 
 
@@ -177,6 +215,7 @@ def audit_root(root: Path) -> dict[str, object]:
         "expected_streams": sorted(EXPECTED_STREAMS),
         "report_count": len(reports),
         "benchmark_count": len(rows),
+        "overload_benchmark_count": sum(row["classification"] == "overload" for row in rows),
         "failed_benchmark_count": sum(bool(row["errors"]) for row in rows),
         "rows": rows,
     }

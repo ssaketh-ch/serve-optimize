@@ -23,7 +23,7 @@ def test_audit_guidellm_result_checks_counts_tokens_and_metrics(tmp_path) -> Non
                 "backend_version": "0.24.0",
                 "backend_command": "vllm serve model",
                 "backend_target": "http://127.0.0.1:8000",
-                "guidellm_command": "guidellm run",
+                "guidellm_command": "guidellm run --constraint kind=over_saturation,mode=monitor",
                 "guidellm_version": "0.7.3",
                 "model": "model",
                 "model_revision": "abc",
@@ -57,7 +57,19 @@ def test_audit_guidellm_result_checks_counts_tokens_and_metrics(tmp_path) -> Non
                     "queued_time_avg": 0.01,
                 },
             }
-            for streams in (16, 32, 64, 128, 256)
+            for streams in (16, 32, 64, 128)
+        ]
+        + [
+            {
+                "config": {"strategy": {"streams": 256}},
+                "duration": 30,
+                "metrics": {"request_totals": {"successful": 0, "errored": 0, "incomplete": 256, "total": 256}},
+                "requests": {"successful": [], "errored": [], "incomplete": [{}] * 256},
+                "scheduler_metrics": {
+                    "requests_made": {"successful": 0, "errored": 0, "incomplete": 256, "total": 256},
+                    "queued_time_avg": 0.01,
+                },
+            }
         ],
     }
     (run_dir / "benchmarks.json").write_text(json.dumps(report), encoding="utf-8")
@@ -67,8 +79,11 @@ def test_audit_guidellm_result_checks_counts_tokens_and_metrics(tmp_path) -> Non
     assert payload["report_count"] == 1
     assert payload["benchmark_count"] == 5
     assert payload["failed_benchmark_count"] == 0
+    assert payload["overload_benchmark_count"] == 1
     assert payload["rows"][0]["p50_latency_ms"] == 250
     assert payload["rows"][0]["scheduler_requests"] == 4
+    assert payload["rows"][-1]["classification"] == "overload"
+    assert payload["rows"][-1]["p50_latency_ms"] is None
 
 
 def test_audit_guidellm_result_preserves_failures(tmp_path) -> None:

@@ -45,6 +45,8 @@ WARMUP_REQUESTS=16
 STEADY_STATE_SECONDS=60
 IDLE_BASELINE_SECONDS=30
 GUIDELLM_DURATION_SECONDS=60
+GUIDELLM_WARMUP_SECONDS=90
+GUIDELLM_TOTAL_SECONDS=$((GUIDELLM_WARMUP_SECONDS + GUIDELLM_DURATION_SECONDS))
 
 case "${MODEL_SCOPE}" in
     all)
@@ -221,6 +223,8 @@ mark telemetry_scope "${TELEMETRY_SCOPE}"
     echo "steady_state_seconds=${STEADY_STATE_SECONDS}"
     echo "idle_baseline_seconds=${IDLE_BASELINE_SECONDS}"
     echo "guidellm_duration_seconds=${GUIDELLM_DURATION_SECONDS}"
+    echo "guidellm_warmup_seconds=${GUIDELLM_WARMUP_SECONDS}"
+    echo "guidellm_total_seconds=${GUIDELLM_TOTAL_SECONDS}"
     echo "gpu_telemetry_scope=${TELEMETRY_SCOPE}"
     echo "energy_limit=${ENERGY_LIMIT}"
     nvidia-smi
@@ -497,9 +501,9 @@ run_crosscheck() {
     guide_command=(
         "${GUIDELLM_ENV}/bin/guidellm" run
         --backend "kind=openai_http,target=http://127.0.0.1:${port},request_format=/v1/chat/completions,model=${model}"
-        --profile kind=concurrent
+        --profile "kind=concurrent,warmup=${GUIDELLM_WARMUP_SECONDS}"
         --override profile.streams 16,32,64,128,256
-        --constraint "kind=max_duration,seconds=${GUIDELLM_DURATION_SECONDS}"
+        --constraint "kind=max_duration,seconds=${GUIDELLM_TOTAL_SECONDS}"
         --constraint kind=max_errors,count=5
         --constraint kind=over_saturation,mode=monitor,min_seconds=30
         --tokenizer "kind=huggingface_auto,model=${tokenizer}"

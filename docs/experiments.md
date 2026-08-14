@@ -46,9 +46,9 @@ H200 closure job 319 completed 46 managed runs across vLLM and SGLang. Its raw a
 
 Results across the two platforms may be compared directly only when model revision, backend version, workload, candidate policy, repetition policy, and measurement controls match. Otherwise, report each platform independently as evidence that the workflow operates across distinct hardware classes. MIG power remains board scoped unless the telemetry provider establishes instance attribution.
 
-GuideLLM 0.7.3 is the independent OpenAI HTTP benchmark client for the final cross checks. Use the same model revision, synthetic token shape, static seed, concurrency sweep, and measurement duration as the Serve Optimize client. Preserve its raw request records and complete p50, p95, and p99 latency, TTFT, and TPOT metrics. GuideLLM validates the measurement client; it is not a configuration search baseline.
+GuideLLM 0.7.3 is the independent OpenAI HTTP benchmark client for the final cross checks. Use the same model revision, synthetic token shape, static seed, concurrency sweep, and measurement duration as the Serve Optimize client. Each concurrency point uses GuideLLM's native 90 second warmup followed by a 60 second measured window. Preserve its raw request records and complete p50, p95, and p99 latency, TTFT, and TPOT metrics. GuideLLM validates the measurement client; it is not a configuration search baseline.
 
-GuideLLM duration bounded runs cancel the final in flight wave at the measurement boundary. Treat at most one terminal incomplete request per configured stream as boundary accounting, report it separately, and continue to reject any errored request or larger incomplete count.
+GuideLLM duration bounded runs cancel the final in flight wave at the measurement boundary. Treat at most one terminal incomplete request per configured stream as boundary accounting and report it separately. A zero success point is overload evidence only when lower concurrency points succeeded, no higher point succeeded, the saturation monitor was enabled, and no request errored. Continue to reject isolated failures, any errored request, or a larger incomplete count.
 
 ## Workloads
 

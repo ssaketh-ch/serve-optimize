@@ -71,6 +71,9 @@ Recorded on 2026-08-14:
 * passed the previously failing FlashInfer import, clean dependency checks, profile doctor checks, and four candidate Managed Mode dry runs for both backends on both hosts
 * recorded the uncontrollable host boundary: the RTX PRO 6000 host uses Ubuntu 24.04 with Linux 6.8 and glibc 2.39, while the H200 host uses Rocky Linux 9.8 with Linux 5.14 and glibc 2.34
 * kept host platforms and GPU allocations as separate result strata instead of attributing every difference to the GPU alone
+* qualified GuideLLM native warmup against its live mock endpoint and retained a 60 second measured window after a 90 second warmup at each concurrency point
+* classified only a terminal zero success suffix after lower successful loads as overload evidence and continued to reject isolated zero success points followed by later successes
+* reran the auditor on the live campaign artifacts: the RTX PRO 6000 reports passed with two labeled overload points while the isolated H200 SGLang stream 16 failure remained invalid
 * kept the H200 3g.71gb MIG allocation as a separate hardware allocation stratum rather than presenting it as a full H200
 * complete resolved environment audits found one vLLM and three SGLang upstream dependency advisory boundaries; incompatible or unavailable fixes are recorded in the security policy
 * full verification passed with 497 tests and 1 skipped test
