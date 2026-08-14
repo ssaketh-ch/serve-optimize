@@ -14,10 +14,10 @@ def test_installation_profiles_are_explicit() -> None:
 def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.24.0",
-        "torch": "2.11.0",
-        "transformers": "5.12.1",
-        "huggingface-hub": "1.17.0",
+        "vllm": "0.27.1",
+        "torch": "2.13.0",
+        "transformers": "5.14.1",
+        "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
@@ -27,17 +27,17 @@ def test_vllm_profile_reports_version_drift(monkeypatch) -> None:
     transformers = next(status for status in statuses if status.name == "transformers")
 
     assert transformers.available is False
-    assert transformers.version == "5.12.1"
-    assert transformers.reason == "expected 5.9.0"
+    assert transformers.version == "5.14.1"
+    assert transformers.reason == "expected 5.15.0"
 
 
 def test_vllm_profile_accepts_torch_cuda_local_version(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.24.0",
-        "torch": "2.11.0+cu129",
-        "transformers": "5.9.0",
-        "huggingface-hub": "1.17.0",
+        "vllm": "0.27.1",
+        "torch": "2.13.0+cu130",
+        "transformers": "5.15.0",
+        "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])
@@ -52,10 +52,10 @@ def test_vllm_profile_accepts_torch_cuda_local_version(monkeypatch) -> None:
 def test_vllm_profile_accepts_command_from_active_path(monkeypatch, tmp_path) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "vllm": "0.24.0",
-        "torch": "2.11.0",
-        "transformers": "5.9.0",
-        "huggingface-hub": "1.17.0",
+        "vllm": "0.27.1",
+        "torch": "2.13.0",
+        "transformers": "5.15.0",
+        "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
     }
     python = tmp_path / "profile" / "bin" / "python"
@@ -78,12 +78,13 @@ def test_vllm_profile_accepts_command_from_active_path(monkeypatch, tmp_path) ->
 def test_sglang_profile_checks_current_runtime_without_host_specific_toolchain(monkeypatch) -> None:
     versions = {
         "serve-optimize": "0.1.0",
-        "sglang": "0.5.13.post1",
-        "flash-attn-4": "4.0.0b18",
-        "sglang-kernel": "0.4.3",
+        "sglang": "0.5.17",
+        "flash-attn-4": "4.0.0b19",
+        "sglang-kernel": "0.4.5",
+        "cuda-tile": "1.5.0",
         "torch": "2.11.0",
-        "transformers": "5.8.1",
-        "huggingface-hub": "1.17.0",
+        "transformers": "5.12.1",
+        "huggingface-hub": "1.27.0",
         "nvidia-ml-py": "13.610.43",
     }
     monkeypatch.setattr(metadata, "version", lambda name: versions[name])

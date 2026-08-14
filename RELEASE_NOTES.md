@@ -21,8 +21,8 @@ Highlights:
 
 Validated backend stacks:
 
-* vLLM `0.24.0`
-* SGLang `0.5.13.post1`
+* vLLM `0.27.1`
+* SGLang `0.5.17`
 
 Known limits:
 

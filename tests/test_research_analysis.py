@@ -189,3 +189,5 @@ def test_research_runner_postprocesses_only_recorded_successful_runs() -> None:
     assert 'find "${CLOSURE_ROOT}/managed" -name managed_run.json' not in runner
     assert 'rm -f "${MARKERS}/${step}.ok"' in runner
     assert '--goal throughput' in runner
+    assert 'sha256sum "${CUDA_HOME}/bin/nvcc"' in runner
+    assert '[[ -x "${CUDA_HOME}/bin/nvcc" ]] || preflight_status=1' in runner

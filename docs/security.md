@@ -17,17 +17,18 @@ The backend profile commands audit the listed pins directly. A full resolver aud
 
 ## Current advisory boundary
 
-Last checked: 2026-08-09.
+Last checked: 2026-08-14.
 
 The default project environment reported no known vulnerabilities.
 
-The optional backend profile audits reported upstream advisories in the currently available serving stacks:
+The vLLM 0.27.1 profile reported no known vulnerabilities. The SGLang 0.5.17 profile audit reported advisories in three upstream dependencies:
 
 | Profile | Package | Version | Advisory status |
 | --- | --- | --- | --- |
-| vLLM | torch | 2.11.0 | `PYSEC-2025-194`; pip audit lists `2.13.0` as the fix version |
+| SGLang | diskcache | 5.6.3 | `PYSEC-2026-2447`; no fixed version was published by the audit source. |
+| SGLang | setuptools | 81.0.0 | `PYSEC-2026-3447`; the fixed release conflicts with Torch 2.11.0's required Setuptools range. |
 | SGLang | torch | 2.11.0 | `PYSEC-2025-194`; pip audit lists `2.13.0` as the fix version |
 
-The supported vLLM 0.24.0 and SGLang 0.5.13.post1 profiles currently pin torch 2.11.0. Moving either profile to torch 2.13.0 requires dependency resolution, backend capability checks, and live validation before it can replace the supported pin.
+The supported vLLM 0.27.1 profile uses Torch 2.13.0. SGLang 0.5.17 still requires Torch 2.11.0 and Setuptools below 82, while its diskcache dependency has no published fix. These advisories remain explicit upstream dependency limits rather than silently relaxed pins.
 
 Treat backend profiles as production dependencies owned jointly with their upstream projects. Reaudit before deployment, and update the profile pins as soon as upstream publishes compatible fixed releases.

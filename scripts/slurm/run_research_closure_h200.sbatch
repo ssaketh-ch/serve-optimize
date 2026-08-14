@@ -15,8 +15,10 @@ set -uo pipefail
 CLOSURE_ROOT="${SERVE_OPTIMIZE_CLOSURE_ROOT:?SERVE_OPTIMIZE_CLOSURE_ROOT is required}"
 SOURCE_TARBALL="${SERVE_OPTIMIZE_SOURCE_TARBALL:?SERVE_OPTIMIZE_SOURCE_TARBALL is required}"
 SOURCE_SHA256="${SERVE_OPTIMIZE_SOURCE_SHA256:?SERVE_OPTIMIZE_SOURCE_SHA256 is required}"
-VLLM_ENV="${SERVE_OPTIMIZE_VLLM_ENV:-/home/saketh-msc/serve-optimize/.venv-vllm024-py310}"
-SGLANG_ENV="${SERVE_OPTIMIZE_SGLANG_ENV:-/home/saketh-msc/serve-optimize/.venv-sglang}"
+VLLM_VERSION="0.27.1"
+SGLANG_VERSION="0.5.17"
+VLLM_ENV="${SERVE_OPTIMIZE_VLLM_ENV:-/home/saketh-msc/serve-optimize-envs/vllm-${VLLM_VERSION}}"
+SGLANG_ENV="${SERVE_OPTIMIZE_SGLANG_ENV:-/home/saketh-msc/serve-optimize-envs/sglang-${SGLANG_VERSION}}"
 GUIDELLM_VERSION="0.7.3"
 GUIDELLM_ENV="${SERVE_OPTIMIZE_GUIDELLM_ENV:-/home/saketh-msc/serve-optimize-envs/guidellm-${GUIDELLM_VERSION}}"
 HISTORICAL_ROOT="${SERVE_OPTIMIZE_HISTORICAL_ROOT:-/home/saketh-msc/serve-optimize/results/benchmark-matrix/closure-20260809T041109}"
@@ -202,6 +204,8 @@ mark telemetry_scope "${TELEMETRY_SCOPE}"
     echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES}"
     echo "source_sha256=${SOURCE_SHA256}"
     echo "cuda_home=${CUDA_HOME}"
+    "${CUDA_HOME}/bin/nvcc" --version
+    sha256sum "${CUDA_HOME}/bin/nvcc"
     echo "driver_lib_root=${DRIVER_LIB_ROOT:-system_default}"
     echo "ld_library_path=${LD_LIBRARY_PATH:-unset}"
     "${UV_BIN}" --version
@@ -250,10 +254,11 @@ for expected in "${expected_models[@]}"; do
     [[ -n "$(find -L "${snapshot_path}" -maxdepth 1 -name '*.safetensors' -type f -print -quit 2>/dev/null)" ]] || preflight_status=1
 done
 nvidia-smi >/dev/null || preflight_status=1
+[[ -x "${CUDA_HOME}/bin/nvcc" ]] || preflight_status=1
 [[ "$("${GUIDELLM_ENV}/bin/guidellm" --version 2>/dev/null | tail -1)" == "guidellm version: ${GUIDELLM_VERSION}" ]] || preflight_status=1
-[[ "$("${VLLM_ENV}/bin/python" -c 'import vllm; print(vllm.__version__)')" == "0.24.0" ]] || preflight_status=1
+[[ "$("${VLLM_ENV}/bin/python" -c 'import vllm; print(vllm.__version__)')" == "${VLLM_VERSION}" ]] || preflight_status=1
 if backend_enabled sglang; then
-    [[ "$("${SGLANG_ENV}/bin/python" -c 'import sglang; print(sglang.__version__)' 2>/dev/null | tail -1)" == "0.5.13.post1" ]] || preflight_status=1
+    [[ "$("${SGLANG_ENV}/bin/python" -c 'import sglang; print(sglang.__version__)' 2>/dev/null | tail -1)" == "${SGLANG_VERSION}" ]] || preflight_status=1
 fi
 "${UV_BIN}" pip check --python "${VLLM_ENV}/bin/python" >/dev/null || preflight_status=1
 if backend_enabled sglang; then
@@ -539,8 +544,8 @@ run_server_group() {
 }
 
 if [[ "${MODEL_SCOPE}" != "seven_b" ]]; then
-    backend_enabled vllm && run_server_group Qwen3-0.6B vllm 0.24.0 "${TINY_MODEL}" "${TINY_REVISION}" 18101 short 128 64 || true
-    backend_enabled sglang && run_server_group Qwen3-0.6B sglang 0.5.13.post1 "${TINY_MODEL}" "${TINY_REVISION}" 18102 short 128 64 || true
+    backend_enabled vllm && run_server_group Qwen3-0.6B vllm "${VLLM_VERSION}" "${TINY_MODEL}" "${TINY_REVISION}" 18101 short 128 64 || true
+    backend_enabled sglang && run_server_group Qwen3-0.6B sglang "${SGLANG_VERSION}" "${TINY_MODEL}" "${TINY_REVISION}" 18102 short 128 64 || true
     for backend in "${BACKENDS[@]}"; do
         run_managed saturation qwen3-short "${backend}" "${TINY_MODEL}" performance short \
             configs/workloads/saturation-short.json 1 8 || true
@@ -557,9 +562,9 @@ if [[ "${MODEL_SCOPE}" != "seven_b" ]]; then
 fi
 
 if [[ "${MODEL_SCOPE}" != "tiny" ]]; then
-    backend_enabled vllm && run_server_group Qwen2.5-7B-Instruct vllm 0.24.0 "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}" 18101 \
+    backend_enabled vllm && run_server_group Qwen2.5-7B-Instruct vllm "${VLLM_VERSION}" "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}" 18101 \
         medium 1024 256 long-prefill 4096 128 || true
-    backend_enabled sglang && run_server_group Qwen2.5-7B-Instruct sglang 0.5.13.post1 "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}" 18102 \
+    backend_enabled sglang && run_server_group Qwen2.5-7B-Instruct sglang "${SGLANG_VERSION}" "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}" 18102 \
         medium 1024 256 long-prefill 4096 128 || true
     for backend in "${BACKENDS[@]}"; do
         run_managed saturation qwen25-7b-short "${backend}" "${SEVEN_B_MODEL}" performance short \

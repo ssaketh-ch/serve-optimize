@@ -501,7 +501,7 @@ def test_sglang_capability_detection_supports_serve_subcommand(monkeypatch) -> N
         if command == ["python", "-m", "sglang.launch_server", "--help"]:
             return Completed(1, stderr="No module named sglang")
         if command == ["/bin/sglang", "version"]:
-            return Completed(0, stdout="0.5.13.post1\n")
+            return Completed(0, stdout="0.5.17\n")
         if command == ["/bin/sglang", "serve", "--help"]:
             return Completed(0, stdout=_sglang_help_text())
         raise AssertionError(f"unexpected command: {command}")
@@ -514,7 +514,7 @@ def test_sglang_capability_detection_supports_serve_subcommand(monkeypatch) -> N
 
     assert capabilities.detection_status == "success"
     assert capabilities.launch_command == ("/bin/sglang", "serve")
-    assert capabilities.version == "0.5.13.post1"
+    assert capabilities.version == "0.5.17"
     assert capabilities.supports("--model-path")
 
 

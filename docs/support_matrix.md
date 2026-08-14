@@ -16,8 +16,8 @@ This matrix reflects the supported product surface.
 
 | Backend | Status | Validated Runtime | Managed Mode |
 |---|---|---|---|
-| vLLM | First class | `0.24.0` | Runtime validated with the pinned vLLM profile. |
-| SGLang | First class for detected surface | `0.5.13.post1` | Clean profile resolution is verified; managed runtime support is capability detected and must pass local doctor checks. |
+| vLLM | First class | `0.27.1` | Runtime validated with the pinned vLLM profile. |
+| SGLang | First class for detected surface | `0.5.17` | Clean profile resolution is verified; managed runtime support is capability detected and must pass local doctor checks. |
 | TensorRT LLM | Planned only | none | Managed Mode is not in current scope; Attach Mode may measure an external compatible endpoint. |
 | TGI | Attach only | none | May be measured through an external OpenAI compatible endpoint. |
 | LMDeploy | Attach only | none | May be measured through an external OpenAI compatible endpoint. |

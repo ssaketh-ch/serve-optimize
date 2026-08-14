@@ -12,3 +12,5 @@ Profiles:
 The vLLM and SGLang profiles must be installed in separate environments because they require different Transformers stacks.
 
 Constraints under `constraints/` pin directly validated backend packages while allowing backend packages to resolve transitive dependencies. Use `scripts/verify_install_profile.sh` so vLLM receives CUDA aware Torch wheel selection.
+
+The SGLang profile explicitly pins its required FlashAttention prerelease and CUDA Tile 1.5.0. Do not enable prereleases globally because that also admits unrelated alpha and release candidate dependencies.

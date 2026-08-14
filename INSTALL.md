@@ -84,10 +84,10 @@ Run a small managed dry run:
 
 Pinned and validated stack:
 
-* vLLM `0.24.0`
-* Torch `2.11.0`, with the CUDA wheel selected by `uv`
-* Transformers `5.9.0`
-* Hugging Face Hub `1.17.0`
+* vLLM `0.27.1`
+* Torch `2.13.0`, with the CUDA wheel selected by `uv`
+* Transformers `5.15.0`
+* Hugging Face Hub `1.27.0`
 * NVML Python bindings `13.610.43`
 
 ## SGLang Environment
@@ -131,12 +131,13 @@ Run a small managed dry run:
 
 Pinned profile:
 
-* SGLang `0.5.13.post1`
-* FlashAttention 4 `4.0.0b18`, the explicit prerelease required by SGLang
-* SGLang Kernel `0.4.3`
+* SGLang `0.5.17`
+* FlashAttention 4 `4.0.0b19`, the newest prerelease compatible with the pinned Torch stack
+* SGLang Kernel `0.4.5`
+* CUDA Tile `1.5.0`, pinned because its newer prerelease has no CPython 3.10 x86_64 wheel
 * Torch `2.11.0`
-* Transformers `5.8.1`
-* Hugging Face Hub `1.17.0`
+* Transformers `5.12.1`
+* Hugging Face Hub `1.27.0`
 * NVML Python bindings `13.610.43`
 
 The SGLang wheel stack targets CUDA 13. It no longer requires the old validation host's GCC Toolset 12 path. `scripts/env_base_runtime.sh` is only an optional helper for source builds that need an explicit local CUDA toolkit.
