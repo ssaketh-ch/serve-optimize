@@ -24,6 +24,7 @@ KNOWN_MODELS: dict[str, tuple[float, int, str]] = {
     "qwen3.5-9b": (9.0, 262144, "qwen"),
     "qwen3.6-27b": (27.0, 262144, "qwen"),
     "qwen3.8-27b": (27.0, 262144, "qwen"),
+    "qwen3.8-27b-fp8": (27.0, 262144, "qwen"),
     "deepseek-r1-distill-qwen-1.5b": (1.5, 131072, "deepseek"),
     "granite-3.3-2b": (2.0, 131072, "granite"),
     "granite-3.3-8b": (8.0, 131072, "granite"),

@@ -44,6 +44,11 @@ models:
     parameter_count_b: 27.0
     context_tokens: 262144
     purpose: latest Qwen 27B release available at campaign launch
+  qwen3.8-27b-fp8:
+    hf_id: Qwen/Qwen3.8-27B-FP8
+    parameter_count_b: 27.0
+    context_tokens: 262144
+    purpose: latest Qwen 27B FP8 release available at campaign launch
   llama-3.1-8b:
     hf_id: meta-llama/Llama-3.1-8B-Instruct
     parameter_count_b: 8.0
