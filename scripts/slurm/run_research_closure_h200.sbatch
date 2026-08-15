@@ -41,6 +41,22 @@ TINY_MODEL="Qwen/Qwen3-0.6B"
 TINY_REVISION="c1899de289a04d12100db370d81485cdf75e47ca"
 SEVEN_B_MODEL="Qwen/Qwen2.5-7B-Instruct"
 SEVEN_B_REVISION="a09a35458c702b33eeacc393d103063234e8bc28"
+# Wide scope is the publication coverage matrix. Keep revisions immutable so
+# every host records the same model bytes.
+WIDE_MODEL_RECORDS=(
+    "qwen3-0.6b|Qwen/Qwen3-0.6B|c1899de289a04d12100db370d81485cdf75e47ca|128|64"
+    "qwen25-1.5b|Qwen/Qwen2.5-1.5B-Instruct|989aa7980e4cf806f80c7fef2b1adb7bc71aa306|1024|256"
+    "deepseek-r1-qwen-1.5b|deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B|ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562|1024|256"
+    "granite-3.3-2b|ibm-granite/granite-3.3-2b-instruct|707f574c62054322f6b5b04b6d075f0a8f05e0f0|1024|256"
+    "qwen25-7b|Qwen/Qwen2.5-7B-Instruct|a09a35458c702b33eeacc393d103063234e8bc28|1024|256"
+    "mistral-7b|mistralai/Mistral-7B-Instruct-v0.3|c170c708c41dac9275d15a8fff4eca08d52bab71|1024|256"
+    "qwen3-8b|Qwen/Qwen3-8B|b968826d9c46dd6066d109eabc6255188de91218|1024|256"
+    "granite-3.3-8b|ibm-granite/granite-3.3-8b-instruct|51dd4bc2ade4059a6bd87649d68aa11e4fb2529b|1024|256"
+    "qwen35-9b|Qwen/Qwen3.5-9B|c202236235762e1c871ad0ccb60c8ee5ba337b9a|1024|256"
+    "qwen36-27b|Qwen/Qwen3.6-27B|6a9e13bd6fc8f0983b9b99948120bc37f49c13e9|1024|256"
+    "qwen38-27b|Qwen/Qwen3.8-27B|1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0|1024|256"
+    "llama31-8b|meta-llama/Llama-3.1-8B-Instruct|0e9e39f249a16976918f6564b8830bc894c89659|1024|256"
+)
 WARMUP_REQUESTS=16
 STEADY_STATE_SECONDS=60
 IDLE_BASELINE_SECONDS=30
@@ -60,6 +76,10 @@ case "${MODEL_SCOPE}" in
     seven_b)
         MANAGED_RUNS_PER_BACKEND=6
         GUIDELLM_REPORTS_PER_BACKEND=2
+        ;;
+    wide)
+        MANAGED_RUNS_PER_BACKEND=$((${#WIDE_MODEL_RECORDS[@]} * 10))
+        GUIDELLM_REPORTS_PER_BACKEND=$((${#WIDE_MODEL_RECORDS[@]} * 3))
         ;;
     *)
         printf 'Unsupported model scope: %s\n' "${MODEL_SCOPE}" >&2
@@ -250,10 +270,21 @@ fi
 preflight_status=0
 [[ -z "${DRIVER_LIB_ROOT}" || -s "${CLOSURE_ROOT}/environment/driver-libraries.sha256" ]] || preflight_status=1
 expected_models=()
-[[ "${MODEL_SCOPE}" == "all" || "${MODEL_SCOPE}" == "tiny" ]] \
-    && expected_models+=("${HF_HOME}/hub/models--Qwen--Qwen3-0.6B/refs/main:${TINY_REVISION}")
-[[ "${MODEL_SCOPE}" == "all" || "${MODEL_SCOPE}" == "seven_b" ]] \
-    && expected_models+=("${HF_HOME}/hub/models--Qwen--Qwen2.5-7B-Instruct/refs/main:${SEVEN_B_REVISION}")
+model_ref_path() {
+    local model="$1"
+    printf '%s/hub/models--%s/refs/main\n' "${HF_HOME}" "${model//\//--}"
+}
+if [[ "${MODEL_SCOPE}" == "wide" ]]; then
+    for record in "${WIDE_MODEL_RECORDS[@]}"; do
+        IFS='|' read -r _label model revision _prompt_tokens _output_tokens <<<"${record}"
+        expected_models+=("$(model_ref_path "${model}"):${revision}")
+    done
+else
+    [[ "${MODEL_SCOPE}" == "all" || "${MODEL_SCOPE}" == "tiny" ]] \
+        && expected_models+=("$(model_ref_path "${TINY_MODEL}"):${TINY_REVISION}")
+    [[ "${MODEL_SCOPE}" == "all" || "${MODEL_SCOPE}" == "seven_b" ]] \
+        && expected_models+=("$(model_ref_path "${SEVEN_B_MODEL}"):${SEVEN_B_REVISION}")
+fi
 for expected in "${expected_models[@]}"; do
     ref_path="${expected%%:*}"
     ref_sha="${expected##*:}"
@@ -461,7 +492,7 @@ run_crosscheck() {
     local output_tokens="$9"
     local step="guidellm_${label}_${backend}_${profile}"
     local run_dir="${CLOSURE_ROOT}/guidellm/${label}-${backend}/${profile}"
-    local tokenizer="${HF_HOME}/hub/models--Qwen--${label}/snapshots/${revision}"
+    local tokenizer="${HF_HOME}/hub/models--${model//\//--}/snapshots/${revision}"
     local serve_python="${SGLANG_ENV}/bin/python"
     local telemetry="${CLOSURE_ROOT}/telemetry/${step}.csv"
     local serve_status
@@ -472,11 +503,6 @@ run_crosscheck() {
 
     [[ -f "${MARKERS}/${step}.ok" ]] && return 0
     [[ "${backend}" == "vllm" ]] && serve_python="${VLLM_ENV}/bin/python"
-    if [[ "${label}" == "Qwen3-0.6B" ]]; then
-        tokenizer="${HF_HOME}/hub/models--Qwen--Qwen3-0.6B/snapshots/${revision}"
-    else
-        tokenizer="${HF_HOME}/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/${revision}"
-    fi
     mkdir -p "${run_dir}"
     cp "${SERVER_COMMAND_FILE}" "${run_dir}/backend-command.txt"
     printf 'http://127.0.0.1:%s\n' "${port}" >"${run_dir}/backend-target.txt"
@@ -557,7 +583,38 @@ run_server_group() {
     return "${status}"
 }
 
-if [[ "${MODEL_SCOPE}" != "seven_b" ]]; then
+run_wide_model() {
+    local record="$1"
+    local label model revision prompt_tokens output_tokens
+    local backend_version
+    IFS='|' read -r label model revision prompt_tokens output_tokens <<<"${record}"
+    for backend in "${BACKENDS[@]}"; do
+        backend_version="${VLLM_VERSION}"
+        [[ "${backend}" == "sglang" ]] && backend_version="${SGLANG_VERSION}"
+        run_server_group "${label}" "${backend}" "${backend_version}" "${model}" "${revision}" \
+            18101 short "${prompt_tokens}" "${output_tokens}" medium 1024 256 long-prefill 4096 128 || true
+        run_managed saturation "${label}-short" "${backend}" "${model}" performance short \
+            configs/workloads/saturation-short.json 1 8 || true
+        run_managed saturation "${label}-medium" "${backend}" "${model}" performance medium \
+            configs/workloads/saturation-medium.json 1 8 || true
+        run_managed saturation "${label}-long-prefill" "${backend}" "${model}" performance long-prefill \
+            configs/workloads/saturation-long-prefill.json 1 8 || true
+        run_managed workloads "${label}-mixed" "${backend}" "${model}" balanced mixed "" 1 5 || true
+        run_managed workloads "${label}-code-generation" "${backend}" "${model}" balanced code-generation "" 1 5 || true
+        run_managed workloads "${label}-repeated-prefix" "${backend}" "${model}" balanced repeated-prefix "" 1 5 || true
+        run_managed workloads "${label}-real-chat" "${backend}" "${model}" balanced medium \
+            configs/workloads/oasst1-root-en-64.json 1 5 || true
+        for repetition in 1 2 3; do
+            run_managed repetitions "${label}-short" "${backend}" "${model}" balanced short "" "${repetition}" 5 || true
+        done
+    done
+}
+
+if [[ "${MODEL_SCOPE}" == "wide" ]]; then
+    for record in "${WIDE_MODEL_RECORDS[@]}"; do
+        run_wide_model "${record}"
+    done
+elif [[ "${MODEL_SCOPE}" != "seven_b" ]]; then
     backend_enabled vllm && run_server_group Qwen3-0.6B vllm "${VLLM_VERSION}" "${TINY_MODEL}" "${TINY_REVISION}" 18101 short 128 64 || true
     backend_enabled sglang && run_server_group Qwen3-0.6B sglang "${SGLANG_VERSION}" "${TINY_MODEL}" "${TINY_REVISION}" 18102 short 128 64 || true
     for backend in "${BACKENDS[@]}"; do
@@ -575,7 +632,7 @@ if [[ "${MODEL_SCOPE}" != "seven_b" ]]; then
     done
 fi
 
-if [[ "${MODEL_SCOPE}" != "tiny" ]]; then
+if [[ "${MODEL_SCOPE}" != "tiny" && "${MODEL_SCOPE}" != "wide" ]]; then
     backend_enabled vllm && run_server_group Qwen2.5-7B-Instruct vllm "${VLLM_VERSION}" "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}" 18101 \
         medium 1024 256 long-prefill 4096 128 || true
     backend_enabled sglang && run_server_group Qwen2.5-7B-Instruct sglang "${SGLANG_VERSION}" "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}" 18102 \

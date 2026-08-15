@@ -24,6 +24,26 @@ models:
     parameter_count_b: 7.6
     context_tokens: 32768
     purpose: second 7B-class model family
+  qwen3-8b:
+    hf_id: Qwen/Qwen3-8B
+    parameter_count_b: 8.0
+    context_tokens: 40960
+    purpose: current Qwen dense 8B family comparison
+  qwen3.5-9b:
+    hf_id: Qwen/Qwen3.5-9B
+    parameter_count_b: 9.0
+    context_tokens: 262144
+    purpose: newer multimodal Qwen family text serving comparison
+  qwen3.6-27b:
+    hf_id: Qwen/Qwen3.6-27B
+    parameter_count_b: 27.0
+    context_tokens: 262144
+    purpose: larger recent Qwen family text serving comparison
+  qwen3.8-27b:
+    hf_id: Qwen/Qwen3.8-27B
+    parameter_count_b: 27.0
+    context_tokens: 262144
+    purpose: latest Qwen 27B release available at campaign launch
   llama-3.1-8b:
     hf_id: meta-llama/Llama-3.1-8B-Instruct
     parameter_count_b: 8.0

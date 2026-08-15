@@ -23,6 +23,13 @@ def test_tiny_model_defaults() -> None:
     ]
 
 
+def test_wide_research_model_metadata_defaults() -> None:
+    spec = infer_model_spec("Qwen/Qwen3.8-27B")
+    assert spec.parameter_count_b == 27.0
+    assert spec.max_context_tokens == 262144
+    assert spec.family == "qwen"
+
+
 def test_model_capability_metadata_reads_context_length(tmp_path) -> None:
     (tmp_path / "config.json").write_text(
         json.dumps({"max_position_embeddings": 40960, "torch_dtype": "bfloat16"}),
