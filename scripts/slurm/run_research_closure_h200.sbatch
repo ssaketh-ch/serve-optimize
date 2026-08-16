@@ -271,26 +271,23 @@ fi
 preflight_status=0
 [[ -z "${DRIVER_LIB_ROOT}" || -s "${CLOSURE_ROOT}/environment/driver-libraries.sha256" ]] || preflight_status=1
 expected_models=()
-model_ref_path() {
+model_snapshot_path() {
     local model="$1"
-    printf '%s/hub/models--%s/refs/main\n' "${HF_HOME}" "${model//\//--}"
+    local revision="$2"
+    printf '%s/hub/models--%s/snapshots/%s\n' "${HF_HOME}" "${model//\//--}" "${revision}"
 }
 if [[ "${MODEL_SCOPE}" == "wide" ]]; then
     for record in "${WIDE_MODEL_RECORDS[@]}"; do
         IFS='|' read -r _label model revision _prompt_tokens _output_tokens <<<"${record}"
-        expected_models+=("$(model_ref_path "${model}"):${revision}")
+        expected_models+=("$(model_snapshot_path "${model}" "${revision}")")
     done
 else
     [[ "${MODEL_SCOPE}" == "all" || "${MODEL_SCOPE}" == "tiny" ]] \
-        && expected_models+=("$(model_ref_path "${TINY_MODEL}"):${TINY_REVISION}")
+        && expected_models+=("$(model_snapshot_path "${TINY_MODEL}" "${TINY_REVISION}")")
     [[ "${MODEL_SCOPE}" == "all" || "${MODEL_SCOPE}" == "seven_b" ]] \
-        && expected_models+=("$(model_ref_path "${SEVEN_B_MODEL}"):${SEVEN_B_REVISION}")
+        && expected_models+=("$(model_snapshot_path "${SEVEN_B_MODEL}" "${SEVEN_B_REVISION}")")
 fi
-for expected in "${expected_models[@]}"; do
-    ref_path="${expected%%:*}"
-    ref_sha="${expected##*:}"
-    snapshot_path="${ref_path%/refs/main}/snapshots/${ref_sha}"
-    [[ -f "${ref_path}" && "$(cat "${ref_path}")" == "${ref_sha}" ]] || preflight_status=1
+for snapshot_path in "${expected_models[@]}"; do
     [[ -f "${snapshot_path}/config.json" ]] || preflight_status=1
     [[ -n "$(find -L "${snapshot_path}" -maxdepth 1 -name '*.safetensors' -type f -print -quit 2>/dev/null)" ]] || preflight_status=1
 done
@@ -312,10 +309,7 @@ if backend_enabled sglang; then
 fi
 "${UV_BIN}" pip check --python "${GUIDELLM_ENV}/bin/python" >/dev/null || preflight_status=1
 if (( preflight_status == 0 )); then
-    for expected in "${expected_models[@]}"; do
-        ref_path="${expected%%:*}"
-        ref_sha="${expected##*:}"
-        snapshot_path="${ref_path%/refs/main}/snapshots/${ref_sha}"
+    for snapshot_path in "${expected_models[@]}"; do
         find -L "${snapshot_path}" -maxdepth 1 -type f -print0 \
             | sort -z \
             | xargs -0 sha256sum
