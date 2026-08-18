@@ -27,6 +27,8 @@ HISTORICAL_ROOT="${SERVE_OPTIMIZE_HISTORICAL_ROOT:-/home/saketh-msc/serve-optimi
 MODEL_SCOPE="${SERVE_OPTIMIZE_MODEL_SCOPE:-all}"
 BACKEND_SCOPE="${SERVE_OPTIMIZE_BACKEND_SCOPE:-all}"
 TELEMETRY_SCOPE="${SERVE_OPTIMIZE_TELEMETRY_SCOPE:-physical_gpu_board_for_mig_allocation}"
+TELEMETRY_MODE="auto"
+[[ "${TELEMETRY_SCOPE}" == "none" ]] && TELEMETRY_MODE="none"
 ENERGY_LIMIT="${SERVE_OPTIMIZE_ENERGY_LIMIT:-Power and energy are board scoped because the allocation is a MIG instance.}"
 DRIVER_LIB_ROOT="${SERVE_OPTIMIZE_DRIVER_LIB_ROOT:-}"
 UV_BIN="${SERVE_OPTIMIZE_UV:-/home/saketh-msc/.local/bin/uv}"
@@ -138,6 +140,10 @@ command_file() {
 
 start_telemetry() {
     local path="$1"
+    if [[ "${TELEMETRY_MODE}" == "none" ]]; then
+        printf 'timestamp,index,utilization_gpu_percent,memory_used_mib,power_draw_watts\n' >"${path}"
+        return
+    fi
     (
         printf 'timestamp,index,utilization_gpu_percent,memory_used_mib,power_draw_watts\n'
         while true; do
@@ -291,7 +297,9 @@ for snapshot_path in "${expected_models[@]}"; do
     [[ -f "${snapshot_path}/config.json" ]] || preflight_status=1
     [[ -n "$(find -L "${snapshot_path}" -maxdepth 1 -name '*.safetensors' -type f -print -quit 2>/dev/null)" ]] || preflight_status=1
 done
-nvidia-smi >/dev/null || preflight_status=1
+if [[ "${TELEMETRY_MODE}" != "none" ]]; then
+    nvidia-smi >/dev/null || preflight_status=1
+fi
 [[ -x "${CUDA_HOME}/bin/nvcc" ]] || preflight_status=1
 [[ "$("${VLLM_ENV}/bin/python" -c 'import platform; print(platform.python_version())')" == "${BACKEND_PYTHON_VERSION}" ]] || preflight_status=1
 [[ "$("${GUIDELLM_ENV}/bin/python" -c 'import platform; print(platform.python_version())')" == "${GUIDELLM_PYTHON_VERSION}" ]] || preflight_status=1
@@ -361,7 +369,7 @@ run_managed() {
         --goal "${goal}"
         --limit "${limit}"
         --trials 1
-        --telemetry auto
+        --telemetry "${TELEMETRY_MODE}"
         --workload-profile "${profile}"
         --startup-timeout 600
         --cooldown-seconds 5
@@ -509,7 +517,7 @@ run_crosscheck() {
         --concurrency-sweep 16,32,64,128,256
         --top-k 5
         --goal throughput
-        --telemetry auto
+        --telemetry "${TELEMETRY_MODE}"
         --workload-profile "${profile}"
         --override-num-requests 272
         --warmup-requests "${WARMUP_REQUESTS}"
