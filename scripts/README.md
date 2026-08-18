@@ -10,6 +10,7 @@ Repository helper scripts.
 * `audit_guidellm_results.py`: validates GuideLLM 0.7.3 request, metric, percentile, and concurrency coverage artifacts.
 * `analyze_recommendation_search.py`: replays equal budget searches and supported recommendation ablations.
 * `slurm/run_research_closure_h200.sbatch`: resumable research closure campaign with model and backend scopes. Use `SERVE_OPTIMIZE_MODEL_SCOPE=wide` for the multi family matrix, including the Qwen3.8 27B release.
+* Set `SERVE_OPTIMIZE_DRIVER_LIB_ROOT` to the node's matching NVIDIA user libraries when the system NVML library does not match the loaded kernel driver.
 
 Run scripts from the repository root.
 
