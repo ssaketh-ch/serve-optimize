@@ -39,6 +39,9 @@ LOGS="${CLOSURE_ROOT}/logs"
 SOURCE_ROOT="${CLOSURE_ROOT}/source/worktree"
 POSTPROCESS="${CLOSURE_ROOT}/postprocess"
 HF_HOME="${HF_HOME:-/home/saketh-msc/quantization/models}"
+if [[ -n "${DRIVER_LIB_ROOT}" ]]; then
+    export LD_LIBRARY_PATH="${DRIVER_LIB_ROOT}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 TINY_MODEL="Qwen/Qwen3-0.6B"
 TINY_REVISION="c1899de289a04d12100db370d81485cdf75e47ca"
 SEVEN_B_MODEL="Qwen/Qwen2.5-7B-Instruct"
