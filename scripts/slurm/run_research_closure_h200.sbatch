@@ -279,6 +279,15 @@ fi
 
 preflight_status=0
 [[ -z "${DRIVER_LIB_ROOT}" || -s "${CLOSURE_ROOT}/environment/driver-libraries.sha256" ]] || preflight_status=1
+[[ -f "${SOURCE_ROOT}/pyproject.toml" ]] || preflight_status=1
+[[ -d "${SOURCE_ROOT}/src/serve_optimize" ]] || preflight_status=1
+for manifest in \
+    configs/workloads/saturation-short.json \
+    configs/workloads/saturation-medium.json \
+    configs/workloads/saturation-long-prefill.json \
+    configs/workloads/oasst1-root-en-64.json; do
+    [[ -f "${SOURCE_ROOT}/${manifest}" ]] || preflight_status=1
+done
 expected_models=()
 model_snapshot_path() {
     local model="$1"
