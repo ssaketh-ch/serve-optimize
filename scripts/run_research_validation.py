@@ -57,7 +57,14 @@ def _profile(root: Path, name: str) -> WorkloadProfile:
     manifest = root / "configs" / "workloads" / "oasst1-root-en-64.json"
     profile = load_workload_profile(manifest_path=manifest)
     if name == "real-chat":
-        return profile
+        prompts = profile.prompts[:48]
+        return replace(
+            profile,
+            profile_name="real-chat-oasst1-root-en-train-v1",
+            prompts=prompts,
+            num_requests=max(96, len(prompts)),
+            notes=[*profile.notes, "Deterministic training split: prompt indices 0 through 47."],
+        )
     if name == "real-chat-holdout":
         prompts = profile.prompts[48:]
         if not prompts:
@@ -333,6 +340,117 @@ def run_cell(
     _write_jsonl(cell_root / "measurement_index.jsonl", runner.rows)
 
 
+def run_holdout_cell(
+    *,
+    out: Path,
+    root: Path,
+    label: str,
+    model: str,
+    revision: str,
+    backend: str,
+    hf_home: Path,
+    pool_limit: int,
+    trials: int,
+) -> None:
+    train_profile = _profile(root, "real-chat")
+    holdout_profile = _profile(root, "real-chat-holdout")
+    train_root = out / f"{_safe_name(label)}-{_safe_name(backend)}-real-chat"
+    search_results_path = train_root / "search_results.json"
+    oracle_path = train_root / "measured_oracle.json"
+    if not search_results_path.is_file() or not oracle_path.is_file():
+        raise SystemExit(f"Training search artifacts are missing for holdout cell: {train_root}")
+    search_results = json.loads(search_results_path.read_text(encoding="utf-8"))
+    oracle = json.loads(oracle_path.read_text(encoding="utf-8"))
+    selected_by_method: dict[str, list[object]] = {}
+    selected_ids: list[str] = []
+    for row in search_results:
+        method = str(row.get("method"))
+        candidate_id = str(row.get("selected_candidate_id"))
+        selected_by_method.setdefault(method, []).append(candidate_id)
+        if candidate_id not in selected_ids:
+            selected_ids.append(candidate_id)
+    oracle_id = str(oracle["candidate_id"])
+    if oracle_id not in selected_ids:
+        selected_ids.append(oracle_id)
+    model_path = _model_path(hf_home, model, revision)
+    hardware = detect_hardware()
+    adapter = _adapter_for_backend(backend)
+    metadata = infer_model_capability_metadata(str(model_path), allow_remote_download=False)
+    generation = _generate_managed_candidate_generation(
+        backend=backend,
+        model=str(model_path),
+        goal=Goal.PERFORMANCE,
+        limit=pool_limit,
+        hardware=hardware,
+        model_metadata=metadata,
+        backend_metadata=_backend_metadata(adapter, backend),
+        vllm_argument_capabilities=_backend_argument_capabilities(adapter, backend),
+        sglang_argument_capabilities=_backend_sglang_argument_capabilities(adapter, backend),
+        workload_profile=train_profile,
+    )
+    candidates = {config.id: config for config in _baseline_first(generation.candidates)}
+    missing = [candidate_id for candidate_id in selected_ids if candidate_id not in candidates]
+    if missing:
+        raise SystemExit(f"Training selected candidates are absent from holdout pool: {missing}")
+    cell_root = out / f"{_safe_name(label)}-{_safe_name(backend)}-real-chat-holdout"
+    cell_root.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        cell_root / "cell_manifest.json",
+        {
+            "schema_version": "research-validation-holdout-cell/v1",
+            "model_label": label,
+            "model": model,
+            "model_revision": revision,
+            "model_snapshot": str(model_path),
+            "backend": backend,
+            "workload": "real-chat-holdout",
+            "selection_source": str(train_root),
+            "selection_is_holdout_free": True,
+            "holdout_prompt_indices": "48 through 63",
+            "workload_profile": holdout_profile,
+            "candidate_pool_limit": pool_limit,
+            "candidate_pool_count": len(candidates),
+            "selected_candidate_ids": selected_ids,
+            "training_oracle_candidate_id": oracle_id,
+            "trials": trials,
+            "fresh_measurements": True,
+            "evidence_reuse": False,
+            "hardware": hardware,
+            "backend_metadata": _backend_metadata(adapter, backend),
+        },
+    )
+    runner = CellRunner(
+        cell_root=cell_root,
+        backend=backend,
+        model_path=model_path,
+        model_id=model,
+        profile=holdout_profile,
+        trials=trials,
+    )
+    holdout_scores: dict[str, float] = {}
+    for ordinal, candidate_id in enumerate(selected_ids):
+        holdout_scores[candidate_id] = runner.evaluate(
+            candidates[candidate_id],
+            method="holdout-evaluation",
+            seed=0,
+            ordinal=ordinal,
+        )
+    _write_json(
+        cell_root / "holdout_evaluations.json",
+        {
+            "selection_source": str(train_root),
+            "selection_is_holdout_free": True,
+            "selected_by_method": selected_by_method,
+            "training_oracle_candidate_id": oracle_id,
+            "scores_output_tokens_per_sec": {
+                candidate_id: None if score == float("-inf") else score
+                for candidate_id, score in holdout_scores.items()
+            },
+        },
+    )
+    _write_jsonl(cell_root / "measurement_index.jsonl", runner.rows)
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
@@ -380,19 +498,32 @@ def main() -> None:
         model, revision = MODEL_RECORDS[label]
         for backend in args.backend:
             for workload in args.workload:
-                run_cell(
-                    out=args.out,
-                    root=args.root,
-                    label=label,
-                    model=model,
-                    revision=revision,
-                    backend=backend,
-                    workload=workload,
-                    hf_home=args.hf_home,
-                    pool_limit=args.pool_limit,
-                    budget=args.budget,
-                    trials=args.trials,
-                )
+                if workload == "real-chat-holdout":
+                    run_holdout_cell(
+                        out=args.out,
+                        root=args.root,
+                        label=label,
+                        model=model,
+                        revision=revision,
+                        backend=backend,
+                        hf_home=args.hf_home,
+                        pool_limit=args.pool_limit,
+                        trials=args.trials,
+                    )
+                else:
+                    run_cell(
+                        out=args.out,
+                        root=args.root,
+                        label=label,
+                        model=model,
+                        revision=revision,
+                        backend=backend,
+                        workload=workload,
+                        hf_home=args.hf_home,
+                        pool_limit=args.pool_limit,
+                        budget=args.budget,
+                        trials=args.trials,
+                    )
 
 
 if __name__ == "__main__":

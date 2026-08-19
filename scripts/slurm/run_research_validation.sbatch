@@ -72,8 +72,9 @@ PYTHON="${VLLM_ENV}/bin/python"
 mapfile -t managed_runs < <(find "${VALIDATION_ROOT}/results" -type f -name managed_run.json -exec dirname {} \; | sort -u)
 (( ${#managed_runs[@]} > 0 ))
 (( "$(find "${VALIDATION_ROOT}/results" -type f -name cell_manifest.json | wc -l)" == 24 ))
-(( "$(find "${VALIDATION_ROOT}/results" -type f -name search_results.json | wc -l)" == 24 ))
-(( "$(find "${VALIDATION_ROOT}/results" -type f -name measured_oracle.json | wc -l)" == 24 ))
+(( "$(find "${VALIDATION_ROOT}/results" -type f -name search_results.json | wc -l)" == 18 ))
+(( "$(find "${VALIDATION_ROOT}/results" -type f -name measured_oracle.json | wc -l)" == 18 ))
+(( "$(find "${VALIDATION_ROOT}/results" -type f -name holdout_evaluations.json | wc -l)" == 6 ))
 
 "${PYTHON}" scripts/audit_benchmark_matrix_records.py \
     "${managed_runs[@]}" \
@@ -97,6 +98,8 @@ vllm_version=${vllm_version}
 sglang_version=${sglang_version}
 guidellm_version=${guidellm_version}
 cell_count=24
+search_cell_count=18
+holdout_cell_count=6
 managed_run_count=${#managed_runs[@]}
 search_method_set=backend-default,serve-optimize,random,grid,bayesian
 random_and_bayesian_seed_count=3

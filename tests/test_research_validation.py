@@ -1,4 +1,6 @@
-from scripts.run_research_validation import _baseline_first, _search_pool
+from pathlib import Path
+
+from scripts.run_research_validation import _baseline_first, _profile, _search_pool
 from serve_optimize.schemas import ServingConfig
 
 
@@ -21,3 +23,12 @@ def test_validation_search_pool_keeps_backend_default_first() -> None:
     ordered = _baseline_first([_config("candidate", batch=8), _config("default", baseline=True)])
     assert [item.id for item in ordered] == ["default", "candidate"]
     assert _search_pool(ordered)[0].baseline is True
+
+
+def test_oasst_validation_split_keeps_holdout_out_of_search() -> None:
+    root = Path(__file__).resolve().parents[1]
+    train = _profile(root, "real-chat")
+    holdout = _profile(root, "real-chat-holdout")
+    assert len(train.prompts) == 48
+    assert len(holdout.prompts) == 16
+    assert set(train.prompts).isdisjoint(holdout.prompts)

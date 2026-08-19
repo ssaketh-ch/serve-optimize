@@ -15,7 +15,7 @@ Working title:
 * Repeatability claim: pending matched repeated cells. The 46 H200 cells are heterogeneous and cannot be treated as replications.
 * RTX PRO 6000 publication claim: historical recommendation artifacts remain operational evidence, but the trial records predate six current acceptance fields and are excluded from current inferential tables.
 
-The scheduled validation phase is intentionally bounded. It executes fresh random, grid, Bayesian, and Serve Optimize candidate order searches against a common candidate pool, measures an independent oracle, repeats each candidate three times, and evaluates both the pinned OASST1 root English prompts and a deterministic holdout split. Hardware awareness, capability registry removal, energy scoring removal, and latency guardrail removal remain unsupported unless a later run produces their counterfactual candidate pools and fresh measurements.
+The scheduled validation phase is intentionally bounded. It executes fresh random, grid, Bayesian, and Serve Optimize candidate order searches against a common candidate pool, measures an independent oracle, repeats each candidate three times, and evaluates a pinned OASST1 training split followed by a holdout split that is never used for selection. Hardware awareness, capability registry removal, energy scoring removal, and latency guardrail removal remain unsupported unless a later run produces their counterfactual candidate pools and fresh measurements.
 
 ## Abstract
 
