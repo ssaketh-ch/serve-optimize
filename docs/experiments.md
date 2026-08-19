@@ -79,6 +79,10 @@ Every reported matrix cell should include a backend default control and a conser
 
 The current artifacts do not yet establish superiority over all of these baselines. That claim remains pending.
 
+The bounded validation runner in `scripts/run_research_validation.py` executes the pending throughput search comparison on fresh measurements. It uses an eight candidate pool, a four candidate budget, a fresh backend default control, three random seeds for random and Bayesian search, an independent measured oracle, and three benchmark trials per candidate. The validation subset covers Qwen3 0.6B, Mistral 7B, Qwen3.8 27B, vLLM, SGLang, short, long prefill, the pinned OASST1 root English set, and a deterministic OASST1 holdout. Evidence reuse and resume based failure memory are disabled for these comparisons so every search observation is a fresh server and request measurement.
+
+The executable search results are stored separately from the wide coverage matrix. A search result is publishable only when its cell manifest, candidate measurement index, measured oracle, raw managed run audit, and checksum manifest all pass. The runner records unsupported ablations explicitly instead of presenting replayed counterfactuals as executed experiments.
+
 Equal budget replay must use the common probe rung measured for every candidate. Do not mix probe, measure, and validation rung scores. Label the Serve Optimize series as a candidate order replay, keep the oracle post hoc, and retain the fixed measured pool limitation in every output.
 
 ## Recommendation Ablations
